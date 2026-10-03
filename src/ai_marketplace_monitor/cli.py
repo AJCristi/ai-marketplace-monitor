@@ -267,6 +267,7 @@ def main(
                             config_files=monitor.config_files,
                             log_handler=log_broadcast_handler,
                             request_search=monitor.request_search,
+                            rechecks=monitor.rechecks,
                         ),
                         logger=logger,
                     )

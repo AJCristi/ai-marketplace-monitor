@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ai_marketplace_monitor.monitor import MarketplaceMonitor
+from ai_marketplace_monitor.recheck import RecheckQueue
 from ai_marketplace_monitor.utils import SleepStatus
 from ai_marketplace_monitor.webui.auth import CSRF_HEADER, AuthConfig, hash_password
 from ai_marketplace_monitor.webui.config_api import ConfigFileService
@@ -21,6 +22,8 @@ from ai_marketplace_monitor.webui.server import AuthState, WebUIConfig, create_a
 def test_request_runs_again_with_unchanged_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monitor: Any = object.__new__(MarketplaceMonitor)
     monitor.search_requested = threading.Event()
+    monitor.rechecks = RecheckQueue()
+    monitor.recheck_after = 0.0
     monitor.keyboard_monitor = None
     monitor.defer_login_until_credentials = False
     monitor.config = SimpleNamespace()
@@ -188,6 +191,8 @@ def test_ai_reload_replaces_previous_agents(monkeypatch: pytest.MonkeyPatch) -> 
 def test_fixed_times_do_not_repeat_initial_search(monkeypatch: pytest.MonkeyPatch) -> None:
     monitor: Any = object.__new__(MarketplaceMonitor)
     monitor.search_requested = threading.Event()
+    monitor.rechecks = RecheckQueue()
+    monitor.recheck_after = 0.0
     monitor.keyboard_monitor = None
     monitor.defer_login_until_credentials = False
     monitor.config = SimpleNamespace()

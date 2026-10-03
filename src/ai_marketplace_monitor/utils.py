@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import threading
 import time
 from dataclasses import asdict, dataclass, fields
 from enum import Enum
@@ -58,6 +59,7 @@ class SleepStatus(Enum):
     NOT_DISRUPTED = 0
     BY_KEYBOARD = 1
     BY_FILE_CHANGE = 2
+    BY_EVENT = 3
 
 
 def aimm_event(kind: str, **fields: Any) -> Dict[str, Any]:
@@ -77,6 +79,8 @@ class CacheType(Enum):
     AI_INQUIRY = "ai-inquiries"
     USER_NOTIFIED = "user-notifications"
     COUNTERS = "counters"
+    MATCHED = "matches"
+    MATCH_STATE = "match-state"
 
 
 class CounterItem(Enum):
@@ -538,7 +542,10 @@ class ChangeHandler(FileSystemEventHandler):
 
 
 def doze(
-    duration: int, files: List[Path] | None = None, keyboard_monitor: KeyboardMonitor | None = None
+    duration: int,
+    files: List[Path] | None = None,
+    keyboard_monitor: KeyboardMonitor | None = None,
+    wake_event: threading.Event | None = None,
 ) -> SleepStatus:
     """Sleep for a specified duration while monitoring the change of files.
 
@@ -566,7 +573,11 @@ def doze(
         while time.time() - start_time < duration:
             if event_handler.changed:
                 return SleepStatus.BY_FILE_CHANGE
-            time.sleep(1)
+            if wake_event is not None:
+                if wake_event.wait(timeout=1):
+                    return SleepStatus.BY_EVENT
+            else:
+                time.sleep(1)
             if keyboard_monitor and not keyboard_monitor.is_sleeping():
                 return SleepStatus.BY_KEYBOARD
         return SleepStatus.NOT_DISRUPTED

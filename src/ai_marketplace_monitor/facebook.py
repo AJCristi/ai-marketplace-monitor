@@ -590,9 +590,10 @@ class FacebookMarketplace(Marketplace):
         item_config: ItemConfig,
         price: str | None = None,
         title: str | None = None,
+        force_refresh: bool = False,
     ) -> Tuple[Listing, bool]:
         assert post_url.startswith("https://www.facebook.com")
-        details = Listing.from_cache(post_url)
+        details = None if force_refresh else Listing.from_cache(post_url)
         if (
             details is not None
             and (price is None or details.price == price)

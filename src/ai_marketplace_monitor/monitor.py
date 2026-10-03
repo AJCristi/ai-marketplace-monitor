@@ -1,6 +1,8 @@
+import random
 import sys
 import threading
 import time
+from datetime import datetime
 from logging import Logger
 from pathlib import Path
 from typing import Any, ClassVar, Hashable, List
@@ -17,9 +19,12 @@ from .ai import AIBackend, AIResponse
 from .config import Config, supported_ai_backends, supported_marketplaces
 from .listing import Listing
 from .marketplace import Marketplace, TItemConfig, TMarketplaceConfig
+from .matches import load_matches, rating_fields, record_match
 from .notification import NotificationStatus
+from .recheck import RecheckQueue, price_filter_reason
 from .user import User
 from .utils import (
+    CacheType,
     CounterItem,
     KeyboardMonitor,
     SleepStatus,
@@ -64,6 +69,8 @@ class MarketplaceMonitor:
         self.browser: Browser | None = None
         self.logger = logger
         self.search_requested = threading.Event()
+        self.rechecks = RecheckQueue()
+        self.recheck_after = 0.0
 
     def request_search(self: "MarketplaceMonitor") -> None:
         """Ask the monitor thread to run every enabled search at its next safe point."""
@@ -188,10 +195,16 @@ class MarketplaceMonitor:
                     self.logger.debug(f"Found duplicated result for {listing}")
                 continue
             # if everyone has been notified
-            if all(
-                User(self.config.user[user], self.logger).notification_status(listing)
-                == NotificationStatus.NOTIFIED
-                for user in users_to_notify
+            if (
+                users_to_notify
+                and cache.get(
+                    (CacheType.MATCHED.value, listing.marketplace, listing.id, item_config.name)
+                )
+                and all(
+                    User(self.config.user[user], self.logger).notification_status(listing)
+                    == NotificationStatus.NOTIFIED
+                    for user in users_to_notify
+                )
             ):
                 if self.logger:
                     self.logger.info(
@@ -265,6 +278,21 @@ class MarketplaceMonitor:
                 continue
             new_listings.append(listing)
             listing_ratings.append(res)
+            is_new = record_match(cache, listing, item_config.name, res)
+            if self.logger and is_new:
+                self.logger.info(
+                    "Match saved: %s",
+                    listing.title,
+                    extra=aimm_event(
+                        "match_recorded",
+                        item=item_config.name,
+                        marketplace=listing.marketplace,
+                        listing_id=listing.id,
+                        title=listing.title,
+                        price=listing.price,
+                        score=rating_fields(res)["score"],
+                    ),
+                )
 
         p = inflect.engine()
         if self.logger:
@@ -588,6 +616,24 @@ class MarketplaceMonitor:
                 # assert next_job is not None
                 assert next_job.next_run is not None
                 idle_seconds = schedule.idle_seconds() or 0
+                if idle_seconds <= 0:
+                    schedule.run_pending()
+                    continue
+                if self.rechecks.pending() and time.monotonic() >= self.recheck_after:
+                    # A due search always runs first. Execute one listing, then check
+                    # the schedule and configuration again before taking another.
+                    if (
+                        calculate_file_hash(self.config_files) != self.config_hash
+                        or self.search_requested.is_set()
+                    ):
+                        self.search_requested.clear()
+                        schedule.clear()
+                        break
+                    self.process_recheck()
+                    continue
+                self.rechecks.wake.clear()
+                if self.rechecks.pending():
+                    idle_seconds = min(idle_seconds, max(1, self.recheck_after - time.monotonic()))
                 if idle_seconds > 60:
                     # the sleep time might not be enough, causing this message
                     # to be sent repeatedly. Having a idle_seconds > 60 helps
@@ -599,9 +645,10 @@ class MarketplaceMonitor:
 
                 # sleep at most 1 hr, and print updated "next job" message
                 res = doze(
-                    min(max(5, int(idle_seconds)), 60 * 60),
+                    min(max(1, int(idle_seconds)), 60 * 60),
                     self.config_files,
                     self.keyboard_monitor,
+                    self.rechecks.wake,
                 )
                 if res == SleepStatus.BY_FILE_CHANGE or self.search_requested.is_set():
                     # if configuration file has been changed, clear all scheduled jobs and restart
@@ -620,6 +667,176 @@ class MarketplaceMonitor:
 
                 self.handle_pause()
                 schedule.run_pending()
+
+    def process_recheck(self) -> None:
+        """Execute at most one queued listing, on the synchronous monitor thread."""
+        work = self.rechecks.take()
+        if work is None:
+            return
+        job_id, identity, target, refresh = work
+        originals = [
+            row
+            for row in load_matches(cache)
+            if row["marketplace"] == identity["marketplace"]
+            and row["listing_id"] == identity["listing_id"]
+        ]
+        original = next(
+            (row for row in originals if row["item"] == identity.get("original_item")), None
+        )
+        original = original or next(iter(sorted(originals, key=lambda row: row["found_at"])), None)
+        item = target or (original["item"] if original else "")
+        result: dict[str, Any] = dict(
+            **identity,
+            item=item,
+            status="error",
+            score=None,
+            old_score=original["score"] if original else None,
+            old_price=(original["current_price"] or original["price"]) if original else None,
+            reason="",
+            at=datetime.now().isoformat(timespec="seconds"),
+        )
+        listing = None
+        rating = None
+        try:
+            assert self.config is not None
+            if original is None:
+                raise ValueError("This match is no longer in the cache")
+            item_config = self.config.item.get(item)
+            if item_config is None or item_config.enabled is False:
+                raise ValueError("The saved search is missing or disabled")
+            market_name = item_config.marketplace or identity["marketplace"]
+            marketplace_config = self.config.marketplace.get(market_name)
+            marketplace = self.active_marketplaces.get(market_name)
+            if (
+                marketplace_config is None
+                or marketplace_config.enabled is False
+                or marketplace is None
+            ):
+                raise ValueError("The marketplace is not active")
+            if (marketplace_config.market_type or "facebook") != "facebook":
+                raise ValueError("Re-check is only available for Facebook listings")
+            listing, _ = marketplace.get_listing_details(
+                f"https://www.facebook.com/marketplace/item/{identity['listing_id']}/",
+                item_config,
+                force_refresh=refresh,
+            )
+            listing.name = item
+            listing.marketplace = identity["marketplace"]
+            result["price"] = listing.price
+            price_reason = price_filter_reason(listing.price, item_config, marketplace_config)
+            if price_reason:
+                result.update(status="filtered_out", reason=price_reason)
+            elif not marketplace.check_listing(listing, item_config):
+                result.update(
+                    status="filtered_out",
+                    reason="Does not pass the current keyword, location or seller filters",
+                )
+            else:
+                rating = self.evaluate_by_ai(listing, item_config, marketplace_config)
+                threshold = (item_config.rating or marketplace_config.rating or [3])[
+                    0 if item_config.searched_count == 0 else -1
+                ]
+                result.update(
+                    rating_fields(rating),
+                    threshold=threshold,
+                    status="passed" if rating.score >= threshold else "below_threshold",
+                )
+        except Exception as error:
+            # Browser/AI exceptions can contain credentials or URLs with tokens.
+            # Detailed diagnostics belong to the existing redacted log stream.
+            result.update(
+                status="error",
+                reason=f"Could not re-check ({type(error).__name__}). Check the monitor activity and browser login.",
+            )
+        if original is not None:
+            key = (
+                CacheType.MATCHED.value,
+                identity["marketplace"],
+                identity["listing_id"],
+                original["item"],
+            )
+            with cache.transact():
+                saved = cache.get(key) or {
+                    name: original.get(name)
+                    for name in (
+                        "found_at",
+                        "price",
+                        "score",
+                        "conclusion",
+                        "comment",
+                        "ai_name",
+                        "source",
+                    )
+                }
+                saved.update(
+                    rechecked_at=result["at"],
+                    last_status=result["status"],
+                    old_score=result["old_score"],
+                    old_price=result["old_price"],
+                    reason=result["reason"],
+                    checked_item=item,
+                    threshold=result.get("threshold"),
+                )
+                if listing is not None:
+                    saved["current_price"] = listing.price
+                # Ratings belong to a search. Checking elsewhere must not overwrite
+                # the original search's rating with an unrelated evaluation.
+                if rating is not None and item == original["item"]:
+                    saved.update(rating_fields(rating))
+                cache.set(key, saved, tag=CacheType.MATCHED.value)
+            if (
+                item != original["item"]
+                and result["status"] == "passed"
+                and listing is not None
+                and rating is not None
+            ):
+                record_match(cache, listing, item, rating, source="recheck")
+                target_key = (
+                    CacheType.MATCHED.value,
+                    identity["marketplace"],
+                    identity["listing_id"],
+                    item,
+                )
+                with cache.transact():
+                    target_saved = cache.get(target_key)
+                    target_saved.update(
+                        rating_fields(rating),
+                        current_price=listing.price,
+                        rechecked_at=result["at"],
+                        last_status="passed",
+                        checked_item=item,
+                    )
+                    cache.set(target_key, target_saved, tag=CacheType.MATCHED.value)
+        if listing is not None and original is not None:
+            # The detail cache is shared with legacy CSV joins. A check against
+            # another search must not relabel its original search in that cache.
+            listing.name = original["item"]
+            listing.to_cache(listing.post_url, cache)
+        job = self.rechecks.finish(job_id, result)
+        self.recheck_after = time.monotonic() + random.uniform(5, 15)
+        if self.logger:
+            self.logger.info(
+                "Re-check %s: %s",
+                identity["listing_id"],
+                result["status"],
+                extra=aimm_event("recheck_result", job_id=job_id, **result),
+            )
+            if job["state"] in ("done", "stopped"):
+                counts = {
+                    name: sum(row["status"] == name for row in job["results"])
+                    for name in (
+                        "passed",
+                        "below_threshold",
+                        "filtered_out",
+                        "unavailable",
+                        "error",
+                    )
+                }
+                self.logger.info(
+                    "Re-check %s",
+                    job["state"],
+                    extra=aimm_event("recheck_done", job_id=job_id, counts=counts),
+                )
 
     def stop_monitor(self: "MarketplaceMonitor") -> None:
         """Stop the monitor."""

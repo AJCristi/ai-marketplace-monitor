@@ -1,5 +1,6 @@
 import initToml, {parse, edit} from './vendor/toml-edit-js/shims.js';
 import {FORM_SCHEMAS, BUILT_IN_REGIONS} from './fields.js';
+import {createMatchesView} from './matches.js';
 import {list, own, filled, mergeConfig, itemValue, marketplaceFor, scheduleLabel, CHANNELS, userChannels, resolvedUser, available, matchRecord, mergeRecords, safeUrl, renameSection} from './console-model.js';
 
 const $ = selector => document.querySelector(selector);
@@ -15,6 +16,7 @@ const state = {
   connected:false, announceCount:0, disconnectedAt:null, following:true, pending:0, frozen:[], expanded:new Set(),
   credentials:null, credentialsId:0, monitorIssue:null, incidentId:0, loginId:0, loginUntil:0, feedTimer:null, announceTimer:null, pollBusy:false,
 };
+let matchesView;
 let theme=localStorage.getItem('aimm-theme')||'system';
 function applyTheme(){document.querySelectorAll('.c').forEach(el=>{el.classList.toggle('dark',theme==='dark');el.classList.toggle('light',theme==='light');});$('#theme').setAttribute('aria-label','Theme: '+theme);$('#theme').title='Theme: '+theme;}
 $('#theme').onclick=()=>{theme=['system','light','dark'][(['system','light','dark'].indexOf(theme)+1)%3];localStorage.setItem('aimm-theme',theme);applyTheme();};applyTheme();
@@ -179,7 +181,7 @@ function renderSidebar() {
   const {parts} = routeParts(); const settings = parts[0] === 'settings';
   $('#monitor-nav').classList.toggle('on',!settings); $('#settings-nav').classList.toggle('on',settings);
   $('#sidebar').setAttribute('aria-label', settings ? 'Settings sections' : 'Saved searches');
-  const signature = JSON.stringify([state.route,state.config,state.form?.name,state.capacity]);
+  const signature = JSON.stringify([state.route,state.config,state.form?.name,state.capacity,state.matchSummary?.groups,state.matchSummary?.library_total]);
   if ($('#sidebar').dataset.signature !== signature) {
     $('#sidebar').dataset.signature = signature;
     if (settings) {
@@ -187,6 +189,18 @@ function renderSidebar() {
       $('#sidebar').innerHTML = '<div class="sh">Settings</div>' + rows.map(([key,title,summary]) => `<a class="it ${parts[1]===key?'on':''}" href="#/settings/${key}" ${parts[1]===key?'aria-current="page"':''}><div class="t">${title}</div><div class="s">${esc(summary)}</div></a>`).join('');
     } else {
       $('#sidebar').innerHTML = `<a class="it ${parts[1]==='all'?'on':''}" href="#/monitor/all"><span class="b">All activity</span><span class="m d" style="float:right">last ${state.capacity.toLocaleString()} events</span></a><div class="sh">Saved searches · ${Object.keys(state.config.item || {}).length}</div>` + Object.entries(state.config.item || {}).map(([name,item]) => `<a class="it ${parts[2]===name || decodeName(parts[2]||'')===name ? 'on':''}" href="${itemRoute(name)}"><div class="row sb"><span class="t m ${item.enabled===false?'d':''}">${esc(name)}</span><span data-item-badge="${esc(name)}" class="m xs d">${item.enabled===false?'disabled':state.form?.name===name?'editing':''}</span></div><div class="s">${esc(searchSummary(name))}</div></a>`).join('') + '<p class="sidebar-note">* marks a Marketplace or built-in default. Earlier files also contribute values. “New” counts come from recent activity.</p>';
+    }
+  }
+  if (!settings) {
+    if (!$('#matches-nav')) {
+      const link=document.createElement('a');link.id='matches-nav';link.href='#/monitor/matches';link.className='it';
+      $('#sidebar').firstElementChild.after(link);
+    }
+    $('#matches-nav').classList.toggle('on',parts[1]==='matches');
+    $('#matches-nav').innerHTML=`<div class="row sb"><span class="b">Matches</span><span class="m">${state.matchSummary?.library_total??'—'}${state.matchSummary?.new_count?' · '+state.matchSummary.new_count+' new':''}</span></div><div class="s">kept on disk · survives restarts</div>`;
+    for(const link of document.querySelectorAll('#sidebar a.it:not(#matches-nav)')){
+      const name=link.querySelector('[data-item-badge]')?.dataset.itemBadge;
+      if(name){const count=state.matchSummary?.groups?.find(group=>group.item===name)?.count??0;const summary=link.querySelector('.s');summary.textContent=`${count} matches · ${searchSummary(name)}`;}
     }
   }
   for (const badge of document.querySelectorAll('[data-item-badge]')) {
@@ -335,6 +349,7 @@ function connectStream() {
     if (data.type==='log') {
       const last = state.records.at(-1)?.id;
       acceptRecords([data.record]);
+      matchesView.onRecord(data.record);
       if (last != null && data.record.id > last+1 && !snapshot.busy) {snapshot.busy=true;try{await snapshot();}finally{snapshot.busy=false;}}
     }
   };
@@ -806,6 +821,7 @@ function render() {
   else if(parts[1]==='item'&&parts[3]==='edit')mountForm('item',decodeName(parts[2]));
   else if(parts[1]==='item')renderActivity(decodeName(parts[2]));
   else if(parts[1]==='all')renderActivity();
+  else if(parts[1]==='matches')matchesView.render();
   else{
     const names=Object.keys(state.config.item||{});
     const sample=names.length===1&&names[0]==='example'&&list(state.config.item.example.search_phrases).join(',')==='gopro hero'&&Object.keys(state.config.item.example).every(key=>key==='search_phrases');
@@ -815,9 +831,11 @@ function render() {
   renderSidebar();renderConflict();
 }
 async function bootstrap() {
+  matchesView ||= createMatchesView({state,json,pageHeader,exportCsv,toast,renderSidebar,searchSummary});
   state.status=await json('/api/status');state.open=state.status.open;$('#app').hidden=false;
   if(!state.initialized){await loadConfig();state.initialized=true;render();await snapshot();}
   connectStream();updateStatus();
+  matchesView.summary();
 }
 try{await initToml({module_or_path:new URL('./vendor/toml-edit-js/index_bg.wasm',import.meta.url)});await showLogin();}
 catch(error){$('#app').hidden=false;$('#pane').innerHTML=pageHeader('Dashboard could not load')+`<div class="empty"><p class="err">${esc(error.message)}</p><button class="btn" id="retry-load">Reload</button></div>`;$('#retry-load').onclick=()=>location.reload();}

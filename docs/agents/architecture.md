@@ -26,6 +26,7 @@ Paths below are relative to `src/ai_marketplace_monitor/`.
 | Web authentication | `webui/auth.py`, `webui/config_auth.py` | Password/session handling, rate limiting, credential extraction |
 | Console | `webui/static/app.js`, `console-model.js`, `fields.js`, `index.html`, `app.css` | UI, event model, form schemas and defaults, layout and styling |
 | Log and export data | `webui/log_handler.py`, `webui/found_export.py` | Thread-to-event-loop log bridge, redacted records, cached-listing CSV serialization |
+| Matches library | `matches.py`, `recheck.py`, `webui/static/matches.js` | Persistent per-search matches, shared personal state, and monitor-thread re-check jobs; see [Matches](../matches.md) |
 
 ## Configuration is shared across layers
 

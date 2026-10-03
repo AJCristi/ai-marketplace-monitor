@@ -11,11 +11,13 @@ import asyncio
 import logging
 import mimetypes
 import os
+import re
 import secrets
 import socket
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -26,6 +28,7 @@ from fastapi import (
     FastAPI,
     Form,
     HTTPException,
+    Query,
     Request,
     Response,
     WebSocket,
@@ -34,6 +37,8 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from ..matches import load_matches, query_matches, update_state
+from ..recheck import RecheckQueue
 from ..utils import cache
 from .auth import (
     CSRF_COOKIE,
@@ -66,6 +71,7 @@ class WebUIConfig:
     config_files: List[Path] = field(default_factory=list)
     log_handler: LogBroadcastHandler | None = None
     request_search: Callable[[], None] | None = None
+    rechecks: RecheckQueue | None = None
 
 
 @dataclass
@@ -494,6 +500,130 @@ def create_app(
     # iterates the sync generator there too, so the blocking cache scan never
     # runs on the event loop. The body streams row-by-row rather than buffering
     # the whole CSV, keeping memory bounded for large exports.
+    @app.get("/api/matches")
+    def get_matches(
+        item: str | None = None,
+        min_score: int | None = Query(default=None, ge=1, le=5),
+        status: str = Query(default="all", pattern="^(all|shortlisted|contacted|dismissed)$"),
+        include_dismissed: bool = False,
+        q: str = Query(default="", max_length=500),
+        sort: str = Query(default="newest", pattern="^(newest|price|score)$"),
+        limit: int = Query(default=200, ge=1, le=1000),
+        cursor: int = Query(default=0, ge=0),
+        since: datetime | None = None,
+        _: str = Depends(require_session),
+    ) -> Dict[str, Any]:
+        return query_matches(
+            cache,
+            item=item,
+            min_score=min_score,
+            status=status,
+            include_dismissed=include_dismissed,
+            q=q,
+            sort=sort,
+            limit=limit,
+            cursor=cursor,
+            since=since,
+        )
+
+    def require_match(marketplace: str, listing_id: str) -> list[dict[str, Any]]:
+        rows = [
+            row
+            for row in load_matches(cache)
+            if row["marketplace"] == marketplace and row["listing_id"] == listing_id
+        ]
+        if not rows:
+            raise HTTPException(status_code=404, detail="Match not found")
+        return rows
+
+    @app.put("/api/matches/{marketplace}/{listing_id}/state")
+    def put_match_state(
+        marketplace: str,
+        listing_id: str,
+        body: Dict[str, Any],
+        _: str = Depends(require_session),
+        __: None = Depends(require_csrf),
+    ) -> Dict[str, Any]:
+        require_match(marketplace, listing_id)
+        try:
+            return update_state(cache, marketplace, listing_id, body)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from None
+
+    def recheck_queue() -> RecheckQueue:
+        if config.rechecks is None:
+            raise HTTPException(
+                status_code=503, detail="The monitor is not available for re-checks"
+            )
+        return config.rechecks
+
+    @app.post("/api/matches/recheck")
+    def enqueue_recheck(
+        body: Dict[str, Any], _: str = Depends(require_session), __: None = Depends(require_csrf)
+    ) -> Dict[str, Any]:
+        queue = recheck_queue()
+        listings, item, refresh = body.get("listings"), body.get("item"), body.get("refresh", True)
+        if (
+            not isinstance(listings, list)
+            or not 1 <= len(listings) <= 25
+            or type(refresh) is not bool
+            or (item is not None and (not isinstance(item, str) or not item or len(item) > 200))
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Supply 1-25 listings, an optional search name, and a boolean refresh",
+            )
+        validated = []
+        existing = load_matches(cache)
+        for entry in listings:
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("marketplace"), str)
+                or not isinstance(entry.get("listing_id"), str)
+                or not re.fullmatch(r"[0-9]{1,40}", entry["listing_id"])
+            ):
+                raise HTTPException(status_code=400, detail="Invalid listing identity")
+            rows = [
+                row
+                for row in existing
+                if row["marketplace"] == entry["marketplace"]
+                and row["listing_id"] == entry["listing_id"]
+            ]
+            if not rows:
+                raise HTTPException(status_code=404, detail="Match not found")
+            original_item = entry.get("original_item")
+            if original_item is not None and not any(row["item"] == original_item for row in rows):
+                raise HTTPException(status_code=400, detail="Unknown original search")
+            validated.append(
+                {
+                    name: entry[name]
+                    for name in ("marketplace", "listing_id", "original_item")
+                    if name in entry
+                }
+            )
+        try:
+            return queue.enqueue(validated, item, refresh)
+        except ValueError as error:
+            raise HTTPException(status_code=429, detail=str(error)) from None
+
+    @app.get("/api/matches/recheck/{job_id}")
+    def get_recheck(job_id: str, _: str = Depends(require_session)) -> Dict[str, Any]:
+        try:
+            return recheck_queue().get(job_id)
+        except KeyError:
+            raise HTTPException(
+                status_code=404, detail="Re-check job not found; the monitor may have restarted"
+            ) from None
+
+    @app.delete("/api/matches/recheck/{job_id}")
+    def stop_recheck(
+        job_id: str, _: str = Depends(require_session), __: None = Depends(require_csrf)
+    ) -> Dict[str, Any]:
+        try:
+            return recheck_queue().stop(job_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Re-check job not found") from None
+
     @app.get("/api/found.csv")
     def export_found_csv(_: str = Depends(require_session)) -> StreamingResponse:
         filename = f"found-items-{time.strftime('%Y%m%d-%H%M%S')}.csv"
