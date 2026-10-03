@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import re
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -17,7 +18,9 @@ else:  # pragma: no cover
     import tomli as tomllib
 
 from ..config import Config
-from .secrets_redact import SecretMap, redact, restore
+from ..utils import merge_dicts
+from .config_auth import extract_credentials
+from .secrets_redact import MASK, SecretMap, _is_section, _is_sensitive, redact, restore
 
 
 @dataclass
@@ -131,9 +134,6 @@ class ConfigFileService:
         self._editable: Path = config_files[-1].expanduser().resolve()
         self._all: List[Path] = [p.expanduser().resolve() for p in config_files]
         self._logger = logger
-        # Most recent secret map, populated on every read() call. Write()
-        # uses this to round-trip "<REDACTED>" masks back to real values.
-        self._secrets: SecretMap = {}
 
     @property
     def editable_path(self) -> Path:
@@ -154,17 +154,96 @@ class ConfigFileService:
     def read(self, file_id: str) -> Tuple[str, float]:
         self._require(file_id)
         raw = self._editable.read_text(encoding="utf-8")
-        redacted, secrets = redact(raw)
-        self._secrets = secrets
+        redacted, _ = redact(raw)
         return redacted, self._editable.stat().st_mtime
 
-    def validate(self, content: str) -> Tuple[bool, str | None]:
+    def context(self) -> Dict[str, Any]:
+        """Return redacted source values, without expanding environment secrets."""
+        system = Path(__file__).parents[1] / "config.toml"
+        paths = [system, *self._all]
+        configs = [tomllib.loads(path.read_text(encoding="utf-8")) for path in paths]
+        environment: Dict[str, bool] = {}
+
+        def mask(value: Any, key: str = "", path: tuple[str, ...] = ()) -> Any:
+            if isinstance(value, str) and re.fullmatch(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", value):
+                environment[value[2:-1]] = bool(os.environ.get(value[2:-1]))
+                return value
+            if _is_sensitive(key) and value and not _is_section(path, value):
+                return MASK
+            if isinstance(value, dict):
+                return {k: mask(v, k, (*path, k)) for k, v in value.items()}
+            if isinstance(value, list):
+                return [mask(v, key, path) for v in value]
+            return value
+
+        effective = mask(merge_dicts(copy.deepcopy(configs)))
+        inherited = mask(merge_dicts(configs[:-1]))
+        credentials = extract_credentials(self._all)
+        try:
+            validated = Config(self._all)
+            notification_values = {}
+            for name, value in validated.notification.items():
+                values = {
+                    key: value for key, value in asdict(value).items() if not key.startswith("_")
+                }
+                for key, source in effective.get("notification", {}).get(name, {}).items():
+                    if isinstance(source, str) and re.fullmatch(
+                        r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", source
+                    ):
+                        values[key] = source
+                notification_values[name] = mask(values)
+        except Exception:
+            notification_values = {}
+        return {
+            "notification_values": notification_values,
+            "effective": effective,
+            "inherited": inherited,
+            "environment": environment,
+            "facebook_credentials_configured": bool(credentials.username and credentials.password),
+            "sources": [
+                {"path": str(path), "editable": i == len(paths) - 1, "mtime": path.stat().st_mtime}
+                for i, path in enumerate(paths)
+            ],
+        }
+
+    def _restore_content(self, content: str, renames: Any = None) -> str:
+        # Read the maps fresh: reads from other tabs must not change what a mask means.
+        secrets: SecretMap = {}
+        for path in self._all:
+            _, values = redact(path.read_text(encoding="utf-8"))
+            secrets.update(values)
+        if renames is not None:
+            if not isinstance(renames, dict) or not all(
+                isinstance(old, str)
+                and isinstance(new, str)
+                and old.split(".")[0] == new.split(".")[0]
+                for old, new in renames.items()
+            ):
+                raise ValueError("Section renames must map names within the same section type.")
+            moved = {
+                (renames.get(section, section), key): value
+                for (section, key), value in secrets.items()
+            }
+            secrets.update(moved)
+        restored = restore(content, secrets)
+        for section, fields in _parse_fields(restored).items():
+            for key, value in fields.items():
+                if _is_sensitive(key) and value == MASK:
+                    raise ValueError(
+                        f"Hidden value for {section}.{key} cannot be restored. Replace it before saving."
+                    )
+        return restored
+
+    def validate(self, content: str, renames: Any = None) -> Tuple[bool, str | None]:
         """Parse the given content using the real Config loader.
 
         Masks in ``content`` are first restored to their real values so we
         validate what will actually be written.
         """
-        restored = restore(content, self._secrets)
+        try:
+            restored = self._restore_content(content, renames)
+        except ValueError as error:
+            return False, str(error)
         tmp_dir = self._editable.parent
         tmp = tempfile.NamedTemporaryFile(
             mode="w",
@@ -192,7 +271,7 @@ class ConfigFileService:
                 pass
 
     def write(
-        self, file_id: str, content: str, base_mtime: float | None
+        self, file_id: str, content: str, base_mtime: float | None, renames: Any = None
     ) -> Tuple[float, bool, str | None]:
         """Validate and atomically write the file.
 
@@ -208,7 +287,10 @@ class ConfigFileService:
 
         # Restore masks before validating and writing so round-tripped
         # "<REDACTED>" tokens become the real secret values on disk.
-        restored = restore(content, self._secrets)
+        try:
+            restored = self._restore_content(content, renames)
+        except ValueError as restore_error:
+            return self._editable.stat().st_mtime, False, str(restore_error)
 
         ok, error = self.validate(restored)
         if not ok:
@@ -239,13 +321,6 @@ class ConfigFileService:
             except OSError:
                 pass
             return self._editable.stat().st_mtime, False, str(e)
-
-        # Refresh secret map from the new on-disk contents so any future
-        # read() uses the latest secrets (e.g. user typed a new password).
-        try:
-            _, self._secrets = redact(self._editable.read_text(encoding="utf-8"))
-        except OSError:
-            pass
 
         return self._editable.stat().st_mtime, True, None
 

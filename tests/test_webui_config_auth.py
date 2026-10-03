@@ -117,3 +117,20 @@ def test_extract_no_config_no_env(tmp_path: Path) -> None:
         got = extract_credentials([p])
     assert got.username is None
     assert got.password is None
+
+
+def test_extract_resolves_config_environment_references(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        '[marketplace.facebook]\nusername = "${TEST_USER}"\npassword = "${TEST_PASSWORD}"\n',
+    )
+    with patch.dict(
+        os.environ,
+        {"TEST_USER": "resolved-user", "TEST_PASSWORD": "resolved-password"},
+        clear=True,
+    ):
+        credentials = extract_credentials([path])
+    assert credentials.username == "resolved-user"
+    assert credentials.password == "resolved-password"
+    with patch.dict(os.environ, {}, clear=True):
+        assert extract_credentials([path]).username is None

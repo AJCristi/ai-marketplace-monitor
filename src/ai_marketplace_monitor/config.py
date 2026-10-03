@@ -260,7 +260,7 @@ class Config(Generic[TAIConfig, TItemConfig, TMarketplaceConfig]):
                         if getattr(config, key) is not None:
                             if logger:
                                 logger.warning(
-                                    f"Overriding {hilight(key)} for user {config.name} with value {value} from notification {hilight(notification_name)}."
+                                    f"Overriding {hilight(key)} for user {config.name} from notification {hilight(notification_name)}."
                                 )
                         setattr(config, key, value)
 

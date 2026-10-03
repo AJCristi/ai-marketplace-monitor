@@ -73,6 +73,10 @@ def extract_credentials(config_files: List[Path]) -> ExtractedCredentials:
                 continue
             username = section.get("username")
             password = section.get("password")
+            if isinstance(username, str) and username.startswith("${") and username.endswith("}"):
+                username = os.environ.get(username[2:-1])
+            if isinstance(password, str) and password.startswith("${") and password.endswith("}"):
+                password = os.environ.get(password[2:-1])
             if isinstance(username, str) and isinstance(password, str) and username and password:
                 return ExtractedCredentials(username=username, password=password)
 

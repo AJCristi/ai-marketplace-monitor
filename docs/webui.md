@@ -6,13 +6,49 @@ AI Marketplace Monitor includes a built-in web interface for editing your config
 
 ## Overview
 
-The web UI provides:
+The **Monitor** view lists saved searches on the left and shows the selected
+search’s description and recent activity on the right. **All activity** includes
+unattributed events such as delivery results, with filters for type, search,
+severity, AI score, and message text. Filters survive a reload. Scrolling to read
+older activity or opening error details pauses updates until you follow live again.
 
-- **TOML Config Editor** with syntax highlighting, powered by CodeMirror
-- **Add / Edit / Delete** config sections (items, AI backends, users, marketplaces) through guided forms
-- **Live Log Streaming** with filtering by level, item, AI score, and text search
-- **Export CSV** button in the header downloads all found (notified) listings — link, price, rating, and details — as a CSV file
-- **Auto-validation** of your config as you type
+Use **Edit** or **Add search** for guided forms. Fields can use their defaults or
+an explicit value; Advanced options include first/subsequent search filters,
+Boolean keyword expressions, seller filters, prompts, and sorting. Fixed start
+times replace interval scheduling. **Search all now** requests every enabled
+search after the current scan finishes. Saving config changes may also restart
+searches when the monitor reloads them.
+
+**Settings** includes marketplace accounts/defaults, AI providers, users and shared
+notification settings, proxies, custom regions, and the CodeMirror **config.toml**
+editor. Languages and other custom options remain editable in TOML. Light and dark
+themes follow your system by default; the header theme button cycles the preference.
+
+Forms preserve TOML comments and unknown fields. Saves validate against all loaded
+files and retain drafts on validation errors or a disk conflict. Conflict recovery
+supports comparison, reapplying form edits to the current file, or explicitly
+confirming an overwrite. Only the last loaded config file is editable; earlier
+sources are listed in the TOML view. Lists combine across files, so removing an
+inherited list entry requires editing its source file.
+
+Secrets are shown as **Saved (hidden)** or as an environment reference such as
+`${OPENAI_API_KEY}`. **Replace** sets a new value; leaving that input empty keeps
+the existing value. New AI providers with no pasted key use the provider’s explicit
+environment reference; that variable must be set before starting the monitor.
+Saving does not test AI connectivity or notification delivery. Scalar secrets,
+including multiline strings and quoted keys, round-trip without exposing their
+values. Secret containers such as inline tables or arrays require moving the secret
+to a scalar assignment in the source file before opening the editor.
+
+Shared notification sections, including their defaults, overwrite matching user fields. Shared sections apply in their configured order. Use `notify_with`
+to select the shared sections, or an explicitly empty list to apply none. The
+user form’s **Use SMTP on this user only** helper excludes shared email settings.
+
+**Export notified listings (CSV)** in All activity downloads the full cached
+notification history, independent of feed filters. Recent activity is a bounded
+in-memory buffer (2,000 events by default), rather than persistent results history.
+AI ratings do not imply that a notification was sent; delivery events without a
+search identifier appear only in All activity.
 
 ## Getting Started
 

@@ -20,6 +20,7 @@ import logging
 import re
 import threading
 import time
+import uuid
 from collections import deque
 from typing import Any, Deque, Dict, List, Set
 
@@ -67,6 +68,7 @@ class LogBroadcastHandler(logging.Handler):
         self._subscribers: Set["asyncio.Queue[Dict[str, Any]]"] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._counter = itertools.count(1)
+        self.stream_id = uuid.uuid4().hex
 
     # ------------------------------------------------------------------
     # Wiring

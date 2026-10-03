@@ -174,7 +174,7 @@ def test_write_rejects_invalid_after_restore(config_file: Path) -> None:
     _, mtime = svc.read("primary")
     redacted, _ = svc.read("primary")
     # Unchanged redacted content must still validate and round-trip cleanly.
-    new_mtime, ok, error = svc.write("primary", redacted, base_mtime=mtime)
+    _new_mtime, ok, error = svc.write("primary", redacted, base_mtime=mtime)
     assert ok, error
     on_disk = config_file.read_text(encoding="utf-8")
     assert "user@example.com" in on_disk
@@ -186,8 +186,106 @@ def test_write_new_secret_over_mask(config_file: Path) -> None:
     redacted, _ = svc.read("primary")
     # User types a new username over the mask.
     edited = redacted.replace('"<REDACTED>"', '"new-user@example.com"', 1)
-    new_mtime, ok, error = svc.write("primary", edited, base_mtime=mtime)
+    _new_mtime, ok, error = svc.write("primary", edited, base_mtime=mtime)
     assert ok, error
     on_disk = config_file.read_text(encoding="utf-8")
     assert "new-user@example.com" in on_disk
     assert "user@example.com" not in on_disk.replace("new-user@example.com", "")
+
+
+def test_context_includes_inherited_sections_without_exposing_secrets(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inherited = config_file.with_name("shared.toml")
+    inherited.write_text(
+        '[marketplace.facebook]\nsearch_city = "austin"\n[ai.local]\nprovider = "ollama"\nbase_url = "http://localhost:11434/v1"\nmodel = "demo"\n[user.shared]\npushover_user_key = "private-user-key"\npushover_api_token = "private-api-token"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("REVIEW_TOKEN", "private-environment-value")
+    config_file.write_text(
+        SAMPLE_CONFIG
+        + '\n[user.env]\ntelegram_token = "${REVIEW_TOKEN}"\ntelegram_chat_id = "123"\n',
+        encoding="utf-8",
+    )
+    context = ConfigFileService([inherited, config_file]).context()
+    assert context["effective"]["marketplace"]["facebook"]["search_city"] == "houston"
+    assert context["inherited"]["marketplace"]["facebook"]["search_city"] == "austin"
+    assert context["effective"]["user"]["shared"]["pushover_user_key"] == "<REDACTED>"
+    assert context["effective"]["user"]["env"]["telegram_token"] == "${REVIEW_TOKEN}"
+    assert context["environment"] == {"REVIEW_TOKEN": True}
+    assert not any(
+        value in str(context)
+        for value in ("private-user-key", "private-api-token", "private-environment-value")
+    )
+    assert context["sources"][-1]["editable"] is True
+    assert all(not source["editable"] for source in context["sources"][:-1])
+
+
+def test_rename_restores_hidden_secrets_at_new_section(config_file: Path) -> None:
+    service = ConfigFileService([config_file])
+    content, mtime = service.read("primary")
+    renamed = content.replace("[user.me]", "[user.renamed]")
+    _, ok, error = service.write("primary", renamed, mtime, renames={"user.me": "user.renamed"})
+    assert ok, error
+    written = config_file.read_text(encoding="utf-8")
+    assert "[user.renamed]" in written
+    assert "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" in written
+    assert "<REDACTED>" not in written
+
+
+def test_unknown_mask_is_rejected_without_changing_file(config_file: Path) -> None:
+    service = ConfigFileService([config_file])
+    content, mtime = service.read("primary")
+    draft = content.replace("[user.me]", "[user.renamed]")
+    _, ok, error = service.write("primary", draft, mtime)
+    assert not ok
+    assert error and "cannot be restored" in error
+    assert config_file.read_text(encoding="utf-8") == SAMPLE_CONFIG
+
+
+def test_inherited_secret_can_be_preserved_in_editable_override(config_file: Path) -> None:
+    shared = config_file.with_name("shared.toml")
+    shared.write_text('[user.me]\nsmtp_password = "shared-password"\n', encoding="utf-8")
+    service = ConfigFileService([shared, config_file])
+    content, mtime = service.read("primary")
+    draft = content + 'smtp_password = "<REDACTED>"\n'
+    _, ok, error = service.write("primary", draft, mtime)
+    assert ok, error
+    assert 'smtp_password = "shared-password"' in config_file.read_text(encoding="utf-8")
+
+
+def test_context_reports_normalized_notification_defaults_without_secrets(
+    config_file: Path,
+) -> None:
+    config_file.write_text(
+        SAMPLE_CONFIG
+        + '\n[notification.shared]\nsmtp_password = "shared-private"\nsmtp_server = "smtp.example.com"\n',
+        encoding="utf-8",
+    )
+    context = ConfigFileService([config_file]).context()
+    values = context["notification_values"]["shared"]
+    assert values["smtp_password"] == "<REDACTED>"
+    assert values["retry_delay"] == 60
+    assert values["max_retries"] == 5
+    assert values["smtp_server"] == "smtp.example.com"
+    assert "shared-private" not in str(context)
+
+
+def test_context_masks_sensitive_containers_even_when_loader_rejects_them(
+    config_file: Path,
+) -> None:
+    config_file.write_text(
+        SAMPLE_CONFIG
+        + '\n[ai.custom]\nprovider = "openai"\napi_key = {value = "private-container-value"}\n',
+        encoding="utf-8",
+    )
+    context = ConfigFileService([config_file]).context()
+    assert context["effective"]["ai"]["custom"]["api_key"] == "<REDACTED>"
+    assert "private-container-value" not in str(context)
+
+
+def test_context_preserves_secret_like_section_names(config_file: Path) -> None:
+    config_file.write_text(SAMPLE_CONFIG.replace("[user.me]", "[user.my_token]"), encoding="utf-8")
+    context = ConfigFileService([config_file]).context()
+    assert context["effective"]["user"]["my_token"]["pushbullet_token"] == "<REDACTED>"
+    assert "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" not in str(context)

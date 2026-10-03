@@ -1,1715 +1,824 @@
-// AI Marketplace Monitor — Web UI frontend.
-// Vanilla JS, no build step. Provides:
-//   - Login form + session cookie handling
-//   - TOML editor with line numbers and syntax highlighting (lightweight)
-//   - Live log tail via WebSocket with level/text filtering + expand
-//   - Save / Validate with inline error at the offending line
+import initToml, {parse, edit} from './vendor/toml-edit-js/shims.js';
+import {FORM_SCHEMAS, BUILT_IN_REGIONS} from './fields.js';
+import {list, own, filled, mergeConfig, itemValue, marketplaceFor, scheduleLabel, CHANNELS, userChannels, resolvedUser, available, matchRecord, mergeRecords, safeUrl, renameSection} from './console-model.js';
 
-(() => {
-  const $ = (sel) => document.querySelector(sel);
-  const $$ = (sel) => Array.from(document.querySelectorAll(sel));
-
-  const state = {
-    csrf: null,
-    fileId: "primary",
-    baseMtime: null,
-    originalContent: "",
-    currentContent: "",
-    logLevel: "ALL",
-    logKind: "",
-    logItem: "",
-    logMinScore: null,
-    logFilter: "",
-    ws: null,
-    records: [],
-    expanded: new Set(),
-    knownItems: new Set(),
-    lastActivity: null, // epoch seconds of the most recent log record
-    monitorState: "disconnected", // "connected" | "idle" | "disconnected"
-    wsConnected: false,
-    errorCount: 0, // unread ERROR-level messages (for tab badge)
-  };
-
-  // ---------------------------------------------------------------
-  // Cookies / auth
-  // ---------------------------------------------------------------
-  const getCookie = (name) => {
-    const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
-    return m ? decodeURIComponent(m[1]) : null;
-  };
-
-  const api = async (path, opts = {}) => {
-    const headers = { ...(opts.headers || {}) };
-    if (opts.method && opts.method !== "GET" && state.csrf) {
-      headers["X-CSRF-Token"] = state.csrf;
-    }
-    if (opts.body && !(opts.body instanceof FormData)) {
-      headers["Content-Type"] = "application/json";
-    }
-    const res = await fetch(path, { ...opts, headers, credentials: "same-origin" });
-    if (res.status === 401) {
-      showLogin();
-      throw new Error("unauthenticated");
-    }
-    return res;
-  };
-
-  // ---------------------------------------------------------------
-  // Login flow
-  // ---------------------------------------------------------------
-  const showLogin = async () => {
-    $("#login-screen").classList.remove("hidden");
-    $("#app").classList.add("hidden");
-    // Fetch the auth mode so we can decide between login form and open mode.
-    try {
-      const info = await (await fetch("/api/auth/info", { credentials: "same-origin" })).json();
-      if (info.open) {
-        // Open mode — no credentials configured, auto-login as anonymous.
-        const res = await fetch("/api/login", {
-          method: "POST",
-          body: new FormData(),
-          credentials: "same-origin",
-        });
-        if (res.ok) {
-          const data = await res.json();
-          state.csrf = data.csrf || getCookie("aimm_csrf");
-          hideLogin();
-          await bootstrap();
-          return;
-        }
-      }
-      // Authenticated mode — show sign-in form.
-      const form = $("#login-form");
-      const subtitle = $("#login-subtitle");
-      subtitle.textContent =
-        "Sign in with the marketplace credentials from your config.";
-      subtitle.hidden = false;
-      $("#login-submit").textContent = "Sign in";
-      if (info.username_hint) form.username.value = info.username_hint;
-    } catch (err) {
-      // fall back to generic login form
-    }
-  };
-  const hideLogin = () => {
-    $("#login-screen").classList.add("hidden");
-    $("#app").classList.remove("hidden");
-  };
-
-  $("#login-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const form = e.target;
-    const body = new FormData();
-    body.set("username", form.username.value);
-    body.set("password", form.password.value);
-    try {
-      const res = await fetch("/api/login", { method: "POST", body, credentials: "same-origin" });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: "Login failed" }));
-        $("#login-error").textContent = err.detail || "Login failed";
-        $("#login-error").hidden = false;
-        return;
-      }
-      const data = await res.json();
-      state.csrf = data.csrf || getCookie("aimm_csrf");
-      $("#login-error").hidden = true;
-      hideLogin();
-      await bootstrap();
-    } catch (err) {
-      $("#login-error").textContent = String(err);
-      $("#login-error").hidden = false;
-    }
+const $ = selector => document.querySelector(selector);
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const time = epoch => new Date(epoch * 1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',hour12:false});
+const labelValue = value => Array.isArray(value) ? value.join(', ') : value === undefined ? 'none' : String(value);
+const itemRoute = name => '#/monitor/item/' + encodeURIComponent(name);
+const state = {
+  open:true, initialized:false, status:{}, context:{inherited:{},environment:{},sources:[]},
+  base:'', content:'', mtime:null, file:null, config:{}, local:{},
+  route:location.hash || '#/monitor', form:null, saving:false, editor:null, editorSetting:false,
+  conflict:null, error:'', saved:'', rawInvalid:false, records:[], capacity:2000, streamId:null, ws:null,
+  connected:false, announceCount:0, disconnectedAt:null, following:true, pending:0, frozen:[], expanded:new Set(),
+  credentials:null, credentialsId:0, monitorIssue:null, incidentId:0, loginId:0, loginUntil:0, feedTimer:null, announceTimer:null, pollBusy:false,
+};
+let theme=localStorage.getItem('aimm-theme')||'system';
+function applyTheme(){document.querySelectorAll('.c').forEach(el=>{el.classList.toggle('dark',theme==='dark');el.classList.toggle('light',theme==='light');});$('#theme').setAttribute('aria-label','Theme: '+theme);$('#theme').title='Theme: '+theme;}
+$('#theme').onclick=()=>{theme=['system','light','dark'][(['system','light','dark'].indexOf(theme)+1)%3];localStorage.setItem('aimm-theme',theme);applyTheme();};applyTheme();
+$('.skip').onclick=event=>{event.preventDefault();$('#pane').focus();$('#pane').scrollIntoView({block:'start'});};
+const dirty = () => state.content !== state.base || (state.form && (Object.keys(state.form.changes).length > 0 || state.form.new));
+const csrf = () => document.cookie.match(/(?:^|;\s*)aimm_csrf=([^;]*)/)?.[1];
+async function api(path, options = {}) {
+  const headers = {...options.headers};
+  if (options.method && !['GET','HEAD'].includes(options.method) && csrf()) headers['X-CSRF-Token'] = decodeURIComponent(csrf());
+  if (options.body && !(options.body instanceof FormData)) headers['Content-Type'] = 'application/json';
+  const response = await fetch(path, {...options, headers, credentials:'same-origin'});
+  if (response.status === 401) {
+    await showLogin(true);
+    throw new Error('Session expired. Sign in again; your draft is kept.');
+  }
+  return response;
+}
+async function json(path, options = {}) {
+  const response = await api(path, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || data.detail || `Request failed (${response.status}).`);
+  return data;
+}
+function toast(message) {
+  $('#toast').textContent = message; $('#toast').hidden = false;
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => {$('#toast').hidden = true;}, 5500);
+}
+function confirmAction(title, message, accept = 'Discard', cancel = 'Keep editing', html = false) {
+  const dialog = $('#action-dialog');
+  $('#dialog-title').textContent = title;
+  if (html) $('#dialog-body').innerHTML = message; else $('#dialog-body').textContent = message;
+  $('#dialog-accept').textContent = accept; $('#dialog-cancel').textContent = cancel;
+  return new Promise(resolve => {
+    const finish = accepted => { dialog.close(); $('#dialog-accept').onclick = null; $('#dialog-cancel').onclick = null; dialog.oncancel = null; resolve(accepted); };
+    $('#dialog-accept').onclick = () => finish(true);
+    $('#dialog-cancel').onclick = () => finish(false);
+    dialog.oncancel = event => {event.preventDefault(); finish(false);};
+    dialog.showModal(); $('#dialog-cancel').focus();
   });
+}
+async function navigate(route) {
+  if (route === state.route) return;
+  if (state.saving) {toast('Wait for the save to finish.'); return;}
+  if (dirty() && !await confirmAction('Leave without saving?', 'Your unsaved changes will be lost.')) return;
+  state.content = state.base; state.form = null; state.error = ''; state.saved = ''; state.conflict = null;
+  location.hash = route;
+}
+const decodeName = value => {try {return decodeURIComponent(value);} catch {return value;}};
+function routeParts() {
+  const [path, query=''] = state.route.replace(/^#/, '').split('?');
+  return {path, parts:path.split('/').filter(Boolean), query:new URLSearchParams(query)};
+}
+function refreshData() {
+  try {state.local = parse(state.content); state.config = mergeConfig(state.context.inherited, state.local);}
+  catch {state.local = {}; state.config = structuredClone(state.context.effective || {});}
+  state.config.notification_values=state.context.notification_values || {};
+}
+async function loadConfig(preserve = false) {
+  const files = await json('/api/config/files'); state.file = files.files[0];
+  const [file, contextResponse] = await Promise.all([
+    json('/api/config/file/primary'), api('/api/config/context'),
+  ]);
+  const contextData = await contextResponse.json();
+  if (contextResponse.ok) state.context = contextData;
+  else {state.error = contextData.detail || 'Open config.toml to repair the configuration.';state.monitorIssue=state.error;}
+  state.base = file.content; state.mtime = file.mtime;
+  state.rawInvalid=false;
+  if (!preserve) state.content = file.content;
+  refreshData();
+  return file;
+}
+async function showLogin(expired = false) {
+  if (state.ws) {state.ws.onclose = null; state.ws.close(); state.ws = null;}
+  state.connected = false; updateStatus();
+  const info = await (await fetch('/api/auth/info', {credentials:'same-origin'})).json();
+  state.open = info.open;
+  if (info.open) {
+    const response = await fetch('/api/login', {method:'POST',body:new FormData(),credentials:'same-origin'});
+    if (!response.ok) throw new Error('Unable to open the dashboard.');
+    if ($('#login-dialog').open) $('#login-dialog').close();
+    await bootstrap(); return;
+  }
+  if(!expired){
+    const session=await fetch('/api/status',{credentials:'same-origin'});
+    if(session.ok){if($('#login-dialog').open)$('#login-dialog').close();await bootstrap();return;}
+    if(session.status!==401)throw new Error('Unable to check the dashboard session.');
+  }
+  $('#login-hint').textContent = expired ? 'Your session expired. Sign in again; unsaved changes in this tab are kept.' : 'Use the Facebook credentials configured when this monitor started.';
+  $('#login-username').value = info.username_hint || '';
+  if (!$('#login-dialog').open) $('#login-dialog').showModal();
+  $('#login-username').focus();
+}
+$('#login-dialog').addEventListener('cancel', event => event.preventDefault());
+$('#login-form').addEventListener('submit', async event => {
+  event.preventDefault(); const submit = event.target.querySelector('button'); submit.disabled = true;
+  try {
+    const response = await fetch('/api/login', {method:'POST',body:new FormData(event.target),credentials:'same-origin'});
+    const data = await response.json();
+    if (!response.ok) throw new Error(response.status === 429 ? 'Too many failed sign-ins. Wait a few minutes and try again.' : data.detail || 'Sign-in failed.');
+    $('#login-password').value = ''; $('#login-error').hidden = true; $('#login-dialog').close();
+    await bootstrap();
+  } catch(error) {$('#login-error').textContent = error.message; $('#login-error').hidden = false;}
+  finally {submit.disabled = false;}
+});
+$('#logout').addEventListener('click', async () => {
+  if (dirty() && !await confirmAction('Sign out with unsaved changes?', 'Signing out discards your draft.', 'Sign out')) return;
+  await api('/api/logout', {method:'POST'}); state.content = state.base; state.form = null;
+  await showLogin();
+});
+$('#search-all').addEventListener('click', async () => {
+  const button = $('#search-all'); button.disabled = true;
+  try {const data = await json('/api/monitor/restart', {method:'POST'}); toast(data.message);}
+  catch(error) {toast(error.message);} finally {button.disabled = false;}
+});
+document.addEventListener('click', event => {
+  const anchor = event.target.closest('a[href^="#/"]');
+  if (!anchor || event.ctrlKey || event.metaKey || event.shiftKey || event.button > 0) return;
+  event.preventDefault(); navigate(anchor.getAttribute('href'));
+});
+window.addEventListener('beforeunload', event => {if (dirty()) {event.preventDefault(); event.returnValue = '';}});
+window.addEventListener('hashchange', async () => {
+  const next = location.hash;
+  if (next === state.route) return;
+  if (state.saving) {history.replaceState(null,'',state.route);toast('Wait for the save to finish.');return;}
+  if (dirty() && !await confirmAction('Leave without saving?', 'Your unsaved changes will be lost.')) {history.replaceState(null,'',state.route); return;}
+  state.content = state.base; state.form = null; state.error = ''; state.saved = ''; state.route = next;
+  state.following = true; state.pending = 0; state.expanded.clear(); refreshData(); render();
+});
 
-  $("#logout-btn").addEventListener("click", async () => {
-    await api("/api/logout", { method: "POST" });
-    if (state.ws) state.ws.close();
-    state.csrf = null;
-    showLogin();
-  });
-
-  // ---------------------------------------------------------------
-  // Editor — CodeMirror 5 with TOML syntax highlighting
-  // ---------------------------------------------------------------
-  const editorHost = $("#editor-host");
-
-  // Thin wrapper so the rest of the code uses editor.getValue() / editor.setValue()
-  // regardless of whether CodeMirror loaded successfully.
-  let editor;
-  let validateTimer = null;
-  const onEditorChange = () => {
-    state.currentContent = editor.getValue();
-    const dirty = state.currentContent !== state.originalContent;
-    $("#save-btn").disabled = !dirty;
-    if (validateTimer) clearTimeout(validateTimer);
-    if (dirty) {
-      setEditorStatus("typing…");
-      validateTimer = setTimeout(() => {
-        validateTimer = null;
-        validateConfig();
-      }, 400);
+function setupIssues() {
+  const users = Object.keys(state.config.user || {}).filter(name => resolvedUser(state.config,name).enabled !== false && !userChannels(state.config,name,state.context.environment).length);
+  return users.length + Number(state.credentials === 'waiting' || (!state.context.facebook_credentials_configured && state.credentials !== 'found'));
+}
+function updateStatus() {
+  const el = $('#live-status');
+  const waiting = state.credentials === 'waiting';
+  const recent = state.records.at(-1);
+  el.className = `m ${waiting || !state.connected ? 'warn' : 'ok'}`;
+  el.textContent = waiting ? '● waiting for Facebook login' : state.connected ? `● live${recent ? ' · last activity '+time(recent.time) : ''}` : '◌ reconnecting…';
+  $('#setup-count').textContent = setupIssues() ? '· ' + setupIssues() : '';
+  $('#browser-link').hidden = !state.status.vnc_enabled;
+  $('#browser-link').href = '/vnc/vnc.html?path=ws/vnc&autoconnect=1&resize=scale';
+  $('#logout').hidden = state.open;
+  let notice = '';
+  if(state.monitorIssue)notice=`<span>${esc(state.monitorIssue)}</span><a class="btn sm" href="#/settings/config">Check config.toml</a><a class="btn sm" href="#/monitor/all?level=ERROR">View errors</a>`;
+  else if (waiting) notice = '<span>Waiting for Facebook credentials.</span><a class="btn sm" href="#/settings/marketplace">Add login</a>';
+  else if (!state.connected && state.disconnectedAt && Date.now()-state.disconnectedAt > 10000) notice = '<span>Live updates stopped. The monitor may still be running; activity reloads when it reconnects.</span><button class="btn sm" id="retry-stream">Retry</button>';
+  else if (Date.now() < state.loginUntil) notice = `<span>Logging in to Facebook. If it asks for a code or CAPTCHA, finish it in ${state.status.vnc_enabled ? 'the Browser view' : 'the browser window on the computer running the monitor'}.</span>`;
+  const html = notice ? `<div class="nt warn">${notice}</div>` : '';
+  if ($('#global-notice').innerHTML !== html) {$('#global-notice').innerHTML = html; $('#retry-stream')?.addEventListener('click',connectStream);}
+}
+function searchSummary(name) {
+  const inheritedMark=key=>!own(state.config.item?.[name],key)?'*':'';
+  const item = state.config.item?.[name] || {};
+  const phrases = list(item.search_phrases);
+  const price = [itemValue(state.config,name,'min_price'),itemValue(state.config,name,'max_price')].filter(filled).join('–');
+  const ai = list(itemValue(state.config,name,'ai'));
+  const rating = list(itemValue(state.config,name,'rating')).join('/');
+  return [phrases.length > 1 ? `${phrases[0]} +${phrases.length-1}` : phrases[0],price?price+inheritedMark('max_price'):price,scheduleLabel(state.config,name)+inheritedMark('search_interval'),ai.length ? `AI ≥${rating}${inheritedMark('rating')}` : 'no AI'].filter(Boolean).join(' · ');
+}
+function renderSidebar() {
+  const {parts} = routeParts(); const settings = parts[0] === 'settings';
+  $('#monitor-nav').classList.toggle('on',!settings); $('#settings-nav').classList.toggle('on',settings);
+  $('#sidebar').setAttribute('aria-label', settings ? 'Settings sections' : 'Saved searches');
+  const signature = JSON.stringify([state.route,state.config,state.form?.name,state.capacity]);
+  if ($('#sidebar').dataset.signature !== signature) {
+    $('#sidebar').dataset.signature = signature;
+    if (settings) {
+      const rows = [['marketplace','Marketplace',Object.keys(state.config.marketplace || {}).join(' · ')],['ai','AI providers',Object.keys(state.config.ai || {}).join(' · ') || 'None'],['notifications','Notifications',Object.keys(state.config.user || {}).join(' · ')],['more','Proxy, regions, languages','Network and locale options'],['config','config.toml','Edit the file directly']];
+      $('#sidebar').innerHTML = '<div class="sh">Settings</div>' + rows.map(([key,title,summary]) => `<a class="it ${parts[1]===key?'on':''}" href="#/settings/${key}" ${parts[1]===key?'aria-current="page"':''}><div class="t">${title}</div><div class="s">${esc(summary)}</div></a>`).join('');
+    } else {
+      $('#sidebar').innerHTML = `<a class="it ${parts[1]==='all'?'on':''}" href="#/monitor/all"><span class="b">All activity</span><span class="m d" style="float:right">last ${state.capacity.toLocaleString()} events</span></a><div class="sh">Saved searches · ${Object.keys(state.config.item || {}).length}</div>` + Object.entries(state.config.item || {}).map(([name,item]) => `<a class="it ${parts[2]===name || decodeName(parts[2]||'')===name ? 'on':''}" href="${itemRoute(name)}"><div class="row sb"><span class="t m ${item.enabled===false?'d':''}">${esc(name)}</span><span data-item-badge="${esc(name)}" class="m xs d">${item.enabled===false?'disabled':state.form?.name===name?'editing':''}</span></div><div class="s">${esc(searchSummary(name))}</div></a>`).join('') + '<p class="sidebar-note">* marks a Marketplace or built-in default. Earlier files also contribute values. “New” counts come from recent activity.</p>';
     }
-  };
-
-  if (window.CodeMirror) {
-    editor = CodeMirror(editorHost, {
-      mode: "toml",
-      theme: "default",
-      lineNumbers: true,
-      indentUnit: 2,
-      tabSize: 2,
-      indentWithTabs: false,
-      lineWrapping: false,
-      extraKeys: {
-        "Cmd-S": () => saveConfig(),
-        "Ctrl-S": () => saveConfig(),
-        Tab: (cm) => cm.replaceSelection("  ", "end"),
-      },
-    });
-    editor.on("change", onEditorChange);
-    // Expose a uniform API.
-    editor.getValue = editor.getValue.bind(editor);
-    editor.setValue = editor.setValue.bind(editor);
-    editor.getScrollInfo = editor.getScrollInfo.bind(editor);
+  }
+  for (const badge of document.querySelectorAll('[data-item-badge]')) {
+    const name = badge.dataset.itemBadge;
+    if (state.config.item[name].enabled === false) badge.textContent = 'disabled';
+    else if (state.form?.name === name) badge.textContent = 'editing';
+    else {const record = state.records.findLast(record => record.extra?.kind==='search_summary' && record.extra.item===name); badge.textContent = record ? `${record.extra.new_count} new` : '';}
+  }
+  updateStatus();
+}
+function pageHeader(title, description = '', actions = '') {
+  return `<div class="ph"><div class="col gr" style="gap:4px"><h1>${esc(title)}</h1>${description ? `<p class="d sm">${description}</p>`:''}</div><div class="row wr">${actions}</div></div>`;
+}
+function renderFirstRun() {
+  $('#pane').innerHTML = pageHeader('Finish setting up','A starter config.toml contains a sample search.') + `<div class="body"><ol class="checklist col" style="gap:24px"><li><h2 class="sm">1. Add your Facebook login</h2><p class="hint">FACEBOOK_USERNAME and FACEBOOK_PASSWORD can come from the environment. The monitor waits for credentials before opening its browser.</p><a class="btn p" href="#/settings/marketplace">Add login</a></li><li><h2 class="sm">2. Make the sample search yours</h2><p class="hint">Edit example or add your own saved search.</p><a class="btn" href="${itemRoute('example')}/edit">Edit search</a></li><li><h2 class="sm">3. Give user “me” a channel</h2><p class="hint">Recommended. Without a configured channel, activity appears here.</p><a class="btn" href="#/settings/notifications?edit=me">Add channel</a></li><li><h2 class="sm">4. Add an AI provider</h2><p class="hint">Optional. Without a working AI provider, listings that pass your filters meet the rating threshold.</p><a class="btn" href="#/settings/ai">Add provider</a></li></ol><p class="hint">Keep at least one marketplace, search and user. Other options are available in <a href="#/settings/config">config.toml</a>.</p><button class="btn q" id="dismiss-setup" type="button">Dismiss checklist</button></div>`;
+  $('#dismiss-setup').onclick = () => {sessionStorage.setItem('aimm-setup-dismissed','1'); navigate('#/monitor/all');};
+}
+function filters() {
+  const {parts,query} = routeParts();
+  return {kind:query.get('kind')||'',item:parts[1]==='item'?decodeName(parts[2]):query.get('item')||'',level:query.get('level')||'',score:query.get('score')||'',text:query.get('text')||''};
+}
+function filterRoute(key, value) {
+  const {path,query} = routeParts(); if (value) query.set(key,value); else query.delete(key);
+  state.route = '#' + path + (query.size?'?'+query:''); history.replaceState(null,'',state.route);
+  renderFeed(true);
+}
+function renderActivity(name = null) {
+  const item = name ? state.config.item?.[name] : null;
+  if (name && !item) {$('#pane').innerHTML = pageHeader('Search not found')+'<div class="empty">Choose a saved search from the list.</div>'; return;}
+  const f = filters();
+  let description = `Keeps the last ${state.capacity.toLocaleString()} events.`;
+  let actions = '<button class="btn" id="export-csv" type="button">Export notified listings (CSV)</button>';
+  if (name) {
+    const region = itemValue(state.config,name,'search_region');
+    const place = region?.length ? 'region: '+labelValue(region) : labelValue(itemValue(state.config,name,'search_city'));
+    description = `${esc(searchSummary(name))} · ${esc(place)}${!filled(item.search_city)&&!filled(item.search_region)?'*':''} · AI: ${esc(labelValue(itemValue(state.config,name,'ai')))} · notify: ${esc(labelValue(itemValue(state.config,name,'notify')))}`;
+    actions = `<a class="btn" href="${itemRoute(name)}/edit">Edit</a><button class="btn" id="duplicate-search">Duplicate</button><button class="btn x" id="delete-search">Delete</button>`;
+  }
+  const types = [['','All'],['ai_eval','AI ratings'],['search_summary','Searches'],['listing_skip','Skipped'],...(!name?[['credentials_wait','Login']]:[])];
+  $('#pane').innerHTML = pageHeader(name || 'All activity',name?description:esc(description),actions) + (name && item.description?`<p class="section-note">“${esc(item.description)}”</p>`:'') + (!name?'<p class="section-note">Every listing recorded as notified in the cache: link, price, rating, details. Export ignores the filters below.</p>':'') + `<div class="bar"><div class="row wr" role="group" aria-label="Activity type">${types.map(([kind,title])=>`<button class="pill" data-kind="${kind}" aria-pressed="${f.kind===kind}">${title}</button>`).join('')}</div><span class="m xs ok" id="follow-state">following live</span></div>` + (!name?`<div class="bar"><label class="sm">Search <span class="sel"><select id="filter-item" aria-label="Search"><option value="">All searches</option>${Object.keys(state.config.item||{}).map(item=>`<option value="${esc(item)}" ${f.item===item?'selected':''}>${esc(item)}</option>`).join('')}</select></span></label><label class="sm">Level <span class="sel"><select id="filter-level" aria-label="Level">${[['','All'],['INFO','Info'],['WARNING','Warning'],['ERROR','Error']].map(([value,title])=>`<option value="${value}" ${f.level===value?'selected':''}>${title}</option>`).join('')}</select></span></label><label class="sm">AI rating <span class="sel"><select id="filter-score" aria-label="AI rating">${[['','Any'],['3','≥3'],['4','≥4'],['5','5']].map(([value,title])=>`<option value="${value}" ${f.score===value?'selected':''}>${title}</option>`).join('')}</select></span></label><label class="sm gr">Contains <input id="filter-text" class="in" type="search" value="${esc(f.text)}" placeholder="Search activity"></label></div>`:'') + '<div id="pause-bar" class="pause-bar" hidden></div><div class="feed" id="feed"></div>' + (name?'<p class="feed-footnote">Delivery results aren’t tagged with a search yet, so they appear in <a href="#/monitor/all">All activity</a>.</p>':'');
+  document.querySelectorAll('[data-kind]').forEach(button=>button.onclick=()=>{filterRoute('kind',button.dataset.kind); document.querySelectorAll('[data-kind]').forEach(b=>b.setAttribute('aria-pressed',b===button));});
+  for (const key of ['item','level','score']) $('#filter-'+key)?.addEventListener('change',event=>filterRoute(key,event.target.value));
+  $('#filter-text')?.addEventListener('input',event=>filterRoute('text',event.target.value));
+  $('#export-csv')?.addEventListener('click',exportCsv);
+  $('#delete-search')?.addEventListener('click',()=>deleteSection('item',name));
+  $('#duplicate-search')?.addEventListener('click',()=>{
+    state.newFields = structuredClone(item); let copy = name+'_copy'; let number = 2;
+    while (own(state.config.item,copy)) copy = name+'_copy'+number++;
+    state.newName = copy;state.newReturn=itemRoute(name); navigate('#/monitor/new');
+  });
+  window.onscroll=()=>{if(window.scrollY>0)pauseFeed();};
+  $('#pane').onscroll = () => {if ($('#pane').scrollTop > 0) pauseFeed();};
+  renderFeed(true);
+}
+function rowHtml(record) {
+  const e = record.extra || {}; let body, trailing = '', type = '';
+  if (e.kind === 'ai_eval') {
+    const url = safeUrl(e.url); const thresholds = list(itemValue(state.config,e.item,'rating'));
+    const low = thresholds.length > 1 && thresholds[0] !== thresholds[1] ? true : e.score < Number(thresholds[0] || 3);
+    body = `<div><span class="title">${esc(e.title)}</span> · ${esc(filled(e.price)?e.price:'price not listed')}</div><div class="q"><b>${esc(e.conclusion)}</b> — “${esc(e.comment)}”</div><div class="out d">${esc(e.ai_name||'AI')}${url?` · <a href="${esc(url)}" target="_blank" rel="noopener noreferrer">open listing ↗</a>`:''}</div>`;
+    trailing = `<span class="score ${low?'lo':''}" aria-label="Rated ${esc(e.score)} out of 5 against your description">${esc(e.score)}/5</span>`;
+  } else if (e.kind === 'search_summary') {body = `Search finished — <b>${esc(e.new_count)} new ${e.new_count===1?'listing':'listings'}</b>`; type='search';}
+  else if (e.kind === 'listing_skip') {body = `Skipped <b>${esc(e.title)}</b> — ${e.reason==='below_threshold'?`rated ${esc(e.score)}, below ${esc(e.threshold)}`:'already notified'}`; type='skip';}
+  else if (e.kind === 'credentials_wait') {body = e.status==='found'?'Facebook credentials found — launching browser':'Waiting for Facebook credentials'; type='login';}
+  else if (e.kind === 'browser_ready') {body = `Launched ${esc(e.engine)} browser`; type='browser';}
+  else {body = `<span class="message">${esc(record.message)}</span>`;}
+  const failure = String(record.message).match(/Max retries reached\. Failed to push note to (.+)\.$/);
+  if (failure && own(state.config.user,failure[1])) body += ` <a href="#/settings/notifications?edit=${encodeURIComponent(failure[1])}">Check user settings</a>`;
+  const itemTag = routeParts().parts[1]==='all' && e.item ? `<span class="tag">${esc(e.item)}</span> ` : '';
+  const details = record.levelno>=40 ? `<details class="dx" data-event-details="${record.id}"><summary>Details</summary><pre class="raw">${esc(record.message)}\n${esc(record.location)}${record.exc_text?'\n'+esc(record.exc_text):''}</pre></details>`:'';
+  return `<article class="ev ${record.levelno>=40?'err-row':''}" data-record="${record.id}"><time datetime="${new Date(record.time*1000).toISOString()}">${time(record.time)}</time><div>${itemTag}${body}</div>${trailing || `<span class="tag">${esc(type || record.level.toLowerCase())}</span>`}${details}</article>`;
+}
+function pauseFeed() {
+  if (!state.following) return;
+  state.following = false; state.frozen = [...state.records]; state.pending = 0; updatePauseBar();
+}
+function updatePauseBar() {
+  const bar = $('#pause-bar'); if (!bar) return;
+  bar.hidden = state.following;
+  if (!state.following) {bar.innerHTML = `Paused while you read · ${state.pending} new events <button class="btn sm" id="follow-live">↑ Show and follow live</button>`; $('#follow-live').onclick = () => {state.following=true; state.pending=0; state.expanded.clear(); $('#pane').scrollTop=0; window.scrollTo({top:0}); renderFeed(true);};}
+  $('#follow-state').textContent = state.following?'following live':'paused while you read';
+  $('#follow-state').className = 'm xs '+(state.following?'ok':'warn');
+}
+function renderFeed(reset = false) {
+  const feed = $('#feed'); if (!feed) return;
+  const matching = (state.following?state.records:state.frozen).filter(record=>matchRecord(record,filters()));
+  if (!matching.length) {
+    const active = Object.entries(filters()).filter(([key,value])=>value&&(key!=='item'||routeParts().parts[1]!=='item')).map(([key,value])=>`${key}: ${value}`).join(', ');
+    feed.innerHTML = `<div class="empty"><h2 class="sm">${active?'No events match these filters':'Waiting for first activity'}</h2><p class="d sm">${active?esc(active):'Events appear as the monitor works.'}</p>${active?'<button class="btn" id="clear-filters">Clear filters</button>':'<button class="btn" id="empty-search-all">Search all now</button>'}</div>`;
+    $('#clear-filters')?.addEventListener('click',()=>{state.route='#'+routeParts().path; history.replaceState(null,'',state.route);renderActivity(routeParts().parts[1]==='item'?decodeURIComponent(routeParts().parts[2]):null);});
+    $('#empty-search-all')?.addEventListener('click',()=>$('#search-all').click());
   } else {
-    // Fallback: plain textarea if CodeMirror failed to load.
-    const textarea = document.createElement("textarea");
-    textarea.className = "aimm-editor";
-    textarea.spellcheck = false;
-    editorHost.appendChild(textarea);
-    editor = {
-      getValue: () => textarea.value,
-      setValue: (v) => { textarea.value = v; },
-      getScrollInfo: () => ({ top: textarea.scrollTop }),
-      on: () => {},
-      refresh: () => {},
-    };
-    textarea.addEventListener("input", onEditorChange);
-    textarea.addEventListener("keydown", (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
-        e.preventDefault();
-        saveConfig();
-      }
-    });
+    if (reset || !feed.querySelector('[data-record]')) feed.innerHTML = matching.toReversed().map(rowHtml).join('');
+    else {
+      const ids = new Set(matching.map(record=>String(record.id)));
+      for (const row of feed.querySelectorAll('[data-record]')) if (!ids.has(row.dataset.record)) row.remove();
+      const present = new Set([...feed.querySelectorAll('[data-record]')].map(row=>Number(row.dataset.record)));
+      const added = matching.filter(record=>!present.has(record.id)).toReversed();
+      const newest = Math.max(0,...present);
+      if(added.some(record=>record.id<newest))feed.innerHTML=matching.toReversed().map(rowHtml).join('');
+      else if (added.length) feed.insertAdjacentHTML('afterbegin',added.map(rowHtml).join(''));
+    }
+    for (const details of feed.querySelectorAll('[data-event-details]')) {
+      details.open = state.expanded.has(Number(details.dataset.eventDetails));
+      details.ontoggle = () => {const id=Number(details.dataset.eventDetails); if (details.open) {state.expanded.add(id);pauseFeed();} else state.expanded.delete(id);};
+    }
   }
-
-  // ---------------------------------------------------------------
-  // Config load / save / validate
-  // ---------------------------------------------------------------
-  const setEditorStatus = (msg, cls = "") => {
-    const el = $("#editor-status");
-    el.className = "editor-status " + cls;
-    el.textContent = msg;
-  };
-
-  const loadConfig = async () => {
-    const files = await (await api("/api/config/files")).json();
-    if (!files.files.length) return;
-    const f = files.files[0];
-    state.fileId = f.id;
-    $("#config-name").textContent = f.path;
-    $("#mtime").textContent = "mtime " + new Date(f.mtime * 1000).toLocaleString();
-
-    const res = await (await api(`/api/config/file/${f.id}`)).json();
-    state.originalContent = res.content;
-    state.currentContent = res.content;
-    state.baseMtime = res.mtime;
-    editor.setValue(res.content);
-    // Prefer the server-provided sections list, but fall back to a
-    // client-side scan if the server didn't include one (e.g. user is
-    // running an older aimm that hasn't been restarted yet).
-    if (Array.isArray(res.sections) && res.sections.length) {
-      state.sections = res.sections;
-    } else {
-      state.sections = scanSectionsClient(res.content);
+  updatePauseBar();
+}
+function acceptRecords(records, reset = false) {
+  const seen = new Set(state.records.map(record=>record.id));
+  const newCount = records.filter(record=>!seen.has(record.id)).length;
+  state.records = mergeRecords(reset?[]:state.records,records,state.capacity);
+  for (const record of records.toSorted((a,b)=>a.id-b.id)) {
+    if(record.id>state.incidentId){
+      if(record.levelno>=40 && /Error parsing:|No browser could be launched|browser.*(?:crashed|closed unexpectedly)/i.test(record.message)){state.incidentId=record.id;state.monitorIssue=/Error parsing:/.test(record.message)?'The monitor could not load config.toml. Repair and save the configuration.':'The monitor browser stopped. View the error and restart the monitor process.';}
+      if(record.extra?.kind==='browser_ready'){state.incidentId=record.id;state.monitorIssue=null;}
     }
-    renderGutter();
-    $("#save-btn").disabled = true;
-    if (res.has_masked_secrets) {
-      setEditorStatus(
-        `🔒 Secrets masked as "${res.mask_token}" — leave them alone to preserve, or type over to replace.`,
-        "ok"
-      );
-    } else {
-      setEditorStatus("");
-    }
-  };
-
-  const validateConfig = async () => {
-    setEditorStatus("validating…");
-    try {
-      const res = await api("/api/config/validate", {
-        method: "POST",
-        body: JSON.stringify({ content: state.currentContent }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setEditorStatus(
-          "✗ " + (data.detail || `HTTP ${res.status}`),
-          "err"
-        );
-        return false;
-      }
-      if (data.valid) {
-        setEditorStatus("✓ config is valid", "ok");
-        return true;
-      }
-      setEditorStatus("✗ " + (data.error || "invalid"), "err");
-      return false;
-    } catch (err) {
-      console.error("validate failed", err);
-      setEditorStatus("✗ validate failed: " + err.message, "err");
-      return false;
-    }
-  };
-
-  const saveConfig = async () => {
-    // If a debounced validate is pending, cancel it — the server will
-    // re-validate on PUT anyway.
-    if (validateTimer) {
-      clearTimeout(validateTimer);
-      validateTimer = null;
-    }
-    setEditorStatus("saving…");
-    let res, data;
-    try {
-      res = await api(`/api/config/file/${state.fileId}`, {
-        method: "PUT",
-        body: JSON.stringify({
-          content: state.currentContent,
-          base_mtime: state.baseMtime,
-        }),
-      });
-      data = await res.json().catch(() => ({}));
-    } catch (err) {
-      console.error("save failed", err);
-      setEditorStatus("✗ save failed: " + err.message, "err");
-      return;
-    }
-    if (!res.ok || !data.ok) {
-      setEditorStatus(
-        "✗ " + (data.error || data.detail || `HTTP ${res.status}`),
-        "err"
-      );
-      if (res.status === 409) {
-        if (confirm("Config was modified on disk. Reload from disk and lose your changes?")) {
-          await loadConfig();
-        }
-      }
-      return;
-    }
-    state.originalContent = state.currentContent;
-    state.baseMtime = data.mtime;
-    $("#save-btn").disabled = true;
-    setEditorStatus("✓ saved — monitor will reload within 1s", "ok");
-    $("#mtime").textContent = "mtime " + new Date(data.mtime * 1000).toLocaleString();
-  };
-
-  $("#save-btn").addEventListener("click", saveConfig);
-
-  // ---------------------------------------------------------------
-  // Logs
-  // ---------------------------------------------------------------
-  const LEVEL_ORDER = { DEBUG: 10, INFO: 20, WARNING: 30, ERROR: 40, CRITICAL: 50 };
-
-  const matchesLevel = (record) => {
-    if (state.logLevel === "ALL") return true;
-    return LEVEL_ORDER[record.level] >= LEVEL_ORDER[state.logLevel];
-  };
-  const matchesFilter = (record) => {
-    if (!state.logFilter) return true;
-    return record.message.toLowerCase().includes(state.logFilter.toLowerCase());
-  };
-  const matchesKind = (record) => {
-    if (!state.logKind) return true;
-    return record.extra && record.extra.kind === state.logKind;
-  };
-  const matchesItem = (record) => {
-    if (!state.logItem) return true;
-    return record.extra && record.extra.item === state.logItem;
-  };
-  const matchesScore = (record) => {
-    if (state.logMinScore == null) return true;
-    const score = record.extra && record.extra.score;
-    return typeof score === "number" && score >= state.logMinScore;
-  };
-
-  const updateItemDropdown = (record) => {
-    const item = record.extra && record.extra.item;
-    if (!item || state.knownItems.has(item)) return;
-    state.knownItems.add(item);
-    const opt = document.createElement("option");
-    opt.value = item;
-    opt.textContent = item;
-    $("#item-filter").appendChild(opt);
-  };
-
-  const renderDetail = (record) => {
-    const lines = [];
-    lines.push(
-      `<dl><dt>logger</dt><dd>${esc(record.logger)}</dd>` +
-        `<dt>source</dt><dd>${esc(record.location)}</dd></dl>`
-    );
-    if (record.extra) {
-      const extra = record.extra;
-      const rows = Object.entries(extra)
-        .map(([k, v]) => {
-          if (k === "url" && typeof v === "string") {
-            return `<dt>${esc(k)}</dt><dd><a href="${esc(v)}" target="_blank" rel="noopener">${esc(v)}</a></dd>`;
-          }
-          return `<dt>${esc(k)}</dt><dd>${esc(typeof v === "object" ? JSON.stringify(v) : String(v))}</dd>`;
-        })
-        .join("");
-      lines.push(`<dl>${rows}</dl>`);
-    }
-    if (record.exc_text) {
-      lines.push(`<pre>${esc(record.exc_text)}</pre>`);
-    }
-    return `<div class="log-detail">${lines.join("")}</div>`;
-  };
-
-  const renderLogs = () => {
-    const container = $("#logs");
-    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 16;
-    const visible = state.records.filter(
-      (r) =>
-        matchesLevel(r) &&
-        matchesFilter(r) &&
-        matchesKind(r) &&
-        matchesItem(r) &&
-        matchesScore(r)
-    );
-    container.innerHTML = visible
-      .map((r) => {
-        const expanded = state.expanded.has(r.id);
-        const kind = r.extra && r.extra.kind;
-        const badge = kind
-          ? `<span class="kind-badge kind-${esc(kind)}">${esc(kind.replace(/_/g, " "))}</span>`
-          : "";
-        return (
-          `<div class="log-row level-${esc(r.level)}${expanded ? " expanded" : ""}" data-id="${r.id}">` +
-          `<span class="log-time">${esc(r.iso_time)}</span>` +
-          `<span class="log-level">${esc(r.level)}</span>` +
-          `<span class="log-msg">${badge}${esc(r.message)}</span>` +
-          (expanded ? renderDetail(r) : "") +
-          `</div>`
-        );
-      })
-      .join("");
-    if ($("#autoscroll").checked && (atBottom || state.records.length < 20)) {
-      container.scrollTop = container.scrollHeight;
-    }
-  };
-
-  const esc = (s) =>
-    String(s)
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;");
-
-  $("#logs").addEventListener("click", (e) => {
-    const row = e.target.closest(".log-row");
-    if (!row) return;
-    const id = Number(row.dataset.id);
-    if (state.expanded.has(id)) state.expanded.delete(id);
-    else state.expanded.add(id);
-    renderLogs();
-  });
-
-  $$(".level-chips .chip").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      $$(".level-chips .chip").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      state.logLevel = btn.dataset.level;
-      // Clear error badge when user views errors.
-      if (btn.dataset.level === "ERROR" || btn.dataset.level === "ALL") {
-        state.errorCount = 0;
-        renderErrorBadge();
-      }
-      renderLogs();
-    });
-  });
-
-  $$(".kind-chips .chip").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      $$(".kind-chips .chip").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      state.logKind = btn.dataset.kind;
-      renderLogs();
-    });
-  });
-
-  $("#item-filter").addEventListener("change", (e) => {
-    state.logItem = e.target.value;
-    renderLogs();
-  });
-
-  $("#score-filter").addEventListener("change", (e) => {
-    const v = e.target.value;
-    state.logMinScore = v === "" ? null : Number(v);
-    renderLogs();
-  });
-
-  $("#log-filter").addEventListener("input", (e) => {
-    state.logFilter = e.target.value;
-    renderLogs();
-  });
-
-  const loadLogs = async () => {
-    const res = await (await api("/api/logs?limit=500")).json();
-    state.records = res.records;
-    state.records.forEach((r) => {
-      updateItemDropdown(r);
-      noteActivity(r);
-    });
-    renderLogs();
-    renderMonitorStatus();
-  };
-
-  // -------- Monitor status chip derived from the log stream --------
-  // Track activity timestamp from any log record.
-  const noteActivity = (record) => {
-    state.lastActivity = record.time;
-    // Track error count for the Error tab badge.
-    if (record.level === "ERROR" || record.level === "CRITICAL") {
-      state.errorCount++;
-      renderErrorBadge();
-    }
-  };
-
-  const formatAgo = (epoch) => {
-    if (!epoch) return "—";
-    const s = Math.max(0, Math.round(Date.now() / 1000 - epoch));
-    if (s < 60) return `${s}s ago`;
-    if (s < 3600) return `${Math.round(s / 60)}m ago`;
-    return `${Math.round(s / 3600)}h ago`;
-  };
-
-  // Monitor status is purely about process liveness — driven by
-  // WebSocket connection state, not log message content.
-  const renderMonitorStatus = () => {
-    const chip = $("#monitor-status");
-    if (!chip) return;
-    if (!state.wsConnected) {
-      chip.className = "status-chip status-err";
-      chip.textContent = "● monitor: disconnected";
-      chip.title = "The aimm process may have stopped. Reconnecting…";
-    } else if (!state.lastActivity) {
-      chip.className = "status-chip status-warn";
-      chip.textContent = "● monitor: connected";
-      chip.title = "Connected, waiting for first log message.";
-    } else {
-      const ago = Math.round(Date.now() / 1000 - state.lastActivity);
-      if (ago > 300) {
-        chip.className = "status-chip status-warn";
-        chip.textContent = `● monitor: idle · ${formatAgo(state.lastActivity)}`;
-        chip.title = "Connected but no activity for 5+ minutes.";
-      } else {
-        chip.className = "status-chip status-ok";
-        chip.textContent = `● monitor: running · ${formatAgo(state.lastActivity)}`;
-        chip.title = "Process is alive and active.";
-      }
-    }
-  };
-
-  // Error badge on the "Error" filter chip in the logs toolbar.
-  const renderErrorBadge = () => {
-    const errorChip = document.querySelector('.level-chips [data-level="ERROR"]');
-    if (!errorChip) return;
-    if (state.errorCount > 0) {
-      errorChip.dataset.badge = state.errorCount;
-      errorChip.classList.add("has-badge");
-    } else {
-      delete errorChip.dataset.badge;
-      errorChip.classList.remove("has-badge");
-    }
-  };
-
-  // Tick the "Xs ago" display once a second so it stays fresh even
-  // without new log records.
-  setInterval(renderMonitorStatus, 1000);
-
-  // Restart button — soft-restarts the monitor by touching the config.
-  const wireClick = (sel, fn) => {
-    const el = $(sel);
-    if (el) el.addEventListener("click", fn);
-    else console.warn("missing element:", sel);
-  };
-  wireClick("#restart-btn", async () => {
-    const btn = $("#restart-btn");
-    if (btn) btn.disabled = true;
-    try {
-      const res = await api("/api/monitor/restart", { method: "POST" });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok) {
-        setEditorStatus("▶ Waking monitor — searching all items now…", "ok");
-      } else {
-        setEditorStatus("▶ Failed: " + (data.detail || "unknown"), "err");
-      }
-    } catch (err) {
-      setEditorStatus("↻ Restart failed: " + err.message, "err");
-    } finally {
-      setTimeout(() => { if (btn) btn.disabled = false; }, 2000);
-    }
-  });
-
-  wireClick("#export-csv-btn", async () => {
-    const btn = $("#export-csv-btn");
-    if (btn) btn.disabled = true;
-    try {
-      const res = await api("/api/found.csv");
-      if (!res.ok) {
-        setEditorStatus("⬇ Export failed: " + res.status, "err");
-        return;
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const stamp = new Date()
-        .toISOString()
-        .slice(0, 19)
-        .replace(/[-:T]/g, "")
-        .replace(/(\d{8})(\d{6})/, "$1-$2");
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `found-items-${stamp}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      setEditorStatus("⬇ Export failed: " + err.message, "err");
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-  });
-
-  // ---------------------------------------------------------------
-  // Sections sidebar (AI-assisted edit / delete / add)
-  // ---------------------------------------------------------------
-  //
-  // The backend ships a list of section headers found in the file.
-  // We render them in a sidebar with a ⋯ menu per section. Clicking
-  // the section name scrolls the textarea to that section. No pixel
-  // measurement of the textarea is needed.
-
-  state.sections = [];
-
-  const SECTION_HEADER_RE = /^\s*\[([^\]\n]+)\]\s*$/;
-
-  const scanSectionsClient = (text) => {
-    const lines = text.split("\n");
-    const headers = [];
-    for (let i = 0; i < lines.length; i++) {
-      const m = lines[i].match(SECTION_HEADER_RE);
-      if (m) headers.push({ lineIdx: i, name: m[1].trim() });
-    }
-    return headers.map((h, i) => {
-      const dot = h.name.indexOf(".");
-      const lineEnd = i + 1 < headers.length ? headers[i + 1].lineIdx : lines.length;
-      return {
-        name: h.name,
-        prefix: dot >= 0 ? h.name.slice(0, dot) : h.name,
-        suffix: dot >= 0 ? h.name.slice(dot + 1) : "",
-        line_start: h.lineIdx,
-        line_end: lineEnd,
-      };
-    });
-  };
-
-  // -------- Thin gutter with ⋯ buttons aligned to section headers --------
-
-  const getLineMetrics = () => {
-    if (editor.defaultTextHeight) {
-      // CodeMirror path
-      const lineHeight = editor.defaultTextHeight();
-      const scrollInfo = editor.getScrollInfo();
-      return { lineHeight, paddingTop: 0, scrollHeight: scrollInfo.height };
-    }
-    // Fallback textarea path
-    const el = editorHost.querySelector("textarea");
-    if (!el) return { lineHeight: 20, paddingTop: 0, scrollHeight: 0 };
-    const cs = window.getComputedStyle(el);
-    const lineHeight = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.55;
-    const paddingTop = parseFloat(cs.paddingTop) || 0;
-    return { lineHeight, paddingTop, scrollHeight: el.scrollHeight };
-  };
-
-  const renderGutter = () => {
-    const inner = $("#gutter-inner");
-    if (!inner) return;
-    inner.innerHTML = "";
-    const { lineHeight, paddingTop, scrollHeight } = getLineMetrics();
-    // Match gutter height to editor scroll height so the transform
-    // range is correct.
-    inner.style.height = scrollHeight + "px";
-
-    state.sections.forEach((section) => {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "section-btn";
-      btn.innerHTML = "⋯";
-      btn.title = `[${section.name}]`;
-      btn.style.top = (paddingTop + lineHeight * section.line_start) + "px";
-      btn.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        toggleSectionMenu(section, btn);
-      });
-      inner.appendChild(btn);
-    });
-  };
-
-  // Sync gutter scroll position with the editor.
-  const syncGutter = () => {
-    const inner = $("#gutter-inner");
-    if (inner) inner.style.transform = `translateY(${-editor.getScrollInfo().top}px)`;
-  };
-  if (editor.on) {
-    editor.on("scroll", syncGutter);
-    editor.on("change", () => {
-      if (refreshSectionsFromBuffer._t) clearTimeout(refreshSectionsFromBuffer._t);
-      refreshSectionsFromBuffer._t = setTimeout(refreshSectionsFromBuffer, 150);
-    });
+    if (record.extra?.kind==='credentials_wait'&&record.id>state.credentialsId){state.credentialsId=record.id;state.credentials=record.extra.status;}
+    if (record.id>state.loginId && record.location?.startsWith('facebook:') && /^\s*Waiting \S+/.test(record.message)){state.loginId=record.id;state.loginUntil=Date.now()+60000;}
   }
-
-  // Re-scan sections from the buffer after edits (debounced).
-  const refreshSectionsFromBuffer = () => {
-    state.sections = scanSectionsClient(editor.getValue());
-    renderGutter();
-  };
-
-  // -------- Popover menu (Edit / Delete / Add another) --------
-
-  const closeSectionMenus = () => {
-    document.querySelectorAll(".section-menu").forEach((m) => m.remove());
-  };
-
-  const toggleSectionMenu = (section, btn) => {
-    const existing = document.querySelector(".section-menu");
-    if (existing && existing.dataset.section === section.name) {
-      existing.remove();
-      return;
+  if (!state.following) state.pending += newCount;
+  clearTimeout(state.feedTimer); state.feedTimer=setTimeout(()=>{if (state.following) renderFeed(reset); else updatePauseBar(); renderSidebar();},200);
+  if(newCount&&state.following)state.announceCount+=newCount;
+  if (newCount && state.following && !state.announceTimer) state.announceTimer=setTimeout(()=>{if(state.following)$('#feed-announcement').textContent=`${state.announceCount} new events`;state.announceCount=0;state.announceTimer=null;},2000);
+}
+async function snapshot() {
+  const data = await json('/api/logs?limit=1000000000');
+  const reset = state.streamId != null && state.streamId !== data.stream_id;
+  state.streamId=data.stream_id;const previousCapacity=state.capacity;state.capacity=data.capacity || 2000;
+  if(previousCapacity!==state.capacity&&$('#feed'))renderActivity(routeParts().parts[1]==='item'?decodeName(routeParts().parts[2]):null);
+  if (reset) {state.credentials=null;state.credentialsId=0;state.monitorIssue=null;state.incidentId=0;state.loginId=0;state.loginUntil=0;state.following=true;state.pending=0;state.expanded.clear();}
+  acceptRecords(data.records,reset); return data;
+}
+function connectStream() {
+  clearTimeout(connectStream.timer);
+  if (state.ws) {state.ws.onclose=null;state.ws.close();}
+  const socket = new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/stream`); state.ws=socket;
+  socket.onmessage = async event => {
+    let data; try {data=JSON.parse(event.data);} catch {return;}
+    if (data.type==='hello') {
+      if(state.streamId && state.streamId!==data.stream_id){state.records=[];state.credentials=null;state.credentialsId=0;state.monitorIssue=null;state.incidentId=0;state.loginId=0;state.loginUntil=0;state.following=true;state.pending=0;state.expanded.clear();renderFeed(true);}state.streamId=data.stream_id;
+      state.connected=true;state.disconnectedAt=null; updateStatus();
+      try {await snapshot();} catch(error) {toast(error.message);} return;
     }
-    closeSectionMenus();
-
-    const menu = document.createElement("div");
-    menu.className = "section-menu";
-    menu.dataset.section = section.name;
-
-    // Position relative to the button using viewport coordinates
-    // (position: fixed in CSS) so the menu can escape the sidebar's
-    // overflow clip.
-    const rect = btn.getBoundingClientRect();
-    menu.style.top = rect.bottom + 4 + "px";
-    menu.style.left = rect.left + "px";
-
-    const addMenuItem = (label, handler, cls = "") => {
-      const item = document.createElement("button");
-      item.type = "button";
-      item.textContent = label;
-      if (cls) item.className = cls;
-      item.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        closeSectionMenus();
-        handler();
-      });
-      menu.appendChild(item);
-    };
-
-    addMenuItem("Edit", () => openEditSectionModal(section.name));
-    addMenuItem("Duplicate", () => duplicateSection(section));
-    const sep = document.createElement("div");
-    sep.className = "menu-sep";
-    menu.appendChild(sep);
-    addMenuItem("Delete", () => deleteSection(section), "danger");
-
-    document.body.appendChild(menu);
-  };
-
-  // Close popovers when clicking anywhere else.
-  document.addEventListener("click", (e) => {
-    if (!e.target.closest(".section-btn") && !e.target.closest(".section-menu")) {
-      closeSectionMenus();
+    if (data.type==='log') {
+      const last = state.records.at(-1)?.id;
+      acceptRecords([data.record]);
+      if (last != null && data.record.id > last+1 && !snapshot.busy) {snapshot.busy=true;try{await snapshot();}finally{snapshot.busy=false;}}
     }
+  };
+  socket.onclose = async event => {
+    state.connected=false;state.disconnectedAt ||= Date.now();updateStatus();
+    if (event.code===4401) {await showLogin(true);return;}
+    connectStream.timer=setTimeout(connectStream,2000);
+  };
+  socket.onerror = () => socket.close();
+}
+async function exportCsv() {
+  const button = $('#export-csv'); button.disabled=true;
+  try {
+    const response = await api('/api/found.csv');
+    if (!response.ok) throw new Error('Export failed. Try again.');
+    const blob = await response.blob(); const content = await blob.text();
+    if (content.trim().split(/\r?\n/).length<2) {toast('Nothing to export yet. The cache has no notified listings.');return;}
+    const url=URL.createObjectURL(blob), anchor=document.createElement('a'); anchor.href=url;
+    anchor.download=response.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] || 'notified-listings.csv';
+    anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  } catch(error) {toast(error.message);} finally {button.disabled=false;}
+}
+
+const itemGroups = [
+  ['What to look for',['enabled','search_phrases','description']],
+  ['Price and location',['min_price','max_price','location']],
+  ['AI rating',['ai','rating']],
+  ['Schedule and notifications',['search_interval','max_search_interval','start_at','notify']],
+];
+function fieldDefault(form, key) {
+  const without = structuredClone(state.local);
+  if (without[form.prefix]?.[form.name]) delete without[form.prefix][form.name][key];
+  if (form.prefix === 'monitor') delete without.monitor?.[key];
+  const config = mergeConfig(state.context.inherited,without);
+  config.notification_values = state.context.notification_values || {};
+  if (form.prefix==='item') return itemValue(config,form.name,key);
+  if (form.prefix==='marketplace') return itemValue({...config,item:{__defaults:{marketplace:form.name}}},'__defaults',key);
+  if (form.prefix==='monitor') return config.monitor?.[key];
+  if (form.prefix==='notification') return config.notification_values?.[form.name]?.[key] ?? config.notification?.[form.name]?.[key] ?? (key==='enabled'?true:undefined);
+  if (form.prefix==='user') return resolvedUser(config,form.name)?.[key] ?? ({enabled:true,message_format:'plain_text',max_retries:5,retry_delay:60,rate_limit_enabled:true,instance_rate_limit:1,global_rate_limit:30}[key]);
+  return config[form.prefix]?.[form.name]?.[key] ?? (key==='enabled'?true:undefined);
+}
+function formValue(key) {
+  const form=state.form;
+  if (own(form.changes,key)) return form.changes[key]===null ? fieldDefault(form,key) : form.changes[key];
+  return own(form.fields,key) ? form.fields[key] : fieldDefault(form,key);
+}
+function setChange(key,value) {
+  state.form.changes[key]=value; state.saved=''; state.error=''; updateSaveBar();
+}
+function schemaFor(prefix) {
+  return FORM_SCHEMAS[prefix==='marketplace'?'marketplace.facebook':prefix==='monitor'?'monitor':prefix+'.*'] || [];
+}
+function optionHtml(options,value) {
+  return options.map(option=>`<option value="${esc(option.value)}" ${String(option.value)===String(value)?'selected':''}>${esc(option.label)}</option>`).join('');
+}
+function chipHtml(key,values) {
+  return `<div class="chips" data-chips="${key}">${list(values).map((value,index)=>`<span class="chip">${esc(value)}<button type="button" data-chip-remove="${index}" aria-label="Remove ${esc(value)}">×</button></span>`).join('')}<input id="field-${key}" aria-label="Add ${esc(key.replaceAll('_',' '))}" placeholder="Add a value, press Enter"></div>`;
+}
+function ratingHtml(value) {
+  const ratings=list(value); const initial=ratings[0]||3, later=ratings.at(-1)||3;
+  const segmented=(id,rating)=>`<div class="seg" role="group" aria-label="${id==='rating'?'Notification minimum':'First search minimum'}" data-rating="${id}">${[1,2,3,4,5].map(n=>`<button type="button" data-score="${n}" aria-pressed="${n===Number(rating)}">${n}</button>`).join('')}</div>`;
+  return `${segmented('rating',later)} <span class="hint">4 = Good match · 5 = Great deal</span><label class="opt sm" style="margin-top:10px"><input type="checkbox" id="different-rating" ${ratings.length>1?'checked':''}>Use a different minimum for the first search</label><div id="first-rating-wrap" ${ratings.length>1?'':'hidden'}>${segmented('first-rating',initial)}</div>`;
+}
+function fieldHtml(field) {
+  const form=state.form,key=field.key,value=formValue(key),id='field-'+key;
+  let widget=''; let type=field.type;
+  if (['ai','notify','marketplace'].includes(key) && ['item','marketplace'].includes(form.prefix)) type='references';
+  if (['keywords','antikeywords'].includes(key)) type='textarea';
+  if (key==='rating') widget=ratingHtml(value);
+  else if (type==='references') {
+    const choices=Object.keys(state.config[key==='notify'?'user':key==='ai'?'ai':'marketplace']||{});
+    if (key==='marketplace') widget=`<span class="sel"><select id="${id}" data-value="${key}">${choices.map(name=>`<option ${name===value?'selected':''} value="${esc(name)}">${esc(name)}</option>`).join('')}</select></span>`;
+    else widget=`<div class="choices" data-references="${key}">${choices.map(name=>`<label class="opt sm"><input type="checkbox" value="${esc(name)}" ${list(value).includes(name)?'checked':''}><span class="m">${esc(name)}</span>${key==='notify'&&!userChannels(state.config,name,state.context.environment).length?'<span class="warn">No channel set up</span>':''}</label>`).join('') || '<span class="hint">None configured. Add one in Settings.</span>'}</div>`;
+  } else if (type==='password') {
+    const secret=filled(value);
+    const environment=typeof value==='string'&&/^\$\{\w+\}$/.test(value);
+    const description=environment?`From environment variable ${value.slice(2,-1)}${state.context.environment[value.slice(2,-1)]===false?' (not set)':''}`:secret?'Saved (hidden)':'No value set';
+    widget=`<div class="secret" data-secret="${key}"><span class="gr sm">${esc(description)}</span><button class="btn q sm" type="button" data-replace="${key}">Replace</button></div><div class="row wr" data-secret-input="${key}" hidden><input id="${id}" class="in" type="password" autocomplete="new-password" placeholder="Paste a new value or an environment reference" style="flex:1"><button class="btn q sm" type="button" data-secret-keep="${key}">Keep current</button></div>`;
+  } else if (type==='boolean') widget=`<span class="sel"><select id="${id}" data-value="${key}">${optionHtml([{value:'true',label:key==='enabled'?'Enabled':'Yes'},{value:'false',label:key==='enabled'?'Disabled':'No'}],value===false?'false':'true')}</select></span>`;
+  else if (type==='list') widget=chipHtml(key,value);
+  else if (type==='firstlater') {
+    const values=list(value); const later=values.at(-1)??field.options[0]?.value;
+    widget=`<div class="first-later" data-firstlater="${key}"><span class="sel"><select id="${id}" data-later>${optionHtml(field.options,later)}</select></span><label class="opt sm"><input type="checkbox" data-different ${values.length>1?'checked':''}>Different for first search</label><span class="sel" data-first-wrap ${values.length>1?'':'hidden'}><select data-first aria-label="${esc(field.label)} for the first search">${optionHtml(field.options,values[0]??later)}</select></span></div>`;
+  } else if (type==='checkboxes') widget=`<div class="choices" data-references="${key}">${field.options.map(option=>`<label class="opt sm"><input type="checkbox" value="${esc(option.value)}" ${list(value).map(String).includes(String(option.value))?'checked':''}>${esc(option.label)}</label>`).join('')}</div>`;
+  else if (type==='select') {
+    let options=field.options;
+    if (filled(value) && !options.some(option=>String(option.value)===String(value))) options=[{value,label:String(value)},...options];
+    widget=`<span class="sel"><select id="${id}" data-value="${key}">${optionHtml(options,value)}</select></span>`;
+  } else if (type==='textarea') widget=`<textarea class="ta" id="${id}" data-value="${key}" rows="${key==='description'?3:2}">${esc(Array.isArray(value)?value.join('\n'):value)}</textarea>`;
+  else widget=`<input class="in ${type==='number'?'':'mono'}" id="${id}" data-value="${key}" type="${type==='number'?'number':'text'}" ${type==='number'?'step="any"':''} value="${esc(labelValue(value===undefined?'':value))}">`;
+  const inheritable= ['item','marketplace'].includes(form.prefix) && !['search_phrases','description','enabled','username','password','login_wait_time','language'].includes(key);
+  const mode=own(form.changes,key)?form.changes[key]!==null:own(form.fields,key);
+  const defaultValue=fieldDefault(form,key);
+  const source=state.context.inherited[form.prefix]?.[form.name]?.[key];
+  const sourceNote=filled(source)?`<p class="hint">Earlier file: ${esc(labelValue(source))}${Array.isArray(source)?'. Lists are combined across files; edit the source file to remove earlier entries.':''}</p>`:'';
+  const modeHtml=inheritable?`<span class="sel field-mode"><select data-mode="${key}" aria-label="${esc(field.label)} source"><option value="default" ${!mode?'selected':''}>Use default — ${esc(labelValue(defaultValue))}</option><option value="custom" ${mode?'selected':''}>Custom</option></select></span>`:'';
+  return `<label class="l" for="${id}">${esc(field.label)}</label><div class="field" data-field="${key}">${modeHtml}<div class="field-value">${widget}</div>${sourceNote}${field.help?`<p class="hint">${esc(field.help)}</p>`:''}<p class="ferr" id="error-${key}" hidden></p></div>`;
+}
+function locationHtml() {
+  const form=state.form;
+  const region=form.fields.search_region, cities=form.fields.search_city;
+  const mode=filled(region)?'region':filled(cities)?'cities':'default';
+  const effectiveCities=list(fieldDefault(form,'search_city'));
+  const effectiveRegions=list(fieldDefault(form,'search_region'));
+  const selectedCities=list(cities).length?list(cities):list(itemValue(state.config,form.name,'search_city'));
+  const radius=list(form.fields.radius), currency=list(form.fields.currency);
+  const rows=selectedCities.map((city,index)=>cityRow(city,radius[index]??(radius.length===1?radius[0]:''),currency[index]??(currency.length===1?currency[0]:''))).join('');
+  const options=Object.keys(state.config.region||{});
+  return `<span class="l">Where</span><div class="field" data-field="location"><div class="choices" role="group" aria-label="Search location">${[['default','Use default — '+labelValue(effectiveRegions.length?effectiveRegions:effectiveCities)],['cities','Cities — each with its own radius and currency'],['region','Region — one or more built-in or custom regions']].map(([value,label])=>`<label class="opt sm"><input type="radio" name="where" value="${value}" ${mode===value?'checked':''}>${esc(label)}</label>`).join('')}</div><div id="city-editor" ${mode==='cities'?'':'hidden'}><div class="city-labels"><span>City</span><span>Radius (km)</span><span>Currency</span><span></span></div><div id="city-rows">${rows||cityRow('','','')}</div><button class="btn sm" id="add-city" type="button">+ Add city</button><p class="hint">Use the city name or numeric ID from its Facebook Marketplace URL. Leave all radiuses or currencies blank to use the default.</p></div><div id="region-editor" class="choices" ${mode==='region'?'':'hidden'}>${options.map(name=>`<label class="opt sm"><input type="checkbox" value="${esc(name)}" ${list(region).includes(name)?'checked':''}><span class="m">${esc(name)}</span></label>`).join('')}</div><p id="error-location" class="ferr" hidden></p></div>`;
+}
+function cityRow(city,radius,currency) {
+  return `<div class="city-row"><input class="in mono" aria-label="City" data-city value="${esc(city)}"><input class="in mono" type="number" min="1" aria-label="Radius in kilometres" data-radius value="${esc(radius)}"><input class="in mono" aria-label="Currency code" data-currency value="${esc(currency)}" placeholder="USD"><button class="btn q sm" data-remove-city type="button" aria-label="Remove city">×</button></div>`;
+}
+function fieldsHtml(keys) {
+  const schema=schemaFor(state.form.prefix);
+  return '<div class="f">'+keys.map(key=>key==='location'?locationHtml():fieldHtml(schema.find(field=>field.key===key))).join('')+'</div>';
+}
+function saveBarHtml() {
+  return '<div class="save"><span class="message" id="save-message" role="status"></span><span class="row"><button class="btn" id="form-cancel" type="button">Cancel</button><button class="btn p" id="form-save" type="submit" form="section-form">Save</button></span></div>';
+}
+function prepareForm(prefix,name,isNew = false,preset = {}) {
+  const local=prefix==='monitor'?state.local.monitor||{}:state.local[prefix]?.[name]||{};
+  state.form={prefix,name,new:isNew,fields:structuredClone(isNew?preset:local),changes:{},newName:name,returnRoute:isNew&&prefix==='item'?(state.newReturn||'#/monitor'):null};
+  state.saved='';
+}
+function formHtml() {
+  const form=state.form;
+  const nameHtml=form.prefix==='monitor'?'':`<div class="f"><label class="l" for="section-name">Name</label><div class="field"><input class="in mono" id="section-name" value="${esc(form.newName)}" style="max-width:320px"><p class="hint" id="section-hint">Saved as [${esc(form.prefix)}.${esc(form.newName)}]. Letters, numbers and underscores for new names.</p><p class="ferr" id="error-name" hidden></p></div></div>`;
+  let content='';
+  if (form.prefix==='item') {
+    const included=itemGroups.flatMap(group=>group[1]).filter(key=>key!=='location');
+    content=itemGroups.map(([title,keys],index)=>`<section class="sect"><h2>${title}</h2>${index===0?nameHtml:''}${fieldsHtml(keys)}${title==='AI rating'?'<p class="hint">Fit with your description. With no working AI, every listing that passes your filters meets the rating threshold.</p>':''}</section>`).join('');
+    const advanced=schemaFor('item').filter(field=>!included.includes(field.key)&&!['search_city','search_region','radius','currency'].includes(field.key));
+    const count=advanced.filter(field=>own(form.fields,field.key)).length;
+    content+=`<details><summary class="sm">Advanced options · ${count} customized</summary><div class="group-fields">${fieldsHtml(advanced.map(field=>field.key))}</div></details>`;
+  } else if (form.prefix==='marketplace') {
+    const account=['enabled','username','password','login_wait_time','language'];
+    const primary=['search_city','search_region','radius','currency','search_interval','max_search_interval','ai','rating','notify'];
+    content=`<section class="sect"><h2>Facebook account</h2>${nameHtml}${fieldsHtml(account)}<p class="hint">These credentials also protect remote dashboard access. Dashboard sign-in uses the credentials present when the process started; restart it after changing them.</p></section><section class="sect"><h2>Where to search and search defaults</h2>${fieldsHtml(primary)}<p class="hint">Regions replace cities. These defaults apply unless a saved search supplies its own value.</p></section><details><summary class="sm">More defaults</summary><div class="group-fields">${fieldsHtml(schemaFor('marketplace').filter(field=>![...account,...primary].includes(field.key)).map(field=>field.key))}</div></details>`;
+  } else if (form.prefix==='ai') {
+    content=`<section class="sect"><h2>Provider</h2>${nameHtml}<div class="f"><label class="l" for="provider-choice">Provider</label><span class="sel"><select id="provider-choice">${['openai','anthropic','deepseek','gemini','ollama'].map(provider=>`<option value="${provider}" ${(form.fields.provider||form.name).toLowerCase()===provider?'selected':''}>${provider==='openai'?'OpenAI':provider[0].toUpperCase()+provider.slice(1)}</option>`).join('')}</select></span></div>${fieldsHtml(['model','api_key','enabled'])}<p class="hint">For a new provider, leaving the key blank uses its environment variable (for example OPENAI_API_KEY). Use Replace to paste a value or reference. Saving does not test the key.</p></section><details><summary class="sm">Connection</summary><div class="group-fields">${fieldsHtml(['base_url','timeout','max_retries'])}</div></details>`;
+  } else if (['user','notification'].includes(form.prefix)) {
+    const effective=form.new?form.fields:form.prefix==='user'?resolvedUser(state.config,form.name):state.config.notification?.[form.name]||{};
+    const selected=Object.keys(CHANNELS).filter(channel=>CHANNELS[channel].some(key=>filled(effective[key])));
+    const active= form.prefix==='notification'?(selected[0]||'Email'):null;
+    content=`${nameHtml}<div class="f"><span class="l">Channels</span><div class="row wr" id="channel-choices">${Object.keys(CHANNELS).map(channel=>form.prefix==='notification'?`<label class="opt sm"><input type="radio" name="shared-channel" data-channel="${channel}" ${channel===active?'checked':''}>${channel}</label>`:`<label class="opt sm"><input type="checkbox" data-channel="${channel}" ${selected.includes(channel)?'checked':''}>${channel}</label>`).join('')}</div></div>`;
+    const channelFields={Telegram:['telegram_token','telegram_chat_id'],Email:['email','smtp_server','smtp_port','smtp_username','smtp_password','smtp_from'],Pushbullet:['pushbullet_token'],Pushover:['pushover_user_key','pushover_api_token'],ntfy:['ntfy_server','ntfy_topic']};
+    content+=Object.entries(channelFields).map(([channel,keys])=>`<section class="sect" data-channel-fields="${channel}" ${(form.prefix==='notification'?channel!==active:!selected.includes(channel))?'hidden':''}><h2>${channel}</h2>${fieldsHtml(keys)}</section>`).join('');
+    if(form.prefix==='user')content+=`<section class="sect"><h2>Schedule and shared settings</h2>${fieldsHtml(['remind','notify_with'])}<p class="hint">Leaving notify_with absent applies every enabled shared channel setting. An explicitly empty list applies none. Shared values overwrite the same user fields; for SMTP on this user only, exclude the shared email section.</p><button class="btn sm" id="user-smtp" type="button">Use SMTP on this user only</button></section>`;
+    const more=schemaFor(form.prefix).filter(field=>field.advanced&& !['smtp_server','smtp_port','smtp_username','smtp_password','smtp_from','notify_with','remind','enabled'].includes(field.key));
+    content+=`<details><summary class="sm">More options</summary><div class="group-fields">${fieldsHtml(more.map(field=>field.key))}</div></details>`;
+    // Status remains accessible even before expanding the optional settings.
+    content+=fieldsHtml(['enabled']);
+  } else content=nameHtml+fieldsHtml(schemaFor(form.prefix).map(field=>field.key));
+  return `<form id="section-form" class="form-content" autocomplete="off"><div class="body">${content}</div></form>${saveBarHtml()}`;
+}
+function mountForm(prefix,name,isNew = false,preset = {},standalone = true) {
+  prepareForm(prefix,name,isNew,preset);
+  const title=prefix==='item'?(isNew?'New search':'Edit · '+name):prefix==='monitor'?'Proxy':'Edit · '+name;
+  const actions=!isNew&&prefix!=='monitor'?`<a class="btn q" href="#/settings/config?section=${encodeURIComponent(prefix+'.'+name)}">View in config.toml</a><button class="btn x" id="delete-section">Delete</button>`:'';
+  if(standalone)$('#pane').innerHTML=pageHeader(title,'',actions)+formHtml();
+  else $('#settings-form-host').innerHTML=(actions?`<div class="bar">${actions}</div>`:'')+formHtml();
+  bindForm();
+  $('#delete-section')?.addEventListener('click',()=>deleteSection(prefix,name));
+  renderSidebar(); updateSaveBar();
+}
+function bindForm() {
+  if(state.form.prefix==='user')for(const input of document.querySelectorAll('[data-channel]'))if(CHANNELS[input.dataset.channel].some(key=>filled(state.context.inherited.user?.[state.form.name]?.[key]))){input.disabled=true;input.closest('label').title='This channel is defined in an earlier config file. Change that source file to remove it.';}
+  $('#section-name')?.addEventListener('input',event=>{state.form.newName=event.target.value;state.form.changes.__name=event.target.value;$('#section-hint').textContent=`Saved as [${state.form.prefix}.${event.target.value}].`;updateSaveBar();});
+  for(const mode of document.querySelectorAll('[data-mode]')) {
+    const wrapper=mode.closest('.field').querySelector('.field-value');
+    const disable=()=>wrapper.querySelectorAll('input,select,button,textarea').forEach(control=>control.disabled=mode.value==='default');
+    disable();
+    mode.onchange=()=>{disable();setChange(mode.dataset.mode,mode.value==='default'?null:formValue(mode.dataset.mode));};
+  }
+  for(const input of document.querySelectorAll('[data-value]')) input.addEventListener('input',()=>{
+    const key=input.dataset.value,field=schemaFor(state.form.prefix).find(field=>field.key===key);
+    let value=input.value;
+    if(value==='')value=['prompt','extra_prompt','rating_prompt'].includes(key)?'':null;
+    else if(field.type==='boolean')value=value==='true';
+    else if(field.type==='number')value=Number(value);
+    else if(field.type==='numberlist') {value=value.split(',').map(Number);if(value.length===1)value=value[0];}
+    else if(['keywords','antikeywords'].includes(key)&&value.includes('\n'))value=value.split('\n').map(s=>s.trim()).filter(Boolean);
+    else if(key==='search_region')value=list(value);
+    setChange(key,value);
   });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeSectionMenus();
+  for(const widget of document.querySelectorAll('[data-chips]')) bindChips(widget);
+  for(const choices of document.querySelectorAll('[data-references]')) choices.onchange=()=>setChange(choices.dataset.references,[...choices.querySelectorAll('input:checked')].map(input=>input.value));
+  for(const button of document.querySelectorAll('[data-replace]')) button.onclick=()=>{
+    const key=button.dataset.replace; document.querySelector(`[data-secret="${key}"]`).hidden=true;
+    const wrapper=document.querySelector(`[data-secret-input="${key}"]`);wrapper.hidden=false;wrapper.querySelector('input').focus();
+  };
+  for(const button of document.querySelectorAll('[data-secret-keep]')) button.onclick=()=>{
+    const key=button.dataset.secretKeep; document.querySelector(`[data-secret="${key}"]`).hidden=false;
+    const wrapper=document.querySelector(`[data-secret-input="${key}"]`);wrapper.hidden=true;wrapper.querySelector('input').value='';delete state.form.changes[key];updateSaveBar();
+  };
+  for(const input of document.querySelectorAll('[data-secret-input] input'))input.oninput=()=>{const key=input.closest('[data-secret-input]').dataset.secretInput;if(input.value)setChange(key,input.value);else{delete state.form.changes[key];updateSaveBar();}};
+  for(const group of document.querySelectorAll('[data-rating]'))group.onclick=event=>{
+    const button=event.target.closest('[data-score]');if(!button)return;
+    group.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',b===button)); saveRating();
+  };
+  $('#different-rating')?.addEventListener('change',event=>{$('#first-rating-wrap').hidden=!event.target.checked;saveRating();});
+  for(const group of document.querySelectorAll('[data-firstlater]'))group.onchange=()=>{
+    const different=group.querySelector('[data-different]').checked;group.querySelector('[data-first-wrap]').hidden=!different;
+    let values=different?[group.querySelector('[data-first]').value,group.querySelector('[data-later]').value]:[group.querySelector('[data-later]').value];
+    if(group.dataset.firstlater==='date_listed')values=values.map(Number);
+    setChange(group.dataset.firstlater,values.length===1?values[0]:values);
+  };
+  document.querySelectorAll('[name="where"]').forEach(radio=>radio.onchange=()=>{ $('#city-editor').hidden=radio.value!=='cities';$('#region-editor').hidden=radio.value!=='region';updateLocation();});
+  $('#add-city')?.addEventListener('click',()=>{$('#city-rows').insertAdjacentHTML('beforeend',cityRow('','',''));bindCityRows();updateLocation();});
+  bindCityRows();$('#region-editor')?.addEventListener('change',updateLocation);
+  $('#provider-choice')?.addEventListener('change',event=>setChange('provider',event.target.value));
+  document.querySelectorAll('[data-channel]').forEach(input=>input.onchange=()=>{
+    if(state.form.prefix==='notification')document.querySelectorAll('[data-channel-fields]').forEach(section=>section.hidden=section.dataset.channelFields!==input.dataset.channel);
+    else document.querySelector(`[data-channel-fields="${input.dataset.channel}"]`).hidden=!input.checked;
+    if(!input.checked || state.form.prefix==='notification') {
+      const removeChannels=state.form.prefix==='notification'?Object.keys(CHANNELS).filter(channel=>channel!==input.dataset.channel):[input.dataset.channel];
+      for(const channel of removeChannels)for(const field of document.querySelector(`[data-channel-fields="${channel}"]`).querySelectorAll('[data-field]'))setChange(field.dataset.field,null);
+      if(state.form.prefix==='user')excludeSharedChannels(removeChannels);
+    }
+    if(input.checked && state.form.prefix==='user'){state.form.changes.__channels=true;updateSaveBar();}
   });
+  $('#user-smtp')?.addEventListener('click',()=>{if(excludeSharedChannels(['Email'])===false)return;toast('Shared email settings excluded. Fill in the SMTP fields for this user.');});
+  $('#section-form').onsubmit=event=>{event.preventDefault();saveForm();};
+  $('#form-cancel').onclick=async()=>{if(dirty()&&!await confirmAction('Discard draft?','Unsaved changes will be lost.','Discard'))return;const prefix=state.form.prefix,name=state.form.name,returnRoute=state.form.returnRoute;state.content=state.base;state.form=null;state.error='';state.conflict=null;if(prefix==='item'){await navigate(returnRoute||itemRoute(name));}else{state.route='#'+routeParts().path;history.replaceState(null,'',state.route);refreshData();render();}};
+}
+function bindChips(widget) {
+  const key=widget.dataset.chips;
+  let values=list(formValue(key));
+  const redraw=()=>{const disabled=widget.querySelector('input')?.disabled;widget.outerHTML=chipHtml(key,values);const fresh=document.querySelector(`[data-chips="${key}"]`);bindChips(fresh);fresh.querySelectorAll('input,button').forEach(control=>control.disabled=disabled);};
+  widget.querySelectorAll('[data-chip-remove]').forEach(button=>button.onclick=()=>{values.splice(Number(button.dataset.chipRemove),1);setChange(key,values);redraw();});
+  const input=widget.querySelector('input');
+  const append=(focus=true)=>{const value=input.value.trim();if(value){input.value='';values.push(value);setChange(key,values);redraw();if(focus)document.querySelector(`[data-chips="${key}"] input`).focus();}};
+  input.onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();append();}};
+  input.onblur=()=>{if(input.value.trim())append(false);};
+}
+function saveRating() {
+  const get=id=>Number(document.querySelector(`[data-rating="${id}"] [aria-pressed="true"]`).dataset.score);
+  setChange('rating',$('#different-rating').checked?[get('first-rating'),get('rating')]:get('rating'));
+}
+function bindCityRows() {
+  for(const row of document.querySelectorAll('.city-row')) {
+    row.querySelectorAll('input').forEach(input=>input.oninput=updateLocation);
+    row.querySelector('[data-remove-city]').onclick=()=>{row.remove();updateLocation();};
+  }
+}
+function updateLocation() {
+  const mode=document.querySelector('[name="where"]:checked').value;
+  for(const key of ['search_region','search_city','radius','currency'])state.form.changes[key]=null;
+  if(mode==='region')state.form.changes.search_region=[...$('#region-editor').querySelectorAll('input:checked')].map(input=>input.value);
+  if(mode==='cities') {
+    const rows=[...document.querySelectorAll('.city-row')].filter(row=>row.querySelector('[data-city]').value.trim());
+    state.form.changes.search_city=rows.map(row=>row.querySelector('[data-city]').value.trim());
+    const radius=rows.map(row=>row.querySelector('[data-radius]').value),currency=rows.map(row=>row.querySelector('[data-currency]').value.trim());
+    if(radius.some(Boolean))state.form.changes.radius=radius.map(value=>value===''?'':Number(value));
+    if(currency.some(Boolean))state.form.changes.currency=currency;
+    if(own(state.form.fields,'city_name'))state.form.changes.city_name=null;
+  }
+  updateSaveBar();
+}
+function excludeSharedChannels(channels) {
+  if(filled(state.context.inherited.user?.[state.form.name]?.notify_with)){toast('Earlier notify_with entries remain active. Change the source file to exclude them.');return false;}
+  const selected=list(formValue('notify_with') ?? Object.keys(state.config.notification||{}));
+  const remaining=selected.filter(name=>!channels.some(channel=>CHANNELS[channel].some(key=>filled(state.config.notification?.[name]?.[key]))));
+  setChange('notify_with',remaining);
+  const widget=document.querySelector('[data-chips="notify_with"]'); if(widget){widget.outerHTML=chipHtml('notify_with',remaining);bindChips(document.querySelector('[data-chips="notify_with"]'));}
+}
 
-  // -------- Delete section (pure client-side string op) --------
-
-  const deleteSection = (section) => {
-    const lines = editor.getValue().split("\n");
-    let start = section.line_start;
-    let end = section.line_end; // exclusive
-
-    const preview = lines.slice(start, end).filter((l) => l.trim()).join("\n");
-    const ok = confirm(
-      `Delete [${section.name}] ?\n\n` +
-        preview +
-        "\n\nThis only updates the editor buffer — click Save to commit."
-    );
-    if (!ok) return;
-
-    // If there's a blank line right before this section, consume it
-    // too so we don't leave a double blank.
-    if (start > 0 && lines[start - 1].trim() === "") {
-      start--;
+function updateSaveBar() {
+  const message=$('#save-message');if(!message)return;
+  message.textContent=state.saving?'Validating and writing config.toml…':state.error||state.saved||(dirty()?'Unsaved changes':'No unsaved changes');
+  message.className='message '+(state.error?'err':state.saved?'ok':dirty()?'warn':'d');
+  $('#form-save').disabled=state.saving || (!dirty() && !state.error) || (!state.form && state.rawInvalid);
+  $('#form-save').textContent=state.saving?'Saving…':state.form?.prefix==='item'?'Save search':'Save';
+  $('#form-cancel').disabled=state.saving;
+  document.querySelectorAll('#section-form input,#section-form select,#section-form textarea,#section-form button').forEach(control=>{if(state.saving){if(!own(control.dataset,'wasDisabled'))control.dataset.wasDisabled=String(control.disabled);control.disabled=true;}else if(own(control.dataset,'wasDisabled')){control.disabled=control.dataset.wasDisabled==='true';delete control.dataset.wasDisabled;}});
+}
+function fieldError(key,message) {
+  const error=$('#error-'+key);if(error){error.textContent=message;error.hidden=false;}
+  const field=$('#field-'+key)||document.querySelector(`[data-field="${key}"] input:not(:disabled),[data-field="${key}"] select:not(:disabled)` )||$('#section-name');if(field){field.setAttribute('aria-invalid','true');field.setAttribute('aria-describedby','error-'+key);field.classList.add('bad');field.focus();}
+  state.error=message;updateSaveBar();
+}
+function sectionPath(prefix,name,key = '') {return prefix+(prefix==='monitor'?'':'.'+JSON.stringify(name))+(key?'.'+key:'');}
+function candidateFromForm() {
+  const form=state.form;const name=form.newName.trim();
+  if(form.prefix!=='monitor' && (!name || (name!==form.name && !/^[A-Za-z0-9_]+$/.test(name)) || (form.new && !/^[A-Za-z0-9_]+$/.test(name))))throw Object.assign(new Error('Use letters, numbers and underscores for the name.'),{field:'name'});
+  if(form.prefix!=='monitor' && (form.new || name!==form.name) && own(state.config[form.prefix],name))throw Object.assign(new Error(`A ${form.prefix} named ${name} already exists.`),{field:'name'});
+  if(!form.new && name!==form.name && own(state.context.inherited[form.prefix],form.name))throw Object.assign(new Error('This section is also defined in an earlier file. Rename it in that source file.'),{field:'name'});
+  const changes={...(form.new?form.fields:{}),...form.changes};delete changes.__name;delete changes.__channels;
+  // A scalar currency is the loader's way to apply one currency to every city.
+  if(Array.isArray(changes.currency)&&changes.currency.length===1)changes.currency=changes.currency[0];
+  if(form.prefix==='ai' && (form.new || name!==form.name)){changes.provider ||= $('#provider-choice').value;if(form.new&&!filled(changes.api_key)&&changes.provider!=='ollama')changes.api_key='${'+changes.provider.toUpperCase()+'_API_KEY}';}
+  if(form.prefix==='item' && !filled(changes.search_phrases ?? form.fields.search_phrases ?? state.config.item?.[form.name]?.search_phrases))throw Object.assign(new Error('Add at least one search phrase.'),{field:'search_phrases'});
+  if(own(changes,'notify')&&Array.isArray(changes.notify)&&!changes.notify.length)throw Object.assign(new Error('An empty notify list falls back to every user. Use default, choose a user, or disable this search.'),{field:'notify'});
+  if(own(changes,'radius') && Array.isArray(changes.radius) && changes.radius.some(value=>value===''))throw Object.assign(new Error('Fill in a radius for every city, or leave all radiuses blank.'),{field:'location'});
+  if(own(changes,'currency') && Array.isArray(changes.currency) && changes.currency.some(value=>!value))throw Object.assign(new Error('Fill in a currency for every city, or leave all currencies blank.'),{field:'location'});
+  const price=key=>String(own(changes,key)?changes[key]??'':form.fields[key]??'').match(/^(\d+)$/)?.[1];
+  if(price('min_price') && price('max_price') && Number(price('min_price'))>Number(price('max_price')))throw Object.assign(new Error('Maximum price must be at least the minimum price.'),{field:'max_price'});
+  let content=state.content;let renames={};
+  if(!form.new && name!==form.name) {
+    content=renameSection(content,form.prefix,form.name,name);renames[form.prefix+'.'+form.name]=form.prefix+'.'+name;
+    const reference={user:'notify',ai:'ai',marketplace:'marketplace',region:'search_region',notification:'notify_with'}[form.prefix];
+    if(reference)for(const prefix of ['item','marketplace','user'])for(const [section,fields] of Object.entries(state.local[prefix]||{}))if(own(fields,reference)){
+      const value=fields[reference],renamed=Array.isArray(value)?value.map(entry=>entry===form.name?name:entry):value===form.name?name:value;
+      content=edit(content,sectionPath(prefix,section,reference),renamed);
     }
-    const next = lines.slice(0, start).concat(lines.slice(end)).join("\n");
-    editor.setValue(next);
-    state.currentContent = next;
-    const dirty = state.currentContent !== state.originalContent;
-    $("#save-btn").disabled = !dirty;
-    setEditorStatus(
-      `Deleted [${section.name}] — review and click Save to commit.`,
-      "ok"
-    );
-    refreshSectionsFromBuffer();
+  }
+  for(const [key,value] of Object.entries(changes)) {
+    if(value===null && (form.new || !own(form.fields,key)))continue;
+    content=edit(content,sectionPath(form.prefix,name,key),value);
+  }
+  // A new empty section still needs one meaningful assignment for toml_edit to create its table.
+  if(form.new && !Object.keys(changes).length)content=edit(content,sectionPath(form.prefix,name,'enabled'),true);
+  return {content,renames,name};
+}
+async function validateDraft(content,renames = {}) {
+  const data=await json('/api/config/validate',{method:'POST',body:JSON.stringify({content,renames})});
+  if(!data.valid)throw Object.assign(new Error(data.error||'Configuration is invalid.'),{validation:true});
+}
+async function writeDraft(content,renames = {},mtime = state.mtime) {
+  await validateDraft(content,renames);
+  const response=await api('/api/config/file/primary',{method:'PUT',body:JSON.stringify({content,base_mtime:mtime,renames})});
+  const data=await response.json();
+  if(response.status===409){state.conflict={content,renames};renderConflict();throw new Error('The file changed on disk. Your draft is kept.');}
+  if(!response.ok || !data.ok)throw new Error(data.error||data.detail||'Could not save config.toml.');
+  await loadConfig();state.conflict=null;state.monitorIssue=null;updateStatus();
+  return data;
+}
+async function saveForm() {
+  if(state.saving)return;
+  document.querySelectorAll('.ferr').forEach(el=>el.hidden=true);
+  document.querySelectorAll('#section-form [aria-invalid="true"]').forEach(el=>{el.removeAttribute('aria-invalid');el.removeAttribute('aria-describedby');el.classList.remove('bad');});
+  let candidate;
+  try{candidate=candidateFromForm();}catch(error){fieldError(error.field||'name',error.message);return;}
+  state.saving=true;state.error='';updateSaveBar();
+  try{
+    await writeDraft(candidate.content,candidate.renames);
+    const form=state.form;
+    state.form=null;
+    if(form.prefix==='item')state.route=itemRoute(candidate.name)+'/edit';
+    else if(form.prefix==='monitor')state.route='#/settings/more';
+    else state.route='#/settings/'+({user:'notifications',notification:'notifications',ai:'ai',marketplace:'marketplace',region:'more'}[form.prefix])+'?edit='+encodeURIComponent(candidate.name)+(form.prefix==='notification'||form.prefix==='region'?'&type='+form.prefix:'');
+    history.replaceState(null,'',state.route);state.saving=false;render();
+    state.saved='Saved '+time(Date.now()/1000)+' · the monitor reloads changes at its next safe point and may restart searches.';updateSaveBar();
+  }catch(error){state.error=error.message;state.saving=false;document.querySelectorAll('#section-form input,#section-form select,#section-form textarea,#section-form button').forEach(control=>control.disabled=false);for(const mode of document.querySelectorAll('[data-mode]'))if(mode.value==='default')mode.closest('.field').querySelectorAll('.field-value input,.field-value select,.field-value button,.field-value textarea').forEach(control=>control.disabled=true);updateSaveBar();}
+}
+function renderConflict() {
+  if(!state.conflict)return;
+  let host=$('#conflict-banner');
+  if(!host){host=document.createElement('div');host.id='conflict-banner';host.className='config-notice';$('#pane').insertBefore(host,$('#pane').children[1]||null);}
+  host.innerHTML='<div class="nt warn"><span class="gr">config.toml changed on disk. Your draft is kept.</span><button class="btn sm" id="compare-config">Compare</button><button class="btn sm" id="reapply-config">Reload and re-apply</button><button class="btn sm" id="overwrite-config">Overwrite…</button></div>';
+  $('#compare-config').onclick=async()=>{
+    const latest=await json('/api/config/file/primary');
+    let draft=state.content;try{draft=state.form?candidateFromForm().content:draft;}catch{}
+    try{const parsed=parse(draft);const mask=(node,path=[])=>{for(const [key,value] of Object.entries(node)){if(value&&typeof value==='object'&&!Array.isArray(value))mask(value,[...path,JSON.stringify(key)]);else if(/password|token|api_key|secret|username|pushover_user_key/i.test(key)&&value)draft=edit(draft,[...path,JSON.stringify(key)].join('.'),'<REDACTED>');}};mask(parsed);}catch{draft='Finish repairing the draft before comparing it. Secret values are hidden.';}
+    const compare=(text,other)=>{const lines=other.split('\n');return text.split('\n').map((line,index)=>`<span ${line===lines[index]?'':'class="changed"'}>${esc(line)}\n</span>`).join('');};
+    await confirmAction('Compare draft and current file',`<div class="compare"><div><p class="b">Your draft</p><pre>${compare(draft,latest.content)}</pre></div><div><p class="b">Current file</p><pre>${compare(latest.content,draft)}</pre></div></div>`,'Done','Close',true);
   };
-
-  // -------- Duplicate section --------
-  // Opens the Add form pre-populated with the original section's values
-  // and a unique auto-generated name.
-
-  const duplicateSection = (section) => {
-    const schema = findFormSchema(section.name);
-    if (!schema) {
-      alert(`No form defined for [${section.name}] — duplicate manually in the TOML editor.`);
-      return;
-    }
-
-    // Get the original fields (server-provided or client-parsed).
-    let fields = (section && section.fields) || {};
-    if (!Object.keys(fields).length && window.tomlEdit) {
-      try {
-        const parsed = window.tomlEdit.parse(state.currentContent);
-        const parts = section.name.split(".");
-        let node = parsed;
-        for (const p of parts) { node = node && node[p]; }
-        if (node && typeof node === "object") fields = node;
-      } catch (err) { /* fall through with empty fields */ }
-    }
-
-    // Generate a unique suffix: append 1, 2, 3…
-    const existingNames = new Set(state.sections.map((s) => s.name));
-    let newSuffix = section.suffix;
-    let i = 1;
-    while (existingNames.has(`${section.prefix}.${newSuffix}`)) {
-      newSuffix = section.suffix + i;
-      i++;
-    }
-
-    formContext = {
-      sectionName: `${section.prefix}.__new__`,
-      fields,
-      schema,
-      addMode: true,
-      addPrefix: section.prefix,
-      nameValue: newSuffix,
-    };
-    activeTab = "left";
-    $("#form-modal-title").textContent = `Duplicate [${section.name}]`;
-    $("#form-modal-hint").hidden = false;
-    $("#form-modal-hint").textContent =
-      "Review the values copied from the original section, change what you need, and save.";
-    renderForm(schema, fields);
-    formModal.open();
-    setTimeout(() => $("#add-section-name").focus(), 50);
+  $('#reapply-config').onclick=async()=>{
+    if(state.saving)return;
+    if(!state.form&&!await confirmAction('Load the current file?', 'This replaces your raw TOML draft. Compare it first to keep any changes you need.','Load file'))return;
+    state.saving=true;updateSaveBar();
+    try{
+      await loadConfig();state.conflict=null;host.remove();state.error='';state.saving=false;
+      if(!state.form){render();return;}
+      const form=state.form;form.fields=structuredClone(form.prefix==='monitor'?state.local.monitor||{}:state.local[form.prefix]?.[form.name]||{});
+      $('#section-form').outerHTML=formHtml().replace(saveBarHtml(),'');bindForm();updateSaveBar();toast('Current file loaded. Your field edits are kept; review and save again.');
+    }catch(error){state.saving=false;state.error=error.message;updateSaveBar();}
   };
-
-  // ---------------------------------------------------------------
-  // Section form modal (placeholder — full form rendering coming next)
-  // ---------------------------------------------------------------
-  //
-  // The ⋯ menu wires Edit / Add another to the two functions below.
-  // For now they pop a minimal placeholder modal so the page doesn't
-  // crash. The form-rendering engine that uses toml-edit-js will be
-  // wired here in the next iteration.
-
-  // ---------------------------------------------------------------
-  // Form-based section editor using toml-edit-js
-  // ---------------------------------------------------------------
-
-  // Form field schema definitions per section type. Each field:
-  //   key       — TOML key name
-  //   label     — display name
-  //   type      — "text" | "password" | "number" | "select" | "textarea"
-  //   options   — for select: [{value, label}, ...]
-  //   required  — boolean
-  //   help      — tooltip / small hint
-  //   group     — optional group header (for visual grouping)
-  //   advanced  — if true, hidden by default
-
-  const BUILT_IN_REGIONS = [
-    "usa", "usa_full", "can", "mex", "bra", "arg",
-    "aus", "aus_miles", "nzl", "ind", "gbr", "fra", "spa",
-  ];
-
-  // override: true means this field can also be set per-item in [item.*]
-  // to override the marketplace default.
-  const OV = "Can be overridden per-item in [item.*] sections.";
-
-  const CATEGORIES = [
-    { value: "", label: "(any)" },
-    { value: "vehicles", label: "Vehicles" },
-    { value: "propertyrentals", label: "Property rentals" },
-    { value: "apparel", label: "Apparel" },
-    { value: "electronics", label: "Electronics" },
-    { value: "entertainment", label: "Entertainment" },
-    { value: "family", label: "Family" },
-    { value: "freestuff", label: "Free stuff" },
-    { value: "free", label: "Free" },
-    { value: "garden", label: "Garden" },
-    { value: "hobbies", label: "Hobbies" },
-    { value: "homegoods", label: "Home goods" },
-    { value: "homeimprovement", label: "Home improvement" },
-    { value: "homesales", label: "Home sales" },
-    { value: "musicalinstruments", label: "Musical instruments" },
-    { value: "officesupplies", label: "Office supplies" },
-    { value: "petsupplies", label: "Pet supplies" },
-    { value: "sportinggoods", label: "Sporting goods" },
-    { value: "tickets", label: "Tickets" },
-    { value: "toys", label: "Toys" },
-    { value: "videogames", label: "Video games" },
-  ];
-
-  const FORM_SCHEMAS = {
-    "marketplace.facebook": [
-      // ---- Left column: Facebook-specific ----
-      { key: "username", label: "Facebook username (email)", type: "text", column: "left",
-        help: "Your Facebook login email." },
-      { key: "password", label: "Facebook password", type: "password", column: "left",
-        help: "Leave blank to keep the current password." },
-      { key: "login_wait_time", label: "Login wait time (seconds)", type: "number", column: "left",
-        help: "Seconds to wait after Facebook login for 2FA / captcha. Default: 60." },
-      { key: "language", label: "Language", type: "text", column: "left", advanced: true,
-        help: "Non-English Facebook locale — must match a [translation.*] section." },
-
-      // ---- Right column: Shared — can be overridden per-item ----
-      { key: "search_city", label: "Search city", type: "text", required: true, column: "right",
-        help: "City code from the Facebook Marketplace URL (lowercase, e.g. 'houston')." },
-      { key: "search_region", label: "Search region", type: "select", column: "right",
-        options: [{ value: "", label: "(none)" }].concat(
-          BUILT_IN_REGIONS.map((r) => ({ value: r, label: r }))
-        ),
-        help: "Pre-defined region (expands to multiple cities)." },
-
-      // ---- Filters (advanced, overridable) ----
-      { key: "category", label: "Category", type: "select", group: "Filters", advanced: true, column: "right",
-        options: CATEGORIES, help: "Marketplace listing category." },
-      { key: "condition", label: "Condition", type: "checkboxes", advanced: true, column: "right",
-        options: [
-          { value: "new", label: "New" },
-          { value: "used_like_new", label: "Used — like new" },
-          { value: "used_good", label: "Used — good" },
-          { value: "used_fair", label: "Used — fair" },
-        ],
-        help: "Filter by item condition. " + OV },
-      { key: "availability", label: "Availability", type: "checkboxes", advanced: true, column: "right",
-        options: [
-          { value: "all", label: "All" },
-          { value: "in", label: "In stock" },
-          { value: "out", label: "Out of stock" },
-        ] },
-      { key: "date_listed", label: "Date listed", type: "checkboxes", advanced: true, column: "right",
-        options: [
-          { value: "1", label: "Last 24 hours" },
-          { value: "7", label: "Last 7 days" },
-          { value: "30", label: "Last 30 days" },
-        ] },
-      { key: "delivery_method", label: "Delivery method", type: "checkboxes", advanced: true, column: "right",
-        options: [
-          { value: "local_pick_up", label: "Local pick-up" },
-          { value: "shipping", label: "Shipping" },
-        ] },
-      { key: "seller_locations", label: "Seller locations", type: "text", advanced: true, column: "right",
-        help: "Comma-separated location names to filter by." },
-      { key: "exclude_sellers", label: "Exclude sellers", type: "text", advanced: true, column: "right",
-        help: "Comma-separated seller names to skip." },
-      { key: "keywords", label: "Keywords (include)", type: "text", advanced: true, column: "right",
-        help: "Boolean expression, e.g. 'drone AND (DJI OR Orqa)'" },
-      { key: "antikeywords", label: "Anti-keywords (exclude)", type: "text", advanced: true, column: "right",
-        help: "Boolean expression for exclusion." },
-
-      // ---- Pricing ----
-      { key: "min_price", label: "Min price", type: "text", group: "Pricing", advanced: true, column: "right",
-        help: "e.g. '50' or '50 USD'" },
-      { key: "max_price", label: "Max price", type: "text", advanced: true, column: "right",
-        help: "e.g. '300' or '300 USD'" },
-
-      // ---- Location ----
-      { key: "radius", label: "Search radius (km)", type: "text", group: "Location", advanced: true, column: "right",
-        help: "Comma-separated radius per city (must match search_city count)." },
-      { key: "currency", label: "Currency", type: "text", advanced: true, column: "right",
-        help: "Comma-separated currency code per city, e.g. 'USD, CAD'." },
-
-      // ---- AI evaluation ----
-      { key: "ai", label: "AI backends", type: "text", group: "AI evaluation", advanced: true, column: "right",
-        help: "Comma-separated [ai.*] names." },
-      { key: "rating", label: "AI rating threshold", type: "text", advanced: true, column: "right",
-        help: "1–5 (or two values: initial, subsequent)." },
-      { key: "prompt", label: "AI prompt", type: "textarea", advanced: true, column: "right",
-        help: "Custom evaluation prompt (replaces default)." },
-      { key: "extra_prompt", label: "Extra prompt", type: "textarea", advanced: true, column: "right",
-        help: "Additional text appended before the rating prompt." },
-      { key: "rating_prompt", label: "Rating prompt", type: "textarea", advanced: true, column: "right",
-        help: "Custom rating instructions (replaces default 1–5 scale)." },
-
-      // ---- Notification ----
-      { key: "notify", label: "Notify users", type: "text", group: "Notification", advanced: true, column: "right",
-        help: "Comma-separated [user.*] names. Default: all users." },
-
-      // ---- Schedule ----
-      { key: "search_interval", label: "Search interval", type: "text", group: "Schedule", advanced: true, column: "right",
-        help: "Duration, e.g. '30m', '1h'. Default: 30 min." },
-      { key: "max_search_interval", label: "Max search interval", type: "text", advanced: true, column: "right",
-        help: "Upper bound for random interval jitter." },
-      { key: "start_at", label: "Start at", type: "text", advanced: true, column: "right",
-        help: "Comma-separated time patterns: 'HH:MM', '*:MM', '*:*:SS'." },
-    ],
-
-    // ---- Item form ----
-    // Matched by prefix "item" — see the lookup logic below.
-    "item.*": [
-      // Left: item-specific
-      { key: "search_phrases", label: "Search phrases", type: "text", required: true, column: "left",
-        help: "Comma-separated. e.g. 'gopro hero 11, gopro hero 12'" },
-      { key: "description", label: "Description (helps AI)", type: "textarea", column: "left",
-        help: "Free-text description of what you want. The AI uses this to evaluate listings." },
-      { key: "marketplace", label: "Marketplace", type: "text", column: "left", advanced: true,
-        help: "Which [marketplace.*] to search. Default: first defined marketplace." },
-
-      // Right: overrides from marketplace defaults
-      { key: "search_city", label: "Search city", type: "text", column: "right",
-        help: "Override marketplace's search city for this item." },
-      { key: "search_region", label: "Search region", type: "select", column: "right",
-        options: [{ value: "", label: "(inherit from marketplace)" }].concat(
-          BUILT_IN_REGIONS.map((r) => ({ value: r, label: r }))
-        ) },
-      { key: "min_price", label: "Min price", type: "text", column: "right",
-        help: "e.g. '50' or '50 USD'" },
-      { key: "max_price", label: "Max price", type: "text", column: "right",
-        help: "e.g. '300' or '300 USD'" },
-      { key: "category", label: "Category", type: "select", column: "right", advanced: true,
-        options: CATEGORIES },
-      { key: "condition", label: "Condition", type: "checkboxes", column: "right", advanced: true,
-        options: [
-          { value: "new", label: "New" },
-          { value: "used_like_new", label: "Used — like new" },
-          { value: "used_good", label: "Used — good" },
-          { value: "used_fair", label: "Used — fair" },
-        ] },
-      { key: "availability", label: "Availability", type: "checkboxes", column: "right", advanced: true,
-        options: [
-          { value: "all", label: "All" },
-          { value: "in", label: "In stock" },
-          { value: "out", label: "Out of stock" },
-        ] },
-      { key: "date_listed", label: "Date listed", type: "checkboxes", column: "right", advanced: true,
-        options: [
-          { value: "1", label: "Last 24 hours" },
-          { value: "7", label: "Last 7 days" },
-          { value: "30", label: "Last 30 days" },
-        ] },
-      { key: "delivery_method", label: "Delivery method", type: "checkboxes", column: "right", advanced: true,
-        options: [
-          { value: "local_pick_up", label: "Local pick-up" },
-          { value: "shipping", label: "Shipping" },
-        ] },
-      { key: "keywords", label: "Keywords (include)", type: "text", column: "right", advanced: true,
-        help: "Boolean expression, e.g. 'drone AND (DJI OR Orqa)'" },
-      { key: "antikeywords", label: "Anti-keywords (exclude)", type: "text", column: "right", advanced: true },
-      { key: "seller_locations", label: "Seller locations", type: "text", column: "right", advanced: true,
-        help: "Comma-separated." },
-      { key: "exclude_sellers", label: "Exclude sellers", type: "text", column: "right", advanced: true },
-      { key: "notify", label: "Notify users", type: "text", column: "right", advanced: true,
-        help: "Comma-separated [user.*] names. Default: inherit from marketplace." },
-      { key: "ai", label: "AI backends", type: "text", group: "AI", column: "right", advanced: true },
-      { key: "rating", label: "AI rating threshold", type: "text", column: "right", advanced: true,
-        help: "1–5 (or initial,subsequent)." },
-      { key: "prompt", label: "AI prompt", type: "textarea", column: "right", advanced: true },
-      { key: "extra_prompt", label: "Extra prompt", type: "textarea", column: "right", advanced: true },
-      { key: "rating_prompt", label: "Rating prompt", type: "textarea", column: "right", advanced: true },
-      { key: "search_interval", label: "Search interval", type: "text", group: "Schedule", column: "right", advanced: true,
-        help: "Duration, e.g. '30m', '1h'." },
-      { key: "max_search_interval", label: "Max search interval", type: "text", column: "right", advanced: true },
-      { key: "start_at", label: "Start at", type: "text", column: "right", advanced: true,
-        help: "Comma-separated time patterns." },
-    ],
-
-    // ---- User form ----
-    "user.*": [
-      { key: "pushbullet_token", label: "Pushbullet token", type: "password",
-        help: "Get your token from pushbullet.com → Settings → Access tokens." },
-      { key: "pushover_user_key", label: "Pushover user key", type: "password", group: "Pushover" },
-      { key: "pushover_api_token", label: "Pushover API token", type: "password" },
-      { key: "telegram_token", label: "Telegram bot token", type: "password", group: "Telegram",
-        help: "Format: 123456789:ABCdef..." },
-      { key: "telegram_chat_id", label: "Telegram chat ID", type: "text",
-        help: "Numeric ID or @username." },
-      { key: "ntfy_server", label: "ntfy server URL", type: "text", group: "ntfy",
-        help: "e.g. https://ntfy.sh" },
-      { key: "ntfy_topic", label: "ntfy topic", type: "text" },
-      { key: "email", label: "Email address", type: "text", group: "Email",
-        help: "Comma-separated list of recipient addresses." },
-      { key: "smtp_server", label: "SMTP server", type: "text", advanced: true },
-      { key: "smtp_port", label: "SMTP port", type: "number", advanced: true,
-        help: "Default: 587" },
-      { key: "smtp_username", label: "SMTP username", type: "text", advanced: true },
-      { key: "smtp_password", label: "SMTP password (app password)", type: "password", advanced: true },
-      { key: "smtp_from", label: "SMTP from address", type: "text", advanced: true },
-      { key: "notify_with", label: "Notification sections", type: "text", group: "Other", advanced: true,
-        help: "Comma-separated [notification.*] section names for shared credentials." },
-      { key: "remind", label: "Remind interval", type: "text", advanced: true,
-        help: "Resend after this interval, e.g. '1d', '6h'. Default: one-time." },
-    ],
-
-    // ---- AI backend form ----
-    "ai.*": [
-      { key: "api_key", label: "API key", type: "password",
-        help: "If left blank, the env var for the provider is used (e.g. ${OPENAI_API_KEY}, ${ANTHROPIC_API_KEY}, ${DEEPSEEK_API_KEY})." },
-      { key: "model", label: "Model", type: "text",
-        help: "e.g. 'gpt-4o', 'deepseek-chat', 'deepseek-r1:14b', 'claude-sonnet-4-20250514'" },
-      { key: "provider", label: "Provider override", type: "text", advanced: true,
-        help: "Override the provider (auto-detected from section name). Only needed for custom OpenAI-compatible endpoints." },
-      { key: "base_url", label: "Base URL", type: "text", advanced: true,
-        help: "Custom API endpoint. Required for Ollama (e.g. http://localhost:11434/v1)." },
-      { key: "timeout", label: "Timeout (seconds)", type: "number", advanced: true },
-      { key: "max_retries", label: "Max retries", type: "number", advanced: true,
-        help: "Default: 10" },
-    ],
+  $('#overwrite-config').onclick=async()=>{
+    if(state.saving)return;
+    if(!await confirmAction('Overwrite the current file?', 'Changes made on disk since you opened this draft will be replaced.','Overwrite','Keep draft'))return;
+    state.saving=true;updateSaveBar();state.editor?.setOption?.('readOnly',true);
+    try{const candidate=state.form?candidateFromForm():{content:state.content,renames:{}};const latest=await json('/api/config/file/primary');await writeDraft(candidate.content,candidate.renames,latest.mtime);state.form=null;state.error='';render();toast('Saved. The monitor may restart searches.');}
+    catch(error){state.error=error.message;if(!state.form)state.rawInvalid=Boolean(error.validation);}
+    finally{state.saving=false;state.editor?.setOption?.('readOnly',false);updateSaveBar();}
   };
-
-  // Look up a schema for a section name. Exact match first, then
-  // prefix-wildcard (e.g. "item.gopro" → "item.*").
-  const findFormSchema = (sectionName) => {
-    if (FORM_SCHEMAS[sectionName]) return FORM_SCHEMAS[sectionName];
-    const dot = sectionName.indexOf(".");
-    if (dot >= 0) {
-      const wildcard = sectionName.slice(0, dot) + ".*";
-      if (FORM_SCHEMAS[wildcard]) return FORM_SCHEMAS[wildcard];
+}
+async function deleteSection(prefix,name) {
+  if(state.saving)return;
+  if(own(state.context.inherited[prefix],name)){toast('This section is defined in an earlier file. Disable it here, or remove it from that source file.');return;}
+  if(['item','user','marketplace'].includes(prefix)&&Object.keys(state.config[prefix]||{}).length<=1){await confirmAction('Keep at least one '+({item:'search',user:'user',marketplace:'marketplace'}[prefix]),'Add another section first, or disable this one.','OK','Close');return;}
+  if(!await confirmAction(`Delete ${name}?`,`Removes [${prefix}.${name}] from config.toml. Recorded activity stays.`,'Delete','Cancel'))return;
+  state.saving=true;updateSaveBar();
+  try{await writeDraft(edit(state.content,sectionPath(prefix,name),null));state.form=null;state.error='';state.route=prefix==='item'?'#/monitor/all':'#/settings/'+({user:'notifications',ai:'ai',notification:'notifications',region:'more',marketplace:'marketplace'}[prefix]);history.replaceState(null,'',state.route);render();}
+  catch(error){toast(error.message);}
+  finally{state.saving=false;updateSaveBar();}
+}
+function renderSettings() {
+  const {parts,query}=routeParts();const section=parts[1]||'marketplace';
+  if(section==='config'){renderConfig();return;}
+  if(section==='marketplace'){
+    const names=Object.keys(state.config.marketplace||{});const name=query.get('edit')||names[0]||'facebook';
+    const isNew=query.has('new');
+    $('#pane').innerHTML=pageHeader('Marketplace',`${Object.values(state.config.item||{}).filter(item=>!filled(item.search_city)&&!filled(item.search_region)).length} searches use the default location. Facebook accounts and defaults for saved searches`,`<a class="btn" href="#/settings/marketplace?new=1&edit=facebook_copy">+ Add marketplace</a>`)+`<div class="bar">${names.map(n=>`<a class="btn sm" href="#/settings/marketplace?edit=${encodeURIComponent(n)}">${esc(n)}</a>`).join('')}</div><div id="settings-form-host"></div>`;
+    mountForm('marketplace',name,isNew,{},false);return;
+  }
+  if(section==='more'){
+    if(query.get('type')==='region' || query.has('new')){mountForm('region',query.get('edit')||'my_region',query.has('new'));return;}
+    $('#pane').innerHTML=pageHeader('Proxy, regions, languages','Network and locale options')+'<div id="settings-form-host"></div>';
+    mountForm('monitor','',false,{},false);
+    const extra=document.createElement('div');extra.className='body';
+    extra.innerHTML=`<section class="sect"><h2>Regions</h2><p class="mu sm">Built in: ${BUILT_IN_REGIONS.join(' · ')}. Each expands to cities with radius and currency.</p><div>${Object.keys(state.config.region||{}).filter(name=>!BUILT_IN_REGIONS.includes(name)||own(state.local.region,name)).map(name=>`<a class="btn sm" href="#/settings/more?type=region&edit=${encodeURIComponent(name)}">${esc(name)}</a>`).join(' ')}</div><a class="btn sm" href="#/settings/more?new=1&type=region&edit=my_region">+ Add custom region</a></section><section class="sect"><h2>Languages</h2><p class="mu sm">A locale and dictionary are needed for non-English Facebook. ${Object.keys(state.config.translation||{}).length} language definitions loaded.</p><a class="btn sm" href="#/settings/config">Edit languages in config.toml</a></section>`;
+    $('#settings-form-host').insertBefore(extra,$('#settings-form-host').lastChild);return;
+  }
+  const prefix=section==='ai'?'ai':query.get('type')==='notification'?'notification':'user';
+  const titles={ai:'AI providers',notifications:'Notifications'};
+  $('#pane').innerHTML=pageHeader(titles[section]||'Settings',section==='ai'?'Rate listings against each search’s description. Saving does not test a key.':'“Configured” means required fields are filled, not that delivery was tested.',`<a class="btn" href="#/settings/${section}?new=1&edit=${section==='ai'?'openai':'new_user'}">+ Add ${section==='ai'?'provider':'user'}</a>`)+`<div class="body"><div class="settings-list">${Object.entries(state.config[section==='ai'?'ai':'user']||{}).map(([name,config])=>{
+    const channels=section==='ai'?null:userChannels(state.config,name,state.context.environment);
+    const summary=section==='ai'?`${config.provider||name} · ${config.model||'provider default'} · ${config.api_key==='<REDACTED>'?'key saved (hidden)':typeof config.api_key==='string'&&config.api_key.startsWith('${')?'key from '+config.api_key.slice(2,-1):'key not configured'}`:channels.length?channels.join(' · ')+' · configured':'No channel set up';
+    const failure=section==='notifications'?state.records.findLast(record=>record.levelno>=40&&record.message.endsWith(`Failed to push note to ${name}.`)):null;
+    return `<div class="settings-row"><div class="row sb"><div><div class="m b">${esc(name)} ${(section==='ai'?config:resolvedUser(state.config,name)).enabled===false?'<span class="tag">disabled</span>':''}</div><p class="m xs ${channels&&!channels.length?'warn':'d'}">${esc(summary)}</p>${failure?`<p class="err xs">Last send failed ${time(failure.time)}</p>`:''}</div><a class="btn sm" href="#/settings/${section}?edit=${encodeURIComponent(name)}">Edit</a></div></div>${query.get('edit')===name&&prefix!=='notification'?'<div id="settings-form-host"></div>':''}`;
+  }).join('')}</div>${section==='notifications'?`<section class="sect"><h2>Shared channel settings</h2><p class="hint">Gmail SMTP requires an app password. Delivery failures are shown against the user when the activity names one.</p><p class="hint">Applied to every user unless notify_with selects a different set. Shared values overwrite matching user fields.</p>${Object.keys(state.config.notification||{}).map(name=>`<div class="row sb"><span class="m b">${esc(name)}</span><a class="btn sm" href="#/settings/notifications?type=notification&edit=${encodeURIComponent(name)}">Edit</a></div>`).join('')}<a class="btn sm" href="#/settings/notifications?type=notification&new=1&edit=shared_email">+ Add shared settings</a></section>`:''}</div>`;
+  if(query.has('new')||prefix==='notification'){
+    const host=document.createElement('div');host.id='settings-form-host';$('#pane').appendChild(host);
+  }
+  if(query.has('edit'))mountForm(prefix,query.get('edit'),query.has('new'),{},false);
+}
+function renderConfig() {
+  const sources=state.context.sources.map(source=>esc(source.path)+(source.editable?' (editable)':' (read-only)')).join(' · ');
+  $('#pane').innerHTML=pageHeader('config.toml','TOML is the plain-text format the monitor reads. Saved changes may restart searches.','<button class="btn" id="discard-raw">Discard draft</button><button class="btn" id="validate-raw">Check for problems</button>')+`<p class="section-note m">${sources||esc(state.file?.path||'')}<br>Hidden values stay unchanged unless replaced. Environment references stay visible.</p><div id="editor-host"></div><form id="section-form"></form>${saveBarHtml()}`;
+  const onChange=()=>{if(state.editorSetting)return;state.content=state.editor.getValue();state.error='';state.saved='';state.rawInvalid=false;updateSaveBar();clearTimeout(renderConfig.timer);renderConfig.timer=setTimeout(()=>checkRaw(),500);};
+  if(window.CodeMirror){
+    state.editor=CodeMirror($('#editor-host'),{mode:'toml',lineNumbers:true,lineWrapping:true,value:state.content,extraKeys:{'Ctrl-S':saveRaw,'Cmd-S':saveRaw}});state.editor.on('change',onChange);state.editor.getInputField().setAttribute('aria-label','Configuration TOML');
+    const section=routeParts().query.get('section');if(section){const lines=state.content.split('\n');const line=lines.findIndex(text=>text.trim()==='['+section+']');if(line>=0){state.editor.setCursor(line,0);state.editor.scrollIntoView({line,ch:0},80);}}
+  }else{
+    const textarea=document.createElement('textarea');textarea.className='raw-editor';textarea.setAttribute('aria-label','Configuration TOML');textarea.value=state.content;$('#editor-host').appendChild(textarea);state.editor={getValue:()=>textarea.value};textarea.oninput=onChange;
+  }
+  $('#discard-raw').onclick=async()=>{if(!dirty()||await confirmAction('Discard draft?','Unsaved changes will be lost.','Discard')){await loadConfig();state.error='';state.conflict=null;renderConfig();}};
+  $('#validate-raw').onclick=()=>checkRaw();$('#section-form').onsubmit=event=>{event.preventDefault();saveRaw();};
+  $('#form-cancel').onclick=async()=>{if(!dirty()||await confirmAction('Discard draft?','Unsaved changes will be lost.','Discard')){state.content=state.base;state.error='';state.saved='';renderConfig();}};
+  $('#form-save').onclick=event=>{event.preventDefault();saveRaw();};
+  updateSaveBar();renderConflict();
+}
+async function checkRaw() {
+  const checked=state.content;
+  if(state.validationLine!=null)state.editor?.removeLineClass?.(state.validationLine,'background','validation-line');state.validationLine=null;
+  try{await validateDraft(checked);if(checked!==state.content)return;state.error='';state.rawInvalid=false;state.saved='Valid with all loaded files';}
+  catch(error){if(checked!==state.content)return;state.error=error.message;state.rawInvalid=Boolean(error.validation);state.saved='';const line=error.message.match(/line (\d+)/)?.[1];if(line&&state.editor?.addLineClass){state.validationLine=Number(line)-1;state.editor.addLineClass(state.validationLine,'background','validation-line');}}
+  updateSaveBar();
+}
+async function saveRaw() {
+  if(state.saving)return;
+  state.saving=true;state.error='';updateSaveBar();state.editor?.setOption?.('readOnly',true);
+  try{await writeDraft(state.content);state.saving=false;renderConfig();state.saved='Saved '+time(Date.now()/1000)+' · the monitor may restart searches.';updateSaveBar();}
+  catch(error){state.saving=false;state.error=error.message;state.rawInvalid=Boolean(error.validation);updateSaveBar();state.editor?.setOption?.('readOnly',false);}
+}
+async function pollConfig() {
+  if(state.pollBusy||state.saving||$('#login-dialog').open||!state.initialized)return;
+  state.pollBusy=true;
+  try{
+    const data=await json('/api/config/files');const mtime=data.files[0].mtime;
+    if(mtime!==state.mtime){
+      const file=await json('/api/config/file/primary');
+      if(state.saving)return;
+      if(file.content===state.base){state.mtime=file.mtime;return;}
+      if(dirty()){
+        if(!state.conflict){try{state.conflict=state.form?candidateFromForm():{content:state.content,renames:{}};}catch{state.conflict={content:null,renames:{}};}renderConflict();}
+      }else{await loadConfig();render();}
     }
-    return null;
-  };
-
-  // Tracks which section is currently being edited.
-  let formContext = { sectionName: "", fields: {}, schema: [] };
-  let showAdvanced = false;
-
-  const formModal = {
-    el: () => $("#form-modal"),
-    open() { this.el().classList.remove("hidden"); },
-    close() {
-      this.el().classList.add("hidden");
-      $("#form-error").hidden = true;
-      const form = $("#section-form");
-      if (form) form.innerHTML = "";
-    },
-  };
-
-  // Which tab is selected (for two-tab forms).
-  let activeTab = "left";
-
-  // Render form fields into #section-form.
-  const renderForm = (schema, fields) => {
-    const form = $("#section-form");
-    form.innerHTML = "";
-
-    // Always render the section name field first. In edit mode it shows
-    // the current suffix (editable for rename); in add/duplicate mode
-    // it shows the suggested new name.
-    const currentPrefix = formContext.addMode ? formContext.addPrefix : formContext.sectionName.split(".")[0];
-    // For AI sections, show a dropdown of known providers instead of a
-    // free-text name input.
-    const aiAutoName = currentPrefix === "ai";
-    const nameWrapper = document.createElement("div");
-    nameWrapper.className = "form-field";
-    const currentSuffix = formContext.nameValue ??
-      (formContext.addMode ? "" : (formContext.sectionName.split(".").slice(1).join(".") || formContext.sectionName));
-    if (aiAutoName) {
-      const aiProviders = [
-        { value: "openai", label: "OpenAI" },
-        { value: "deepseek", label: "DeepSeek" },
-        { value: "anthropic", label: "Anthropic" },
-        { value: "ollama", label: "Ollama" },
-      ];
-      const opts = aiProviders.map((p) =>
-        `<option value="${p.value}" ${currentSuffix === p.value ? "selected" : ""}>${p.label}</option>`
-      ).join("");
-      nameWrapper.innerHTML =
-        `<label class="form-label">AI Provider <span class="required">*</span></label>` +
-        `<select id="add-section-name">${opts}</select>` +
-        `<p class="form-help">[ai.<em>provider</em>]</p>`;
-      const nameSelect = nameWrapper.querySelector("select");
-      nameSelect.addEventListener("change", () => { formContext.nameValue = nameSelect.value; });
-      // Set initial value.
-      if (!currentSuffix) {
-        formContext.nameValue = nameSelect.value;
-      }
-    } else {
-      nameWrapper.innerHTML =
-        `<label class="form-label">Section name <span class="required">*</span></label>` +
-        `<input type="text" id="add-section-name" value="${esc(currentSuffix)}" ` +
-        `placeholder="e.g. gopro, me" />` +
-        `<p class="form-help">[${esc(currentPrefix)}.<em>name</em>]</p>`;
-      const nameInput = nameWrapper.querySelector("input");
-      nameInput.addEventListener("input", () => { formContext.nameValue = nameInput.value; });
-    }
-    form.appendChild(nameWrapper);
-
-    const hasColumns = schema.some((f) => f.column);
-    const hasAdvanced = schema.some((f) => f.advanced);
-
-    // If the schema uses columns, render tabs.
-    if (hasColumns) {
-      // Choose tab labels based on what kind of section we're editing.
-      const prefix = formContext.sectionName.split(".")[0];
-      const leftLabel =
-        prefix === "marketplace" ? "Facebook Login" : "Item Settings";
-      const rightLabel =
-        prefix === "marketplace"
-          ? "Search Defaults (overridable per item)"
-          : "Override Marketplace Defaults";
-
-      const tabBar = document.createElement("div");
-      tabBar.className = "form-tab-bar";
-      const leftBtn = document.createElement("button");
-      leftBtn.type = "button";
-      leftBtn.className = "form-tab" + (activeTab === "left" ? " active" : "");
-      leftBtn.textContent = leftLabel;
-      leftBtn.addEventListener("click", () => { activeTab = "left"; renderForm(schema, fields); });
-      const rightBtn = document.createElement("button");
-      rightBtn.type = "button";
-      rightBtn.className = "form-tab" + (activeTab === "right" ? " active" : "");
-      rightBtn.textContent = rightLabel;
-      rightBtn.addEventListener("click", () => { activeTab = "right"; renderForm(schema, fields); });
-      tabBar.appendChild(leftBtn);
-      tabBar.appendChild(rightBtn);
-      form.appendChild(tabBar);
-    }
-
-    // Toggle for advanced fields.
-    const visibleFields = hasColumns
-      ? schema.filter((f) => (f.column || "left") === activeTab)
-      : schema;
-    const tabHasAdvanced = visibleFields.some((f) => f.advanced);
-    if (tabHasAdvanced) {
-      const toggle = document.createElement("label");
-      toggle.className = "form-label";
-      toggle.style.cursor = "pointer";
-      toggle.innerHTML =
-        `<input type="checkbox" id="show-advanced" ${showAdvanced ? "checked" : ""} /> ` +
-        `Show advanced fields`;
-      toggle.querySelector("input").addEventListener("change", (e) => {
-        showAdvanced = e.target.checked;
-        renderForm(schema, fields);
-      });
-      form.appendChild(toggle);
-    }
-
-    let lastGroup = null;
-    visibleFields.forEach((fieldDef) => {
-      if (fieldDef.advanced && !showAdvanced) return;
-
-      // Group header.
-      if (fieldDef.group && fieldDef.group !== lastGroup) {
-        lastGroup = fieldDef.group;
-        const groupEl = document.createElement("div");
-        groupEl.className = "form-group-title";
-        groupEl.textContent = fieldDef.group;
-        form.appendChild(groupEl);
-      }
-
-      const wrapper = document.createElement("div");
-      wrapper.className = "form-field";
-
-      const label = document.createElement("label");
-      label.className = "form-label";
-      label.innerHTML =
-        esc(fieldDef.label) +
-        (fieldDef.required
-          ? ' <span class="required">*</span>'
-          : ' <span class="optional">optional</span>');
-      wrapper.appendChild(label);
-
-      let input;
-      const rawVal = fields[fieldDef.key];
-      // Flatten arrays to comma-separated for text fields.
-      const currentVal =
-        Array.isArray(rawVal) ? rawVal.join(", ") : rawVal ?? "";
-      // For checkboxes, track which values are currently selected.
-      const checkedSet = new Set(
-        Array.isArray(rawVal) ? rawVal.map(String) : currentVal ? [String(currentVal)] : []
-      );
-
-      if (fieldDef.type === "checkboxes") {
-        // Render a group of checkboxes for multi-value fields.
-        input = document.createElement("div");
-        input.className = "checkboxes";
-        input.dataset.key = fieldDef.key;
-        (fieldDef.options || []).forEach((opt) => {
-          const cb = document.createElement("input");
-          cb.type = "checkbox";
-          cb.value = opt.value;
-          cb.checked = checkedSet.has(String(opt.value));
-          cb.id = `field-${fieldDef.key}-${opt.value}`;
-          const lbl = document.createElement("label");
-          lbl.htmlFor = cb.id;
-          lbl.appendChild(cb);
-          lbl.append(` ${opt.label}`);
-          input.appendChild(lbl);
-        });
-      } else if (fieldDef.type === "select") {
-        input = document.createElement("select");
-        (fieldDef.options || []).forEach((opt) => {
-          const o = document.createElement("option");
-          o.value = opt.value;
-          o.textContent = opt.label;
-          if (String(currentVal) === String(opt.value)) o.selected = true;
-          input.appendChild(o);
-        });
-      } else if (fieldDef.type === "textarea") {
-        input = document.createElement("textarea");
-        input.rows = 3;
-        input.value = currentVal;
-      } else {
-        input = document.createElement("input");
-        input.type = fieldDef.type || "text";
-        // For password fields with <REDACTED>, show placeholder instead.
-        if (fieldDef.type === "password" && String(currentVal) === "<REDACTED>") {
-          input.value = "";
-          input.placeholder = "(unchanged — leave blank to keep current)";
-        } else {
-          input.value = currentVal;
-        }
-        if (fieldDef.type === "number") {
-          input.min = "0";
-          input.step = "1";
-        }
-      }
-      if (fieldDef.type !== "checkboxes") {
-        input.name = fieldDef.key;
-        input.dataset.key = fieldDef.key;
-        label.htmlFor = fieldDef.key;
-        input.id = "field-" + fieldDef.key;
-      }
-      wrapper.appendChild(input);
-
-      if (fieldDef.help) {
-        const help = document.createElement("p");
-        help.className = "form-help";
-        help.textContent = fieldDef.help;
-        wrapper.appendChild(help);
-      }
-      form.appendChild(wrapper);
-    });
-
-    // For AI sections in add mode, set the API key to the env var
-    // reference matching the selected provider.
-    if (aiAutoName && formContext.addMode) {
-      const envVarMap = {
-        openai: "${OPENAI_API_KEY}",
-        deepseek: "${DEEPSEEK_API_KEY}",
-        anthropic: "${ANTHROPIC_API_KEY}",
-        ollama: "${OLLAMA_API_KEY}",
-      };
-      const nameSelect = $("#add-section-name");
-      const apiKeyInput = form.querySelector('[data-key="api_key"]');
-      if (nameSelect && apiKeyInput) {
-        const syncApiKey = () => {
-          const envRef = envVarMap[nameSelect.value] || "";
-          // Only auto-fill if the user hasn't typed something custom.
-          if (!apiKeyInput.value || apiKeyInput.value.startsWith("${")) {
-            apiKeyInput.value = envRef;
-          }
-        };
-        nameSelect.addEventListener("change", syncApiKey);
-        syncApiKey();
-      }
-    }
-
-  };
-
-  // Collect form field values into a {key: coerced_value} dict.
-  const collectFormValues = () => {
-    const form = $("#section-form");
-    const errors = [];
-    const values = {};
-
-    formContext.schema.forEach((fieldDef) => {
-      if (fieldDef.advanced && !showAdvanced) return;
-      const input = form.querySelector(`[data-key="${fieldDef.key}"]`);
-      if (!input) return;
-
-      let newVal;
-      if (fieldDef.type === "checkboxes") {
-        const checked = Array.from(input.querySelectorAll("input:checked")).map(
-          (cb) => cb.value
-        );
-        newVal = checked.length ? checked.join(", ") : "";
-      } else {
-        newVal = input.value.trim();
-      }
-
-      if (fieldDef.required && !newVal) {
-        errors.push(`${fieldDef.label} is required.`);
-        return;
-      }
-      if (!newVal) return;
-      if (fieldDef.type === "password" && !newVal) return;
-
-      // Type coercion.
-      let value;
-      if (fieldDef.type === "number" && newVal) {
-        value = parseInt(newVal, 10);
-        if (isNaN(value)) { errors.push(`${fieldDef.label} must be a number.`); return; }
-      } else if (newVal.includes(",") && fieldDef.type === "text") {
-        const original = formContext.fields[fieldDef.key];
-        if (Array.isArray(original) || newVal.includes(",")) {
-          value = newVal.split(",").map((s) => s.trim()).filter(Boolean);
-        } else {
-          value = newVal;
-        }
-      } else {
-        value = newVal;
-      }
-      values[fieldDef.key] = value;
-    });
-    return { values, errors };
-  };
-
-  // Generate a TOML section block as text for "add" mode.
-  const generateSectionToml = (sectionFullName, values) => {
-    const lines = [`[${sectionFullName}]`];
-    for (const [key, val] of Object.entries(values)) {
-      if (Array.isArray(val)) {
-        const items = val.map((v) =>
-          typeof v === "number" ? String(v) : `"${String(v).replace(/"/g, '\\"')}"`
-        );
-        lines.push(`${key} = [${items.join(", ")}]`);
-      } else if (typeof val === "number") {
-        lines.push(`${key} = ${val}`);
-      } else if (typeof val === "boolean") {
-        lines.push(`${key} = ${val}`);
-      } else {
-        lines.push(`${key} = "${String(val).replace(/"/g, '\\"')}"`);
-      }
-    }
-    return lines.join("\n") + "\n";
-  };
-
-  // Save handler — works for both edit and add modes.
-  const saveForm = async () => {
-    const form = $("#section-form");
-    const { values, errors } = collectFormValues();
-
-    // ---- Add mode: generate a new section block and append ----
-    if (formContext.addMode) {
-      const nameInput = $("#add-section-name");
-      const sectionSuffix = (nameInput ? nameInput.value.trim() : "").replace(/[^a-zA-Z0-9_\-]/g, "_");
-      if (!sectionSuffix) {
-        errors.push("Section name is required.");
-      }
-      if (errors.length) {
-        $("#form-error").textContent = errors.join(" ");
-        $("#form-error").hidden = false;
-        return;
-      }
-
-      const fullName = `${formContext.addPrefix}.${sectionSuffix}`;
-      // Check for duplicate.
-      if (state.sections.some((s) => s.name === fullName)) {
-        $("#form-error").textContent = `Section [${fullName}] already exists.`;
-        $("#form-error").hidden = false;
-        return;
-      }
-
-      const block = generateSectionToml(fullName, values);
-      let buffer = state.currentContent;
-      // Append after the last section of the same type, or at end.
-      const samePrefixSections = state.sections.filter(
-        (s) => s.prefix === formContext.addPrefix
-      );
-      if (samePrefixSections.length) {
-        const last = samePrefixSections[samePrefixSections.length - 1];
-        const lines = buffer.split("\n");
-        const insertAt = last.line_end;
-        lines.splice(insertAt, 0, "", ...block.split("\n"));
-        buffer = lines.join("\n");
-      } else {
-        buffer = buffer.replace(/\n*$/, "") + "\n\n" + block;
-      }
-
-      editor.setValue(buffer);
-      state.currentContent = buffer;
-      const dirty = state.currentContent !== state.originalContent;
-      $("#save-btn").disabled = !dirty;
-      refreshSectionsFromBuffer();
-      formModal.close();
-      if (dirty) await saveConfig();
-      return;
-    }
-
-    // ---- Edit mode ----
-    // Check if the user renamed the section.
-    const nameInput = $("#add-section-name");
-    const newSuffix = nameInput ? nameInput.value.trim().replace(/[^a-zA-Z0-9_\-]/g, "_") : "";
-    if (!newSuffix) {
-      errors.push("Section name is required.");
-    }
-    const prefix = formContext.sectionName.split(".")[0];
-    const newFullName = prefix + "." + newSuffix;
-    const renamed = newFullName !== formContext.sectionName;
-
-    if (renamed && state.sections.some((s) => s.name === newFullName)) {
-      errors.push(`Section [${newFullName}] already exists.`);
-    }
-    if (errors.length) {
-      $("#form-error").textContent = errors.join(" ");
-      $("#form-error").hidden = false;
-      return;
-    }
-
-    // For rename: delete the old section, then generate a fresh block
-    // with the new name + all form values. This avoids fragile line-
-    // patching and reuses the same code path as "add mode".
-    if (renamed) {
-      const section = state.sections.find((s) => s.name === formContext.sectionName);
-      if (section) {
-        const lines = state.currentContent.split("\n");
-        let start = section.line_start;
-        if (start > 0 && lines[start - 1].trim() === "") start--;
-        const after = lines.slice(0, start).concat(lines.slice(section.line_end));
-        state.currentContent = after.join("\n");
-      }
-      // Now append the new section (same logic as add mode).
-      const block = generateSectionToml(newFullName, values);
-      let buffer = state.currentContent;
-      const samePrefixSections = scanSectionsClient(buffer).filter(
-        (s) => s.prefix === prefix
-      );
-      if (samePrefixSections.length) {
-        const last = samePrefixSections[samePrefixSections.length - 1];
-        const lines = buffer.split("\n");
-        lines.splice(last.line_end, 0, "", ...block.split("\n"));
-        buffer = lines.join("\n");
-      } else {
-        buffer = buffer.replace(/\n*$/, "") + "\n\n" + block;
-      }
-      editor.setValue(buffer);
-      state.currentContent = buffer;
-    } else {
-      // No rename — patch fields in place via tomlEdit.edit().
-      if (!window.tomlEdit) {
-        $("#form-error").textContent =
-          "TOML editor library failed to load — edit the TOML directly.";
-        $("#form-error").hidden = false;
-        return;
-      }
-      let buffer = state.currentContent;
-      const editErrors = [];
-      formContext.schema.forEach((fieldDef) => {
-        if (fieldDef.advanced && !showAdvanced) return;
-        if (fieldDef.key in values) {
-          try {
-            buffer = window.tomlEdit.edit(
-              buffer, formContext.sectionName + "." + fieldDef.key, values[fieldDef.key]
-            );
-          } catch (err) {
-            editErrors.push(`Failed to set ${fieldDef.key}: ${err.message}`);
-          }
-        }
-      });
-      if (editErrors.length) {
-        $("#form-error").textContent = editErrors.join(" ");
-        $("#form-error").hidden = false;
-        return;
-      }
-      editor.setValue(buffer);
-      state.currentContent = buffer;
-    }
-
-    const dirty = state.currentContent !== state.originalContent;
-    $("#save-btn").disabled = !dirty;
-    refreshSectionsFromBuffer();
-    formModal.close();
-    if (dirty) await saveConfig();
-  };
-
-  // Open the Edit form for a specific section.
-  const openEditSectionModal = (sectionName) => {
-    // Find the section in state.sections (populated from the server
-    // or the client-side scanner).
-    const section = state.sections.find((s) => s.name === sectionName);
-    let fields = (section && section.fields) || {};
-
-    // If the server didn't provide parsed fields (e.g. aimm wasn't
-    // restarted), try parsing the textarea content with tomlEdit.
-    if (!Object.keys(fields).length && window.tomlEdit) {
-      try {
-        const parsed = window.tomlEdit.parse(state.currentContent);
-        // Navigate the nested dict: "marketplace.facebook" → parsed.marketplace.facebook
-        const parts = sectionName.split(".");
-        let node = parsed;
-        for (const p of parts) { node = node && node[p]; }
-        if (node && typeof node === "object") fields = node;
-      } catch (err) {
-        console.warn("tomlEdit.parse failed for form:", err);
-      }
-    }
-
-    // Look up the schema. If we don't have one for this section type,
-    // show a "raw TOML only" message.
-    const schema = findFormSchema(sectionName);
-    if (!schema) {
-      $("#form-modal-title").textContent = `Edit [${sectionName}]`;
-      $("#form-modal-hint").hidden = false;
-      $("#form-modal-hint").textContent =
-        `No form defined for [${sectionName}] yet — edit the TOML directly ` +
-        "in the editor. (Forms for item, user, and AI sections are coming soon.)";
-      $("#section-form").innerHTML = "";
-      formModal.open();
-      return;
-    }
-
-    const dot = sectionName.indexOf(".");
-    const suffix = dot >= 0 ? sectionName.slice(dot + 1) : sectionName;
-    formContext = { sectionName, fields, schema, nameValue: suffix };
-    $("#form-modal-title").textContent = `Edit [${sectionName}]`;
-    $("#form-modal-hint").hidden = true;
-    renderForm(schema, fields);
-    formModal.open();
-  };
-
-  // Open form in "add" mode: empty fields + a name input at top.
-  const openAddSectionModal = (prefix) => {
-    const schema = findFormSchema(prefix + ".*") || findFormSchema(prefix + ".facebook");
-    if (!schema) {
-      alert(`No form defined for [${prefix}.*] — add it manually in the TOML editor.`);
-      return;
-    }
-    // Build a placeholder section name from the prefix.
-    const existingNames = state.sections
-      .filter((s) => s.prefix === prefix)
-      .map((s) => s.suffix);
-    let suggestedName = prefix === "marketplace" ? "facebook" : "";
-
-    formContext = {
-      sectionName: `${prefix}.__new__`,
-      fields: {},
-      schema,
-      addMode: true,
-      addPrefix: prefix,
-      nameValue: suggestedName,
-    };
-    activeTab = "left";
-    $("#form-modal-title").textContent = `Add a new [${prefix}.*] section`;
-    $("#form-modal-hint").hidden = false;
-    $("#form-modal-hint").textContent =
-      "Choose a name and fill in the fields. The new section will be " +
-      "appended to the end of your config.";
-    renderForm(schema, {});
-    formModal.open();
-    setTimeout(() => {
-      const nameInput = $("#add-section-name");
-      if (nameInput && !nameInput.value) nameInput.focus();
-    }, 50);
-  };
-
-  wireClick("#form-modal-close", () => formModal.close());
-  wireClick("#form-cancel", () => formModal.close());
-  wireClick("#form-save", () => saveForm());
-  const backdrop = document.querySelector("#form-modal .modal-backdrop");
-  if (backdrop) backdrop.addEventListener("click", () => formModal.close());
-
-  // -------- "+ Add" dropdown in the header --------
-  wireClick("#add-btn", () => {
-    const menu = $("#add-menu");
-    if (menu) menu.classList.toggle("hidden");
-  });
-  // Close dropdown when clicking outside.
-  document.addEventListener("click", (e) => {
-    if (!e.target.closest("#add-dropdown")) {
-      const menu = $("#add-menu");
-      if (menu) menu.classList.add("hidden");
-    }
-  });
-  // Wire each menu item to openAddSectionModal.
-  document.querySelectorAll("#add-menu button[data-prefix]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const menu = $("#add-menu");
-      if (menu) menu.classList.add("hidden");
-      openAddSectionModal(btn.dataset.prefix);
-    });
-  });
-
-  const connectWs = () => {
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${proto}//${location.host}/ws/stream`);
-    state.ws = ws;
-    ws.onopen = () => {
-      state.wsConnected = true;
-      $("#ws-status").textContent = "● streaming";
-      renderMonitorStatus();
-    };
-    ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
-      if (msg.type === "log") {
-        state.records.push(msg.record);
-        updateItemDropdown(msg.record);
-        noteActivity(msg.record);
-        if (state.records.length > 5000) state.records.shift();
-        renderLogs();
-        renderMonitorStatus();
-      }
-    };
-    ws.onclose = () => {
-      state.wsConnected = false;
-      $("#ws-status").textContent = "● disconnected — retrying…";
-      renderMonitorStatus();
-      setTimeout(connectWs, 2000);
-    };
-    ws.onerror = () => {
-      ws.close();
-    };
-  };
-
-  // ---------------------------------------------------------------
-  // Boot
-  // ---------------------------------------------------------------
-  const bootstrap = async () => {
-    try {
-      await loadConfig();
-      // CodeMirror needs a refresh after becoming visible (the editor
-      // host is hidden during the login screen).
-      if (editor.refresh) editor.refresh();
-      await loadLogs();
-      connectWs();
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  // If we already have a session cookie from a prior visit, try bootstrapping.
-  (async () => {
-    try {
-      const res = await fetch("/api/status", { credentials: "same-origin" });
-      if (res.ok) {
-        state.csrf = getCookie("aimm_csrf");
-        try {
-          const status = await res.clone().json();
-          const browserBtn = document.getElementById("browser-btn");
-          if (browserBtn && status && status.vnc_enabled) browserBtn.hidden = false;
-        } catch (_) {}
-        hideLogin();
-        await bootstrap();
-      } else {
-        showLogin();
-      }
-    } catch (err) {
-      showLogin();
-    }
-  })();
-})();
+  }catch(error){if(!$('#login-dialog').open)toast(error.message);}finally{state.pollBusy=false;}
+}
+function render() {
+  $('#pane').onscroll=null;window.onscroll=null;state.editor=null;
+  const {parts}=routeParts();
+  if(parts[0]==='settings')renderSettings();
+  else if(parts[1]==='new'){mountForm('item',state.newName||'new_search',true,state.newFields||{});state.newName=null;state.newFields=null;state.newReturn=null;}
+  else if(parts[1]==='item'&&parts[3]==='edit')mountForm('item',decodeName(parts[2]));
+  else if(parts[1]==='item')renderActivity(decodeName(parts[2]));
+  else if(parts[1]==='all')renderActivity();
+  else{
+    const names=Object.keys(state.config.item||{});
+    const sample=names.length===1&&names[0]==='example'&&list(state.config.item.example.search_phrases).join(',')==='gopro hero'&&Object.keys(state.config.item.example).every(key=>key==='search_phrases');
+    if(sample&&!sessionStorage.getItem('aimm-setup-dismissed'))renderFirstRun();
+    else{state.route=names.length?itemRoute(names[0]):'#/monitor/all';history.replaceState(null,'',state.route);renderActivity(names[0]||null);}
+  }
+  renderSidebar();renderConflict();
+}
+async function bootstrap() {
+  state.status=await json('/api/status');state.open=state.status.open;$('#app').hidden=false;
+  if(!state.initialized){await loadConfig();state.initialized=true;render();await snapshot();}
+  connectStream();updateStatus();
+}
+try{await initToml({module_or_path:new URL('./vendor/toml-edit-js/index_bg.wasm',import.meta.url)});await showLogin();}
+catch(error){$('#app').hidden=false;$('#pane').innerHTML=pageHeader('Dashboard could not load')+`<div class="empty"><p class="err">${esc(error.message)}</p><button class="btn" id="retry-load">Reload</button></div>`;$('#retry-load').onclick=()=>location.reload();}
+setInterval(updateStatus,3000);setInterval(pollConfig,5000);

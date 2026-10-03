@@ -17,7 +17,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 import uvicorn
 from fastapi import (
@@ -65,6 +65,7 @@ class WebUIConfig:
     port: int = 8467
     config_files: List[Path] = field(default_factory=list)
     log_handler: LogBroadcastHandler | None = None
+    request_search: Callable[[], None] | None = None
 
 
 @dataclass
@@ -279,10 +280,19 @@ def create_app(
     async def list_config_files(_: str = Depends(require_session)) -> Dict[str, Any]:
         return {"files": [f.__dict__ for f in config_service.list_files()]}
 
+    @app.get("/api/config/context")
+    async def config_context(_: str = Depends(require_session)) -> Dict[str, Any]:
+        try:
+            return config_service.context()
+        except (OSError, ValueError) as e:
+            raise HTTPException(status_code=400, detail=str(e)) from None
+
     @app.get("/api/config/file/{file_id}")
     async def get_config_file(file_id: str, _: str = Depends(require_session)) -> Dict[str, Any]:
         try:
             content, mtime = config_service.read(file_id)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from None
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e)) from None
         from .config_api import scan_sections
@@ -320,7 +330,10 @@ def create_app(
         base_mtime = body.get("base_mtime")
         try:
             new_mtime, ok, error = config_service.write(
-                file_id, content, base_mtime if isinstance(base_mtime, (int, float)) else None
+                file_id,
+                content,
+                base_mtime if isinstance(base_mtime, (int, float)) else None,
+                renames=body.get("renames"),
             )
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e)) from None
@@ -341,7 +354,7 @@ def create_app(
         content = body.get("content")
         if not isinstance(content, str):
             raise HTTPException(status_code=400, detail="Missing 'content' field")
-        ok, error = config_service.validate(content)
+        ok, error = config_service.validate(content, renames=body.get("renames"))
         return {"valid": ok, "error": error}
 
     @app.post("/api/monitor/restart")
@@ -355,9 +368,14 @@ def create_app(
         it to reload the config and run all scheduled searches immediately.
         """
         try:
+            if config.request_search is not None:
+                config.request_search()
             path = config_service.editable_path
             path.touch()
-            return {"ok": True, "message": "Monitor woken — searching all items now."}
+            return {
+                "ok": True,
+                "message": "Search requested — all enabled searches run after the current scan.",
+            }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to touch config: {e}") from e
 
@@ -382,6 +400,7 @@ def create_app(
                 min_score=min_score,
             ),
             "capacity": log_handler._buffer.maxlen,
+            "stream_id": log_handler.stream_id,
         }
 
     @app.websocket("/ws/stream")
@@ -399,7 +418,9 @@ def create_app(
         log_handler.subscribe(queue)
         try:
             # Send a brief hello so clients know the stream is live.
-            await websocket.send_json({"type": "hello", "time": time.time()})
+            await websocket.send_json(
+                {"type": "hello", "time": time.time(), "stream_id": log_handler.stream_id}
+            )
             while True:
                 payload = await queue.get()
                 await websocket.send_json({"type": "log", "record": payload})

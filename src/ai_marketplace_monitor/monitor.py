@@ -1,8 +1,9 @@
 import sys
+import threading
 import time
 from logging import Logger
 from pathlib import Path
-from typing import ClassVar, List
+from typing import Any, ClassVar, Hashable, List
 
 import humanize
 import inflect
@@ -34,7 +35,7 @@ from .utils import (
 
 
 class MarketplaceMonitor:
-    active_marketplaces: ClassVar = {}
+    active_marketplaces: ClassVar[dict[str, Any]] = {}
 
     def __init__(
         self: "MarketplaceMonitor",
@@ -62,6 +63,11 @@ class MarketplaceMonitor:
         self.playwright: Playwright = sync_playwright().start()
         self.browser: Browser | None = None
         self.logger = logger
+        self.search_requested = threading.Event()
+
+    def request_search(self: "MarketplaceMonitor") -> None:
+        """Ask the monitor thread to run every enabled search at its next safe point."""
+        self.search_requested.set()
 
     def load_config_file(self: "MarketplaceMonitor") -> Config:
         """Load the configuration file."""
@@ -125,6 +131,7 @@ class MarketplaceMonitor:
     def load_ai_agents(self: "MarketplaceMonitor") -> None:
         """Load the AI agent."""
         assert self.config is not None
+        self.ai_agents.clear()
         for ai_config in (self.config.ai or {}).values():
             if ai_config.enabled is False:
                 continue
@@ -332,7 +339,9 @@ class MarketplaceMonitor:
         for marketplace_config in self.config.marketplace.values():
             if marketplace_config.enabled is False:
                 continue
-            marketplace_class = supported_marketplaces[marketplace_config.name]
+            marketplace_class = supported_marketplaces[
+                marketplace_config.market_type or "facebook"
+            ]
             if marketplace_config.name in self.active_marketplaces:
                 marketplace = self.active_marketplaces[marketplace_config.name]
             else:
@@ -358,6 +367,7 @@ class MarketplaceMonitor:
                     # wait for some time before next search
                     # interval (in minutes) can be defined both for the marketplace
                     # if there is any configuration file change, stop sleeping and search again
+                    scheduled_jobs = []
                     scheduled = None
                     start_at_list = item_config.start_at or marketplace_config.start_at
                     if start_at_list is not None and start_at_list:
@@ -385,6 +395,7 @@ class MarketplaceMonitor:
                                         f"""{hilight("[Schedule]", "ss")} Scheduling to search for {item_config.name} every day at {start_at}"""
                                     )
                                 scheduled = schedule.every().day.at(start_at)
+                            scheduled_jobs.append(scheduled)
                     else:
                         search_interval = max(
                             item_config.search_interval
@@ -407,12 +418,13 @@ class MarketplaceMonitor:
                         raise ValueError(
                             f"Cannot determine a schedule for {item_config.name} from configuration file."
                         )
-                    scheduled.do(
-                        self.search_item,
-                        marketplace_config,
-                        marketplace,
-                        item_config,
-                    ).tag(item_config.name)
+                    for job in scheduled_jobs or [scheduled]:
+                        job.do(
+                            self.search_item,
+                            marketplace_config,
+                            marketplace,
+                            item_config,
+                        ).tag(item_config.name)
 
     def handle_pause(self: "MarketplaceMonitor") -> None:
         """Handle interruption signal."""
@@ -535,16 +547,21 @@ class MarketplaceMonitor:
             # run all jobs at the first time, then on their own schedule
             # we could have used schedule.run_all() but we would like to check if
             # configuration file has been changed, if so, clear all jobs and restart
+            searched_items: set[Hashable] = set()
             for job in schedule.get_jobs():
+                if job.tags & searched_items:
+                    continue
+                searched_items.update(job.tags)
                 job.run()
                 self.handle_pause()
                 # if configuration file has been changed, clear all scheduled jobs and restart
                 new_file_hash = calculate_file_hash(self.config_files)
                 assert self.config_hash is not None
-                if new_file_hash != self.config_hash:
+                if new_file_hash != self.config_hash or self.search_requested.is_set():
+                    self.search_requested.clear()
                     if self.logger:
                         self.logger.info(
-                            f"""{hilight("[Config]", "info")} Config file changed, restarting monitor."""
+                            f"""{hilight("[Config]", "info")} Reloading configuration and running enabled searches."""
                         )
                     schedule.clear()
                     break
@@ -586,14 +603,15 @@ class MarketplaceMonitor:
                     self.config_files,
                     self.keyboard_monitor,
                 )
-                if res == SleepStatus.BY_FILE_CHANGE:
+                if res == SleepStatus.BY_FILE_CHANGE or self.search_requested.is_set():
                     # if configuration file has been changed, clear all scheduled jobs and restart
                     new_file_hash = calculate_file_hash(self.config_files)
                     assert self.config_hash is not None
-                    if new_file_hash != self.config_hash:
+                    if new_file_hash != self.config_hash or self.search_requested.is_set():
+                        self.search_requested.clear()
                         if self.logger:
                             self.logger.info(
-                                f"""{hilight("[Config]", "info")} Config file changed, restarting monitor."""
+                                f"""{hilight("[Config]", "info")} Reloading configuration and running enabled searches."""
                             )
                         schedule.clear()
                         break
@@ -693,7 +711,7 @@ class MarketplaceMonitor:
 
                 # get_listing_details returns a tuple (Listing, bool) - unpack it properly
                 if isinstance(listing_result, tuple) and len(listing_result) == 2:
-                    listing, from_cache = listing_result
+                    listing, _from_cache = listing_result
                 else:
                     # Fallback - treat as direct listing (shouldn't happen but defensive)
                     listing = listing_result

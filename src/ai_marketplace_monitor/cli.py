@@ -266,6 +266,7 @@ def main(
                             port=webui_port,
                             config_files=monitor.config_files,
                             log_handler=log_broadcast_handler,
+                            request_search=monitor.request_search,
                         ),
                         logger=logger,
                     )
