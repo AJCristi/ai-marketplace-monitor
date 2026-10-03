@@ -142,6 +142,12 @@ docker run -d --name aimm \
 
 Then open [http://localhost:8467](http://localhost:8467). When Facebook needs an interactive login or CAPTCHA, click the **Browser** button in the header to view and control the in-container Chromium.
 
+For a local-only dashboard that opens without a sign-in form, replace
+`-p 8467:8467` with `-p 127.0.0.1:8467:8467` and add
+`-e AIMM_WEBUI_LOCAL_ONLY=1`. This setting relies on Docker restricting the
+published port to localhost; leave it unset for network access. Marketplace
+credentials are still used for Facebook login.
+
 Mounting `~/.ai-marketplace-monitor` shares your existing config, cache, and logs between the host install and the container — so you can switch back and forth freely. Update with `docker pull ghcr.io/bopeng/ai-marketplace-monitor:latest && docker restart aimm`.
 
 To build the image yourself instead of pulling: `docker build -t aimm .` from a checkout of this repo.

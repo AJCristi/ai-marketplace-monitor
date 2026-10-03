@@ -81,8 +81,8 @@ class StartupInfo:
 class AuthState:
     """Mutable auth state.
 
-    On loopback (default) the web UI is always open — no password
-    required.  When ``--webui-host`` exposes the server on a
+    On loopback or in explicitly local-only Docker mode the web UI is
+    open — no password required. When ``--webui-host`` exposes the server on a
     non-loopback interface, ``auth`` must be set (credentials from
     a marketplace config section or environment variables).
     """
@@ -98,9 +98,11 @@ def _resolve_auth(config: WebUIConfig) -> tuple[AuthState, StartupInfo]:
     On loopback the UI is always open.  When exposed (--webui-host),
     credentials are required — checked from ``[marketplace.*]`` config
     sections, then ``FACEBOOK_USERNAME`` / ``FACEBOOK_PASSWORD`` env
-    vars.
+    vars. ``AIMM_WEBUI_LOCAL_ONLY=1`` opts into open mode behind a
+    Docker port published exclusively to loopback.
     """
-    exposed = config.host not in ("127.0.0.1", "localhost", "::1")
+    local_only = os.environ.get("AIMM_WEBUI_LOCAL_ONLY") == "1"
+    exposed = config.host not in ("127.0.0.1", "localhost", "::1") and not local_only
     state = AuthState()
     state.exposed = exposed
 
@@ -115,7 +117,7 @@ def _resolve_auth(config: WebUIConfig) -> tuple[AuthState, StartupInfo]:
         # If exposed with no credentials, start_webui() will reject this.
 
     info = StartupInfo(
-        urls=_enumerate_urls(config.host, config.port),
+        urls=_enumerate_urls("127.0.0.1" if local_only else config.host, config.port),
         username=state.auth.username if state.auth else None,
         host=config.host,
         port=config.port,
@@ -187,7 +189,7 @@ def create_app(
     rate_limiter = RateLimiter()
 
     def is_open() -> bool:
-        """True when running on loopback — no password required."""
+        """True when local-only access needs no password."""
         return not state.exposed
 
     def require_session(
