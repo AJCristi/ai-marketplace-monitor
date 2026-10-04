@@ -79,6 +79,7 @@ class RecheckQueue:
                 "results": [],
                 "listings": listings,
                 "item": item,
+                "searches": sorted({entry.get("original_item", "") for entry in listings}),
                 "refresh": refresh,
                 "stop": False,
             }
@@ -91,7 +92,7 @@ class RecheckQueue:
             return copy.deepcopy(
                 {
                     name: job[name]
-                    for name in ("job_id", "state", "done", "total", "results", "item")
+                    for name in ("job_id", "state", "done", "total", "results", "item", "searches")
                 }
             )
 

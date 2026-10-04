@@ -213,6 +213,9 @@ def main(
         f"""{hilight("[VERSION]", "info")} AI Marketplace Monitor, version {hilight(__version__, "name")}"""
     )
 
+    from .matches import initialize_library
+
+    initialize_library(cache)
     if clear_cache is not None:
         if clear_cache == "all":
             cache.clear()

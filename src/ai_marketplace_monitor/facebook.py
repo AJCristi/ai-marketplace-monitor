@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from itertools import repeat
 from logging import Logger
-from typing import Any, Generator, List, Tuple, Type, cast
+from typing import Any, Callable, Generator, List, Tuple, Type, cast
 from urllib.parse import quote
 
 import humanize
@@ -379,7 +379,9 @@ class FacebookMarketplace(Marketplace):
             doze(login_wait_time, keyboard_monitor=self.keyboard_monitor)
 
     def search(
-        self: "FacebookMarketplace", item_config: FacebookItemConfig
+        self: "FacebookMarketplace",
+        item_config: FacebookItemConfig,
+        on_listing: Callable[[Listing], None] | None = None,
     ) -> Generator[Listing, None, None]:
         if not self.page:
             self.login()
@@ -537,6 +539,8 @@ class FacebookMarketplace(Marketplace):
                         return
                     counter.increment(CounterItem.LISTING_EXAMINED, item_config.name)
                     found[listing.post_url.split("?")[0]] = True
+                    if on_listing is not None:
+                        on_listing(listing)
                     # filter by title and location; skip keyword filtering since we do not have description yet.
                     if not self.check_listing(listing, item_config, description_available=False):
                         counter.increment(CounterItem.EXCLUDED_LISTING, item_config.name)

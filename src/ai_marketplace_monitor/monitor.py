@@ -6,6 +6,7 @@ from datetime import datetime
 from logging import Logger
 from pathlib import Path
 from typing import Any, ClassVar, Hashable, List
+from uuid import uuid4
 
 import humanize
 import inflect
@@ -19,12 +20,19 @@ from .ai import AIBackend, AIResponse
 from .config import Config, supported_ai_backends, supported_marketplaces
 from .listing import Listing
 from .marketplace import Marketplace, TItemConfig, TMarketplaceConfig
-from .matches import load_matches, rating_fields, record_match
+from .matches import (
+    has_match,
+    load_matches,
+    rating_fields,
+    record_failed_rating,
+    record_match,
+    record_recheck,
+    record_sighting,
+)
 from .notification import NotificationStatus
 from .recheck import RecheckQueue, price_filter_reason
 from .user import User
 from .utils import (
-    CacheType,
     CounterItem,
     KeyboardMonitor,
     SleepStatus,
@@ -185,21 +193,32 @@ class MarketplaceMonitor:
         users_to_notify = (
             item_config.notify or marketplace_config.notify or list(self.config.user.keys())
         )
-        for listing in marketplace.search(item_config):
-            # duplicated ID should not happen, but sellers could repost the same listing,
-            # potentially under different seller names
-            if listing.id in [x.id for x in new_listings] or listing.content in [
-                x.content for x in new_listings
-            ]:
+        run = uuid4().hex
+
+        def observe(listing: Listing) -> None:
+            if record_sighting(cache, listing, item_config.name, run) and self.logger:
+                self.logger.info(
+                    "Known match seen again: %s",
+                    listing.title,
+                    extra=aimm_event(
+                        "match_seen",
+                        item=item_config.name,
+                        marketplace=listing.marketplace,
+                        listing_id=listing.id,
+                    ),
+                )
+
+        for listing in marketplace.search(item_config, on_listing=observe):
+            observe(listing)
+            # Exact IDs define identity; similarly worded reposts remain separate listings.
+            if listing.id in [x.id for x in new_listings]:
                 if self.logger:
                     self.logger.debug(f"Found duplicated result for {listing}")
                 continue
             # if everyone has been notified
             if (
                 users_to_notify
-                and cache.get(
-                    (CacheType.MATCHED.value, listing.marketplace, listing.id, item_config.name)
-                )
+                and has_match(cache, listing.marketplace, listing.id, item_config.name)
                 and all(
                     User(self.config.user[user], self.logger).notification_status(listing)
                     == NotificationStatus.NOTIFIED
@@ -261,6 +280,7 @@ class MarketplaceMonitor:
                 acceptable_rating = 3
 
             if res.score < acceptable_rating:
+                record_failed_rating(cache, listing, item_config.name, res)
                 if self.logger:
                     self.logger.info(
                         f"""{hilight("[Skip]", "fail")} Rating {hilight(f"{res.conclusion} ({res.score})")} for {listing.title} is below threshold {acceptable_rating}.""",
@@ -278,7 +298,7 @@ class MarketplaceMonitor:
                 continue
             new_listings.append(listing)
             listing_ratings.append(res)
-            is_new = record_match(cache, listing, item_config.name, res)
+            is_new = record_match(cache, listing, item_config.name, res, run=run)
             if self.logger and is_new:
                 self.logger.info(
                     "Match saved: %s",
@@ -700,7 +720,7 @@ class MarketplaceMonitor:
         try:
             assert self.config is not None
             if original is None:
-                raise ValueError("This match is no longer in the cache")
+                raise ValueError("This match is no longer in the library")
             item_config = self.config.item.get(item)
             if item_config is None or item_config.enabled is False:
                 raise ValueError("The saved search is missing or disabled")
@@ -715,11 +735,12 @@ class MarketplaceMonitor:
                 raise ValueError("The marketplace is not active")
             if (marketplace_config.market_type or "facebook") != "facebook":
                 raise ValueError("Re-check is only available for Facebook listings")
-            listing, _ = marketplace.get_listing_details(
+            listing, from_cache = marketplace.get_listing_details(
                 f"https://www.facebook.com/marketplace/item/{identity['listing_id']}/",
                 item_config,
                 force_refresh=refresh,
             )
+            result["fresh_details"] = not from_cache
             listing.name = item
             listing.marketplace = identity["marketplace"]
             result["price"] = listing.price
@@ -749,64 +770,7 @@ class MarketplaceMonitor:
                 reason=f"Could not re-check ({type(error).__name__}). Check the monitor activity and browser login.",
             )
         if original is not None:
-            key = (
-                CacheType.MATCHED.value,
-                identity["marketplace"],
-                identity["listing_id"],
-                original["item"],
-            )
-            with cache.transact():
-                saved = cache.get(key) or {
-                    name: original.get(name)
-                    for name in (
-                        "found_at",
-                        "price",
-                        "score",
-                        "conclusion",
-                        "comment",
-                        "ai_name",
-                        "source",
-                    )
-                }
-                saved.update(
-                    rechecked_at=result["at"],
-                    last_status=result["status"],
-                    old_score=result["old_score"],
-                    old_price=result["old_price"],
-                    reason=result["reason"],
-                    checked_item=item,
-                    threshold=result.get("threshold"),
-                )
-                if listing is not None:
-                    saved["current_price"] = listing.price
-                # Ratings belong to a search. Checking elsewhere must not overwrite
-                # the original search's rating with an unrelated evaluation.
-                if rating is not None and item == original["item"]:
-                    saved.update(rating_fields(rating))
-                cache.set(key, saved, tag=CacheType.MATCHED.value)
-            if (
-                item != original["item"]
-                and result["status"] == "passed"
-                and listing is not None
-                and rating is not None
-            ):
-                record_match(cache, listing, item, rating, source="recheck")
-                target_key = (
-                    CacheType.MATCHED.value,
-                    identity["marketplace"],
-                    identity["listing_id"],
-                    item,
-                )
-                with cache.transact():
-                    target_saved = cache.get(target_key)
-                    target_saved.update(
-                        rating_fields(rating),
-                        current_price=listing.price,
-                        rechecked_at=result["at"],
-                        last_status="passed",
-                        checked_item=item,
-                    )
-                    cache.set(target_key, target_saved, tag=CacheType.MATCHED.value)
+            record_recheck(cache, original, result, listing, rating)
         if listing is not None and original is not None:
             # The detail cache is shared with legacy CSV joins. A check against
             # another search must not relabel its original search in that cache.

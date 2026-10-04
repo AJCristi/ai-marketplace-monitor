@@ -192,3 +192,8 @@ class User:
             for listing, ns in zip(listings, statuses):
                 if force or ns != NotificationStatus.NOTIFIED:
                     self.to_cache(listing, local_cache=local_cache)
+                    from .matches import record_delivery
+
+                    record_delivery(
+                        cache if local_cache is None else local_cache, listing, self.name
+                    )

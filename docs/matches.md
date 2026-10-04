@@ -4,7 +4,7 @@ orphan: true
 
 # Matches library
 
-Open **Monitor → Matches** to browse listings that passed a saved search, including
+Open **Matches** in the top bar to browse listings that passed a saved search, including
 listings with no notification recipient or a failed delivery. Existing notified
 listings are included when their cache records are available. Missing details or
 AI ratings appear as missing; they are not reconstructed from guesses.
@@ -84,11 +84,43 @@ Ambiguous prices or currency units also produce an error instead of a false pass
 An error stops the rest of that job so a login challenge does not trigger more
 page loads.
 
+## Returning listings and history
+
+Matches recognizes returning listings by marketplace and exact listing ID. **Last seen**
+and **Search sightings** count each saved-search execution once, even when phrases or
+locations overlap. A known ID is recorded when it appears in fetched search results,
+including when local filters reject it or notification deduplication skips it. A sighting
+is not a new pass or a fresh AI evaluation. Listings absent from results are not assumed
+sold or removed. Reposts with different IDs remain separate listings.
+
+The detail panel's **History** shows collected price/title/description changes and
+search-specific evaluations and re-checks. Unchanged sightings update statistics without
+adding duplicate snapshots. Descriptions may come from the detail cache; returning
+listings do not force new page loads or AI calls. **Last seen** sorting brings recently
+observed listings to the top; **New** continues to mean a newly found match.
+
+Deleted searches retain their historical matches and appear as removed searches in the
+filter. To re-check one, choose an available search. Personal states survive new sightings.
+
 ## Storage and limitations
 
-Matches use the existing diskcache, with separate `matches` and `match-state` tags.
-Clearing `ai-inquiries` preserves them; **`--clear-cache all` clears the library
-and its personal states**. Listing photo links can expire.
+The library lives in `~/.ai-marketplace-monitor/matches.sqlite3`, independently of the
+search/AI cache. **`--clear-cache all` preserves the library**, listing snapshots, history,
+and personal states. It still clears the existing notification deduplication cache, so
+later searches may send notifications again under the existing notification rules.
+Photo URLs can expire; image files are not downloaded or archived.
+
+On first use, existing cached matches and notified listings are imported transactionally.
+Import is safe to retry and runs before CLI cache clearing. The original cache records
+are left intact, but subsequent Matches reads and writes use SQLite. Imported records
+keep available dates and ratings; missing data remains missing. Earlier sighting counts
+are unknown, and the UI shows when repeat tracking began. A failed import or database
+write reports an error instead of silently falling back to disposable storage.
+
+Back up the library with the monitor stopped by copying `matches.sqlite3`. If making a
+backup while the monitor runs, use SQLite's backup API rather than copying an open
+WAL database. Storage grows with matches and meaningful history; there is no automatic
+retention cleanup or permanent-delete action in this version.
 
 “New” is measured against the last time this browser opened Matches and stored
 locally when browser storage is available. It is not shared between devices.

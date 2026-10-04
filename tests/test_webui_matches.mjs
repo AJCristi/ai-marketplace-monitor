@@ -75,6 +75,28 @@ test('Matches restores saved filters and layout on return; explicit URLs replace
   assert.equal(h.stored.get('aimm-matches-view'),'');
 });
 
+test('historical searches remain selectable and last-seen sorting survives return',async t=>{
+  const h=viewHarness(t,{saved:'item=removed_camera&sort=last_seen'});
+  h.state.matchSummary={groups:[{item:'removed_camera',count:1}]};
+  h.view.render();await h.flush();
+  assert.match(h.state.route,/item=removed_camera/);
+  assert.match(h.requests.at(-1),/sort=last_seen/);
+  h.node('export-csv').onclick();
+  assert.match(h.exports.at(-1).url,/item=removed_camera/);
+  assert.match(h.exports.at(-1).url,/sort=last_seen/);
+});
+
+test('a successful re-check clears a previous failed evaluation only for its search',()=>{
+  const rows=[row('fb:1','camera',{marketplace:'fb',listing_id:'1',evaluation_status:'below_threshold',score:2})];
+  assert.equal(applyRecheckResult(rows,{marketplace:'fb',listing_id:'1',item:'camera',status:'passed',score:5})[0].evaluation_status,'passed');
+  assert.equal(applyRecheckResult(rows,{marketplace:'fb',listing_id:'1',original_item:'camera',item:'other',status:'passed',score:5})[0].evaluation_status,'below_threshold');
+  const target=row('fb:1','other',{marketplace:'fb',listing_id:'1',evaluation_status:'passed',score:4});
+  const updated=applyRecheckResult([...rows,target],{marketplace:'fb',listing_id:'1',original_item:'camera',item:'other',status:'below_threshold',score:1});
+  assert.equal(updated[0].score,2);
+  assert.equal(updated[1].score,1);
+  assert.equal(updated[1].evaluation_status,'below_threshold');
+});
+
 test('saved removed searches are discarded and unavailable storage does not block Matches',async t=>{
   await t.test('removed search and invalid values',async t=>{const h=viewHarness(t,{saved:'item=deleted&sort=price&group=date&cursor=old&status=invalid&min_score=0&include_dismissed=invalid'});h.view.render();await h.flush();assert.equal(h.state.route,'#/monitor/matches?sort=price&group=date');assert.equal(h.stored.get('aimm-matches-view'),'sort=price&group=date');});
   await t.test('storage unavailable',async t=>{const h=viewHarness(t,{storageFails:true});h.view.render();await h.flush();h.filter('min_score','5');await h.flush();assert.match(h.requests.at(-1),/min_score=5/);});

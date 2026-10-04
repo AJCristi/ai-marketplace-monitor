@@ -179,7 +179,12 @@ function searchSummary(name) {
 }
 function renderSidebar() {
   const {parts} = routeParts(); const settings = parts[0] === 'settings';
-  $('#monitor-nav').classList.toggle('on',!settings); $('#settings-nav').classList.toggle('on',settings);
+  const matches = !settings && parts[1]==='matches';
+  for (const [id,active] of [['monitor-nav',!settings&&!matches],['matches-top-nav',matches],['settings-nav',settings]]) {
+    const link=$('#'+id);
+    link.classList.toggle('on',active);
+    if(active)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');
+  }
   $('#sidebar').setAttribute('aria-label', settings ? 'Settings sections' : 'Saved searches');
   const signature = JSON.stringify([state.route,state.config,state.form?.name,state.capacity,state.matchSummary?.groups,state.matchSummary?.library_total]);
   if ($('#sidebar').dataset.signature !== signature) {
@@ -197,7 +202,7 @@ function renderSidebar() {
       $('#sidebar').firstElementChild.after(link);
     }
     $('#matches-nav').classList.toggle('on',parts[1]==='matches');
-    $('#matches-nav').innerHTML=`<div class="row sb"><span class="b">Matches</span><span class="m">${state.matchSummary?.library_total??'—'}${state.matchSummary?.new_count?' · '+state.matchSummary.new_count+' new':''}</span></div><div class="s">kept on disk · survives restarts</div>`;
+    $('#matches-nav').innerHTML=`<div class="row sb"><span class="b">Matches</span><span class="m">${state.matchSummary?.library_total??'—'}${state.matchSummary?.new_count?' · '+state.matchSummary.new_count+' new':''}</span></div><div class="s">saved library · remembers returning listings</div>`;
     for(const link of document.querySelectorAll('#sidebar a.it:not(#matches-nav)')){
       const name=link.querySelector('[data-item-badge]')?.dataset.itemBadge;
       if(name){const count=state.matchSummary?.groups?.find(group=>group.item===name)?.count??0;const summary=link.querySelector('.s');summary.textContent=`${count} matches · ${searchSummary(name)}`;}

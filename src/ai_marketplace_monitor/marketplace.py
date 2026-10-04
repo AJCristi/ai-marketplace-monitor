@@ -538,7 +538,9 @@ class Marketplace(Generic[TMarketplaceConfig, TItemConfig]):
             time.sleep(5)
             self.goto_url(url, attempt + 1)
 
-    def search(self: "Marketplace", item: TItemConfig) -> Generator[Listing, None, None]:
+    def search(
+        self: "Marketplace", item: TItemConfig, on_listing: Callable[[Listing], None] | None = None
+    ) -> Generator[Listing, None, None]:
         raise NotImplementedError("Search method must be implemented by subclasses.")
 
 

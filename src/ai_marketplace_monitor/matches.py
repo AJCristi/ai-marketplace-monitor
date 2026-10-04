@@ -2,17 +2,320 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
+from contextlib import contextmanager
+from dataclasses import asdict
 from datetime import datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, Iterator
+from uuid import uuid4
 
 from diskcache import Cache  # type: ignore
 
 from .ai import AIResponse
 from .listing import Listing
+from .match_store import MatchStore, now
 from .seller import assess_seller, profile_url
 from .utils import CacheType
+
+
+def default_state() -> dict[str, Any]:
+    return {"shortlisted": False, "contacted": False, "dismissed": False, "filed_under": []}
+
+
+@contextmanager
+def library(local_cache: Cache) -> Iterator[MatchStore]:
+    """Use the cache directory only as a location and a one-time migration source."""
+    with MatchStore(Path(local_cache.directory) / "matches.sqlite3") as store:
+        if not store.db.execute("SELECT 1 FROM metadata WHERE key='imported'").fetchone():
+            for row in load_legacy_matches(local_cache):
+                market, listing_id, item = row["marketplace"], row["listing_id"], row["item"]
+                if store.listing(market, listing_id) is None:
+                    store.save_listing(
+                        market,
+                        listing_id,
+                        {
+                            **row,
+                            "price": row.get("snapshot_price")
+                            or row["current_price"]
+                            or row["price"],
+                            "tracking_since": now(),
+                            "imported": True,
+                        },
+                    )
+                    store.event(
+                        market,
+                        listing_id,
+                        "imported",
+                        None,
+                        {
+                            "found_at": row["found_at"],
+                            "historical_sightings": "unknown",
+                        },
+                    )
+                if store.match(market, listing_id, item) is None:
+                    store.save_match(market, listing_id, item, row)
+            store.db.execute("INSERT INTO metadata VALUES ('imported', ?)", (now(),))
+        yield store
+
+
+def initialize_library(local_cache: Cache) -> None:
+    with library(local_cache):
+        pass
+
+
+def has_match(local_cache: Cache, market: str, listing_id: str, item: str) -> bool:
+    with library(local_cache) as store:
+        return store.match(market, listing_id, item) is not None
+
+
+def record_sighting(local_cache: Cache, listing: Listing, item: str, run: str) -> bool:
+    """Known IDs only; search summaries prove a sighting, not a fresh detail fetch or pass."""
+    with library(local_cache) as store:
+        if store.listing(listing.marketplace, listing.id) is None:
+            return False
+        observed = store.observe(listing.marketplace, listing.id, item, run)
+        store.snapshot(
+            listing.marketplace,
+            listing.id,
+            {
+                "title": listing.title,
+                "price": listing.price,
+                "location": listing.location,
+                "image": listing.image,
+                "url": listing.post_url,
+                "description": listing.description,
+                "seller": listing.seller,
+                "condition": listing.condition,
+                "seller_profile": listing.seller_profile,
+            },
+            "search result; details may be cached",
+        )
+        return observed
+
+
+def record_match(
+    local_cache: Cache,
+    listing: Listing,
+    item: str,
+    rating: AIResponse,
+    source: str = "matched",
+    run: str | None = None,
+) -> bool:
+    with library(local_cache) as store:
+        market, listing_id = listing.marketplace, listing.id
+        fields = asdict(listing) | {"url": listing.post_url}
+        if store.listing(market, listing_id) is None:
+            store.save_listing(
+                market,
+                listing_id,
+                fields
+                | {
+                    "state": default_state(),
+                    "notified_users": [],
+                    "tracking_since": now(),
+                    "imported": False,
+                },
+            )
+        else:
+            store.snapshot(market, listing_id, fields, "collected details (may be cached)")
+        previous = store.match(market, listing_id, item)
+        ratings = rating_fields(rating)
+        saved = previous or {
+            "found_at": now(),
+            "price": listing.price,
+            "source": source,
+            "recheck": None,
+        }
+        if (
+            previous is None
+            or saved.get("evaluation_status") != "passed"
+            or any(saved.get(key) != value for key, value in ratings.items())
+        ):
+            store.event(
+                market,
+                listing_id,
+                "matched" if previous is None else "rating",
+                item,
+                ratings | {"status": "passed"},
+            )
+        store.save_match(
+            market, listing_id, item, saved | ratings | {"evaluation_status": "passed"}
+        )
+        if source != "recheck":
+            store.observe(market, listing_id, item, run or uuid4().hex)
+    # The normal detail cache still supports search acceleration and activity CSV.
+    listing.to_cache(listing.post_url, local_cache)
+    return previous is None
+
+
+def record_delivery(local_cache: Cache, listing: Listing, user: str) -> None:
+    with library(local_cache) as store:
+        saved = store.listing(listing.marketplace, listing.id)
+        if saved is not None and user not in saved["notified_users"]:
+            saved["notified_users"].append(user)
+            store.save_listing(listing.marketplace, listing.id, saved)
+
+
+def record_failed_rating(
+    local_cache: Cache, listing: Listing, item: str, rating: AIResponse
+) -> None:
+    """Retain an actual evaluation of a known listing without adding a match."""
+    with library(local_cache) as store:
+        if store.listing(listing.marketplace, listing.id) is None:
+            return
+        store.snapshot(
+            listing.marketplace, listing.id, asdict(listing), "collected details (may be cached)"
+        )
+        saved = store.match(listing.marketplace, listing.id, item)
+        ratings = rating_fields(rating)
+        previous = saved
+        if previous is None:
+            last = store.db.execute(
+                "SELECT data FROM history WHERE marketplace=? AND listing_id=? AND item=? "
+                "AND kind='rating' ORDER BY id DESC LIMIT 1",
+                (listing.marketplace, listing.id, item),
+            ).fetchone()
+            previous = json.loads(last[0]) if last else {}
+        if previous.get("evaluation_status", previous.get("status")) != "below_threshold" or any(
+            previous.get(key) != value for key, value in ratings.items()
+        ):
+            store.event(
+                listing.marketplace,
+                listing.id,
+                "rating",
+                item,
+                ratings | {"status": "below_threshold"},
+            )
+        if saved is not None:
+            store.save_match(
+                listing.marketplace,
+                listing.id,
+                item,
+                saved | ratings | {"evaluation_status": "below_threshold"},
+            )
+
+
+def record_recheck(
+    local_cache: Cache,
+    original: dict[str, Any],
+    result: dict[str, Any],
+    listing: Listing | None,
+    rating: AIResponse | None,
+) -> None:
+    with library(local_cache) as store:
+        market, listing_id, item = (
+            original["marketplace"],
+            original["listing_id"],
+            original["item"],
+        )
+        saved = store.match(market, listing_id, item)
+        if saved is None:
+            raise ValueError("Match not found")
+        saved["recheck"] = {
+            "at": result["at"],
+            "status": result["status"],
+            "checked_item": result["item"],
+            **{key: result.get(key) for key in ("old_score", "old_price", "reason", "threshold")},
+        }
+        if result["item"] == item and result["status"] != "error":
+            saved["evaluation_status"] = result["status"]
+        if rating is not None and result["item"] == item:
+            saved.update(rating_fields(rating))
+        store.save_match(market, listing_id, item, saved)
+        if listing is not None:
+            store.snapshot(
+                market,
+                listing_id,
+                asdict(listing) | {"url": listing.post_url},
+                "re-check details" if result.get("fresh_details") else "cached details",
+            )
+        if result["item"] != item:
+            target = store.match(market, listing_id, result["item"])
+            if target is None and result["status"] == "passed" and listing and rating:
+                target = {
+                    "found_at": now(),
+                    "price": listing.price,
+                    "source": "recheck",
+                }
+            if target is not None:
+                target["recheck"] = saved["recheck"]
+                if result["status"] != "error":
+                    target["evaluation_status"] = result["status"]
+                if rating is not None:
+                    target.update(rating_fields(rating))
+                store.save_match(market, listing_id, result["item"], target)
+        store.event(market, listing_id, "recheck", result["item"], result)
+
+
+def load_matches(local_cache: Cache) -> list[dict[str, Any]]:
+    with library(local_cache) as store:
+        listings = {
+            (r[0], r[1]): json.loads(r[2]) for r in store.db.execute("SELECT * FROM listings")
+        }
+        sightings = {
+            (r[0], r[1]): dict(r)
+            for r in store.db.execute(
+                "SELECT marketplace,listing_id,MIN(first_seen) AS first_seen,MAX(last_seen) AS last_seen,"
+                "SUM(count) AS seen_count FROM sightings GROUP BY marketplace,listing_id"
+            )
+        }
+        profiles: dict[str, dict[str, Any]] = {}
+        for saved in listings.values():
+            evidence = saved.get("seller_profile")
+            if isinstance(evidence, dict):
+                url = profile_url(str(evidence.get("profile_url") or ""))
+                if url and str(evidence.get("checked_at", "")) > str(
+                    profiles.get(url, {}).get("checked_at", "")
+                ):
+                    profiles[url] = evidence
+        rows = []
+        for record in store.db.execute("SELECT * FROM matches"):
+            market, listing_id, item, payload = record
+            saved = json.loads(payload)
+            detail = listings[(market, listing_id)]
+            state = detail["state"]
+            evidence = detail.get("seller_profile")
+            if isinstance(evidence, dict):
+                evidence = profiles.get(
+                    profile_url(str(evidence.get("profile_url") or "")), evidence
+                )
+            rows.append(
+                {
+                    **detail,
+                    **saved,
+                    **{
+                        key: detail.get(key) or ""
+                        for key in (
+                            "title",
+                            "image",
+                            "location",
+                            "seller",
+                            "condition",
+                            "description",
+                            "url",
+                        )
+                    },
+                    "marketplace": market,
+                    "listing_id": listing_id,
+                    "item": item,
+                    "key": f"{market}:{listing_id}",
+                    "state": state,
+                    "filed_under": list(dict.fromkeys([item, *state["filed_under"]])),
+                    "notified_users": sorted(detail["notified_users"]),
+                    "current_price": detail.get("price"),
+                    "seller_assessment": assess_seller(evidence),
+                    "first_seen": None,
+                    "last_seen": None,
+                    "seen_count": 0,
+                    **sightings.get((market, listing_id), {}),
+                    "tracking_since": detail["tracking_since"],
+                    "imported": detail["imported"],
+                }
+            )
+        return rows
 
 
 def rating_fields(rating: AIResponse) -> dict[str, Any]:
@@ -24,37 +327,6 @@ def rating_fields(rating: AIResponse) -> dict[str, Any]:
         "comment": rating.comment,
         "ai_name": rating.name,
     }
-
-
-def record_match(
-    local_cache: Cache, listing: Listing, item: str, rating: AIResponse, source: str = "matched"
-) -> bool:
-    """Keep the first observation and price; return whether this is a new match."""
-    key = (CacheType.MATCHED.value, listing.marketplace, listing.id, item)
-    with local_cache.transact():
-        previous = local_cache.get(key)
-        if isinstance(previous, dict):
-            return False
-        local_cache.set(
-            key,
-            dict(
-                found_at=datetime.now().isoformat(timespec="seconds"),
-                listing_hash=listing.hash,
-                price=listing.price,
-                source=source,
-                **rating_fields(rating),
-            ),
-            tag=CacheType.MATCHED.value,
-        )
-        listing.to_cache(listing.post_url, local_cache)
-    return True
-
-
-def match_state(local_cache: Cache, marketplace: str, listing_id: str) -> dict[str, Any]:
-    saved = local_cache.get((CacheType.MATCH_STATE.value, marketplace, listing_id))
-    return {"shortlisted": False, "contacted": False, "dismissed": False, "filed_under": []} | (
-        saved if isinstance(saved, dict) else {}
-    )
 
 
 def update_state(
@@ -77,18 +349,17 @@ def update_state(
             patch[name] = list(dict.fromkeys(value))
         elif type(value) is not bool:
             raise ValueError(f"{name} must be a boolean")
-    with local_cache.transact():
-        state = match_state(local_cache, marketplace, listing_id) | patch
-        state["updated_at"] = datetime.now().isoformat(timespec="seconds")
-        local_cache.set(
-            (CacheType.MATCH_STATE.value, marketplace, listing_id),
-            state,
-            tag=CacheType.MATCH_STATE.value,
-        )
+    with library(local_cache) as store:
+        saved = store.listing(marketplace, listing_id)
+        if saved is None:
+            raise ValueError("Match not found")
+        state = saved["state"] | patch
+        state["updated_at"] = now()
+        store.save_listing(marketplace, listing_id, saved | {"state": state})
     return state
 
 
-def load_matches(local_cache: Cache) -> list[dict[str, Any]]:
+def load_legacy_matches(local_cache: Cache) -> list[dict[str, Any]]:
     """Retain only the matched/notified subset of details and AI cache entries."""
     from .webui.found_export import _collect_needed, _fallback_url, _load_lookups
 
@@ -145,7 +416,9 @@ def load_matches(local_cache: Cache) -> list[dict[str, Any]]:
             for date in (saved.get("found_at"), delivery.get("found_at"))
             if date
         ]
-        state = match_state(local_cache, market, listing_id)
+        state = default_state() | (
+            local_cache.get((CacheType.MATCH_STATE.value, market, listing_id)) or {}
+        )
         row = {
             name: detail.get(name) or ""
             for name in ("title", "image", "location", "seller", "condition", "description")
@@ -159,6 +432,7 @@ def load_matches(local_cache: Cache) -> list[dict[str, Any]]:
             url=detail.get("post_url") or _fallback_url(market, listing_id),
             price=saved.get("price") or "",
             current_price=saved.get("current_price"),
+            snapshot_price=detail.get("price"),
             found_at=min(dates) if dates else "",
             source=saved.get("source", "matched"),
             notified_users=sorted(delivery.get("users", [])),
@@ -173,6 +447,7 @@ def load_matches(local_cache: Cache) -> list[dict[str, Any]]:
                 evidence.get("checked_at", "")
             ):
                 evidence = shared
+        row["seller_profile"] = evidence
         row["seller_assessment"] = assess_seller(evidence)
         row["recheck"] = (
             {
@@ -270,6 +545,8 @@ def query_matches(
     rows.sort(key=lambda row: (row["found_at"], row["key"], row["item"]), reverse=True)
     if sort == "price":
         rows.sort(key=lambda row: price_number(row["current_price"] or row["price"]))
+    elif sort == "last_seen":
+        rows.sort(key=lambda row: row.get("last_seen") or "", reverse=True)
     elif sort == "score":
         rows.sort(key=lambda row: row["score"] or 0, reverse=True)
     return {

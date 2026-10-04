@@ -37,7 +37,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..matches import load_matches, query_matches, update_state
+from ..matches import library, load_matches, query_matches, update_state
 from ..recheck import RecheckQueue
 from ..utils import cache
 from .auth import (
@@ -508,7 +508,7 @@ def create_app(
         include_dismissed: bool = False,
         price_drop: bool = False,
         q: str = Query(default="", max_length=500),
-        sort: str = Query(default="newest", pattern="^(newest|price|score)$"),
+        sort: str = Query(default="newest", pattern="^(newest|last_seen|price|score)$"),
         limit: int = Query(default=200, ge=1, le=1000),
         cursor: int = Query(default=0, ge=0),
         since: datetime | None = None,
@@ -537,6 +537,18 @@ def create_app(
         if not rows:
             raise HTTPException(status_code=404, detail="Match not found")
         return rows
+
+    @app.get("/api/matches/{marketplace}/{listing_id}/history")
+    def match_history(
+        marketplace: str,
+        listing_id: str,
+        cursor: int = Query(default=0, ge=0),
+        limit: int = Query(default=25, ge=1, le=100),
+        _: str = Depends(require_session),
+    ) -> Dict[str, Any]:
+        require_match(marketplace, listing_id)
+        with library(cache) as store:
+            return store.history(marketplace, listing_id, cursor, limit)
 
     @app.put("/api/matches/{marketplace}/{listing_id}/state")
     def put_match_state(
@@ -634,7 +646,7 @@ def create_app(
         include_dismissed: bool = False,
         price_drop: bool = False,
         q: str = Query(default="", max_length=500),
-        sort: str = Query(default="newest", pattern="^(newest|price|score)$"),
+        sort: str = Query(default="newest", pattern="^(newest|last_seen|price|score)$"),
         _: str = Depends(require_session),
     ) -> StreamingResponse:
         matches = query_matches(
