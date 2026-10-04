@@ -20,7 +20,7 @@ function consoleUnderTest() {
   const document={querySelector:control,querySelectorAll:()=>[],addEventListener(){},cookie:''};
   const sandbox={...model,parse,edit:(content,path,value)=>edit(content,path,structuredClone(value)),FORM_SCHEMAS,BUILT_IN_REGIONS,document,location:{hash:'#/monitor'},history:{replaceState(){}},window:{addEventListener(){}},localStorage:{getItem:()=>null},structuredClone,URLSearchParams,URL,console,setTimeout:()=>0,clearTimeout(){}};
   const context=vm.createContext(sandbox);
-  vm.runInContext(source.slice(0,source.lastIndexOf('try{await initToml')).replace(/^import .*;\r?\n/gm,'')+'\nresult={state,prepareForm,candidateFromForm,fieldDefault,refreshData,locationHtml,renderFeed,acceptRecords,renderConflict,deleteSection,showLogin,bindChips,saveRaw};',context);
+  vm.runInContext(source.slice(0,source.lastIndexOf('try{await initToml')).replace(/^import .*;\r?\n/gm,'')+'\nresult={state,prepareForm,candidateFromForm,fieldDefault,refreshData,locationHtml,renderFeed,acceptRecords,renderConflict,deleteSection,showLogin,bindChips,saveRaw,toggleSearch,renderActivity};',context);
   sandbox.result.control=control;
   sandbox.result.run=(code,values={})=>{Object.assign(sandbox,values);return vm.runInContext(code,context);};
   return sandbox.result;
@@ -152,4 +152,79 @@ test('overwrite blocks another mutation until the write completes',async()=>{
   assert.equal(app.state.saving,true);
   complete();await overwrite;
   assert.equal(app.state.saving,false);
+});
+
+test('pause and resume persist an inherited search override through the validated save path',async()=>{
+  const app=consoleUnderTest(), name='camera.gear';
+  const original='# Keep this comment\n[user.me]\ntelegram_token="<REDACTED>"\n';
+  app.state.base=app.state.content=original;app.state.mtime=7;
+  app.state.context.inherited={item:{[name]:{search_phrases:['camera']}}};app.refreshData();
+  const writes=[], validations=[];
+  app.run('json=validate;api=save;loadConfig=reload;render=()=>{};updateStatus=()=>{};',{
+    validate:async(path,options)=>{assert.equal(path,'/api/config/validate');validations.push(JSON.parse(options.body));return {valid:true};},
+    save:async(path,options)=>{assert.equal(path,'/api/config/file/primary');assert.equal(options.method,'PUT');writes.push(JSON.parse(options.body));return {ok:true,json:async()=>({ok:true})};},
+    reload:async()=>{app.state.base=app.state.content=writes.at(-1).content;app.refreshData();},
+  });
+  await app.toggleSearch(name);
+  assert.equal(parse(writes[0].content).item[name].enabled,false);
+  assert.equal(writes[0].base_mtime,7);
+  assert.equal(validations[0].content,writes[0].content);
+  assert.ok(writes[0].content.includes('# Keep this comment'));
+  assert.equal(parse(writes[0].content).user.me.telegram_token,'<REDACTED>');
+  assert.deepEqual(Object.keys(parse(writes[0].content).item[name]),['enabled']);
+  assert.equal(app.control('#toggle-search').textContent,'Resume search');
+  await app.toggleSearch(name);
+  assert.equal(parse(writes[1].content).item[name].enabled,true);
+  assert.equal(app.control('#toggle-search').textContent,'Pause search');
+});
+
+test('search toggle blocks duplicate saves and leaves unsaved edits alone',async()=>{
+  const app=consoleUnderTest();app.state.base=app.state.content='[item.camera]\nsearch_phrases="camera"\n';app.refreshData();
+  let complete,writes=0;
+  app.run('writeDraft=write;render=()=>{};', {write:()=>{writes++;return new Promise(resolve=>{complete=resolve;});}});
+  const pause=app.toggleSearch('camera');
+  assert.equal(app.state.saving,true);assert.equal(app.control('#toggle-search').disabled,true);
+  await app.toggleSearch('camera');assert.equal(writes,1);
+  complete();await pause;
+  assert.equal(app.state.saving,false);assert.equal(app.control('#toggle-search').disabled,false);
+  app.state.content='[item.camera]\nsearch_phrases="new draft"\n';
+  await app.toggleSearch('camera');assert.equal(writes,1);
+  assert.equal(parse(app.state.content).item.camera.search_phrases,'new draft');
+});
+
+test('failed toggle restores the draft and allows retry without changing enabled state',async()=>{
+  const app=consoleUnderTest();const original='[item.camera]\nsearch_phrases="camera"\nenabled=false\n';
+  app.state.base=app.state.content=original;app.refreshData();
+  app.run('writeDraft=async()=>{throw new Error("Could not save");};');
+  await app.toggleSearch('camera');
+  assert.equal(app.state.content,original);assert.equal(app.state.config.item.camera.enabled,false);
+  assert.equal(app.state.saving,false);assert.equal(app.control('#toggle-search').disabled,false);
+  assert.equal(app.control('#toggle-search').textContent,'Resume search');
+  assert.equal(app.control('#toast').textContent,'Could not save');
+});
+
+test('stale toggle preserves its intended change for the existing conflict controls',async()=>{
+  const app=consoleUnderTest();app.state.base=app.state.content='[item.camera]\nsearch_phrases="camera"\n';app.refreshData();
+  app.run('json=async()=>({valid:true});api=async()=>({status:409,json:async()=>({})});');
+  await app.toggleSearch('camera');
+  assert.equal(parse(app.state.conflict.content).item.camera.enabled,false);
+  assert.equal(app.state.content,app.state.conflict.content);
+  assert.notEqual(app.state.content,app.state.base);
+  assert.notEqual(app.state.config.item.camera.enabled,false);
+  assert.equal(app.state.saving,false);
+  assert.equal(typeof app.control('#compare-config').onclick,'function');
+  await app.toggleSearch('camera');
+  assert.equal(app.control('#toast').textContent,'Save or discard your pending changes first.');
+});
+
+test('saved search header wires pause and resume to the current search',async()=>{
+  const app=consoleUnderTest();app.state.config={item:{camera:{search_phrases:['camera']}}};
+  app.state.route='#/monitor/item/camera';let toggled;
+  app.run('renderFeed=()=>{};toggleSearch=toggle;', {toggle:name=>{toggled=name;}});
+  app.control('#toggle-search').addEventListener=(event,handler)=>{app.control('#toggle-search')[event]=handler;};
+  app.renderActivity('camera');
+  assert.match(app.control('#pane').innerHTML,/id="toggle-search"[^>]*>Pause search/);
+  await app.control('#toggle-search').click();assert.equal(toggled,'camera');
+  app.state.config.item.camera.enabled=false;app.renderActivity('camera');
+  assert.match(app.control('#pane').innerHTML,/id="toggle-search"[^>]*>Resume search/);
 });
