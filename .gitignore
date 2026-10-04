@@ -5,6 +5,9 @@ __pycache__/
 CLAUDE.md
 .ruff*
 .claude
+/tmp/
+# Local verification artifacts
+/output/matches-library-verification/
 # C extensions
 *.so
 

@@ -16,5 +16,7 @@ dist
 build
 *.egg-info
 docs/_build
+tmp
+output
 tests
 program.prof
