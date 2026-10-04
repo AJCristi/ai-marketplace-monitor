@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import socket
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -37,6 +38,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from .. import __version__
 from ..matches import library, load_matches, query_matches, update_state
 from ..recheck import RecheckQueue
 from ..utils import cache
@@ -62,6 +64,42 @@ from .log_handler import LogBroadcastHandler
 mimetypes.add_type("application/wasm", ".wasm")
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _build_info() -> dict[str, Any]:
+    """Capture the server's starting revision, never a later checkout's HEAD."""
+    revision = os.environ.get("AIMM_BUILD_SHA", "").strip()
+    dirty = False
+    root = Path(__file__).resolve().parents[3]
+    if not revision and (root / ".git").exists():
+        try:
+            revision = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).strip()
+            dirty = bool(
+                subprocess.check_output(
+                    ["git", "status", "--porcelain", "--", "src/ai_marketplace_monitor"],
+                    cwd=root,
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                ).strip()
+            )
+        except (OSError, subprocess.SubprocessError):
+            revision = ""
+    return {
+        "version": __version__,
+        "sha": (
+            revision.lower()
+            if re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", revision)
+            else None
+        ),
+        "dirty": dirty,
+    }
 
 
 @dataclass
@@ -184,6 +222,7 @@ def create_app(
     config_service: ConfigFileService,
     log_handler: LogBroadcastHandler,
 ) -> FastAPI:
+    build = _build_info()
     app = FastAPI(
         title="AI Marketplace Monitor",
         docs_url=None,
@@ -275,6 +314,7 @@ def create_app(
         files = config_service.list_files()
         return {
             "config_files": [f.__dict__ for f in files],
+            "build": build,
             "urls": _enumerate_urls(config.host, config.port),
             "auth_mode": "open" if is_open() else "authenticated",
             "open": is_open(),

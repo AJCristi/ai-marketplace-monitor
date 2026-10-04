@@ -853,6 +853,9 @@ function render() {
 async function bootstrap() {
   matchesView ||= createMatchesView({state,json,pageHeader,exportCsv,toast,renderSidebar,searchSummary});
   state.status=await json('/api/status');state.open=state.status.open;$('#app').hidden=false;
+  const build=state.status.build;
+  $('#build-version').textContent=build?.sha?build.sha.slice(0,7)+(build.dirty?' · modified':''):'Build unknown';
+  $('#build-version').title=`Version ${build?.version||'unknown'} · Commit ${build?.sha||'unavailable'}${build?.dirty?' · uncommitted source changes at startup':''}`;
   if(!state.initialized){await loadConfig();state.initialized=true;render();await snapshot();}
   connectStream();updateStatus();
   matchesView.summary();

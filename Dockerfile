@@ -8,7 +8,7 @@
 #   - supervisord to manage all processes
 #
 # Build:
-#   docker build -t aimm .
+#   docker build --build-arg AIMM_BUILD_SHA="$(git rev-parse HEAD)" -t aimm .
 #
 # Run (mount your host config + cache directory into the container):
 #   docker run --rm -it \
@@ -70,6 +70,10 @@ COPY src ./src
 
 RUN pip install . \
     && playwright install --with-deps chromium
+
+# Embed the immutable source revision; the installed package has no .git directory.
+ARG AIMM_BUILD_SHA
+ENV AIMM_BUILD_SHA=${AIMM_BUILD_SHA}
 
 # supervisord configuration
 RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /root/.ai-marketplace-monitor

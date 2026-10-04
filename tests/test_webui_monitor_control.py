@@ -1,6 +1,7 @@
 """Regression checks for manual searches with unchanged config content."""
 
 import logging
+import subprocess
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,56 @@ from ai_marketplace_monitor.webui.auth import CSRF_HEADER, AuthConfig, hash_pass
 from ai_marketplace_monitor.webui.config_api import ConfigFileService
 from ai_marketplace_monitor.webui.log_handler import LogBroadcastHandler
 from ai_marketplace_monitor.webui.server import AuthState, WebUIConfig, create_app
+
+
+@pytest.mark.parametrize("revision", ["a" * 40, "b" * 64, "invalid metadata"])
+def test_status_captures_build_revision_at_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, revision: str
+) -> None:
+    monkeypatch.setenv("AIMM_BUILD_SHA", revision)
+    path = tmp_path / "config.toml"
+    path.write_text("", encoding="utf-8")
+    state = AuthState()
+    client = TestClient(
+        create_app(
+            WebUIConfig(config_files=[path]),
+            state,
+            ConfigFileService([path]),
+            LogBroadcastHandler(),
+        )
+    )
+    monkeypatch.setenv("AIMM_BUILD_SHA", "c" * 40)
+    build = client.get("/api/status").json()["build"]
+    assert build["sha"] == (revision if revision != "invalid metadata" else None)
+    assert build["version"] and build["dirty"] is False
+    state.exposed = True
+    assert client.get("/api/status").status_code == 401
+
+
+def test_build_revision_uses_source_checkout_and_handles_missing_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_marketplace_monitor.webui import server
+
+    monkeypatch.delenv("AIMM_BUILD_SHA", raising=False)
+    monkeypatch.setattr(
+        server,
+        "__file__",
+        str(tmp_path / "src" / "ai_marketplace_monitor" / "webui" / "server.py"),
+    )
+    assert server._build_info()["sha"] is None  # Installed distributions have no checkout.
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(
+        server.subprocess,
+        "check_output",
+        Mock(side_effect=["d" * 40 + "\n", " M src/ai_marketplace_monitor/webui/server.py\n"]),
+    )
+    build = server._build_info()
+    assert build["sha"] == "d" * 40 and build["dirty"] is True
+    monkeypatch.setattr(
+        server.subprocess, "check_output", Mock(side_effect=subprocess.TimeoutExpired("git", 2))
+    )
+    assert server._build_info()["sha"] is None
 
 
 def test_request_runs_again_with_unchanged_config(monkeypatch: pytest.MonkeyPatch) -> None:
