@@ -81,6 +81,7 @@ class CacheType(Enum):
     COUNTERS = "counters"
     MATCHED = "matches"
     MATCH_STATE = "match-state"
+    SELLER_PROFILE = "seller-profiles"
 
 
 class CounterItem(Enum):

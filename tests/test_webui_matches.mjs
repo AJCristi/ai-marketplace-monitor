@@ -145,3 +145,19 @@ test('arrow keys navigate match details while preserving field editing and modif
   assert.equal(h.node('matches-announcement').textContent,'Second. Match 2 of 2 loaded.');
   assert.equal(key('ArrowLeft'),true);assert.match(h.node('match-detail').innerHTML,/<h2>First<\/h2>/);
 });
+
+test('seller assessment appears separately with escaped reasons and safe profile links',async t=>{
+  const listing=row('fb:1','camera',{score:5,conclusion:'Great deal',state:{filed_under:[]},notified_users:[],seller_assessment:{status:'caution',reasons:['Low seller rating','<img src=x onerror=alert(1)>'],profile_url:'https://www.facebook.com/marketplace/profile/123/',checked_at:'2026-10-04T01:00:00Z'}});
+  const h=viewHarness(t,{matches:[listing]});h.view.render();await h.flush();
+  assert.match(h.node('matches-body').innerHTML,/Seller: Caution/);
+  let detail=h.node('match-detail').innerHTML;
+  assert.match(detail,/5\/5/);assert.match(detail,/Great deal/);assert.match(detail,/Low seller rating/);
+  assert.match(detail,/&lt;img src=x onerror=alert\(1\)&gt;/);assert.doesNotMatch(detail,/<img src=x/);
+  assert.match(detail,/href="https:\/\/www.facebook.com\/marketplace\/profile\/123\/"/);
+  assert.match(detail,/Checked/);
+  listing.seller_assessment.profile_url='javascript:alert(1)';h.view.render();await h.flush();
+  assert.doesNotMatch(h.node('match-detail').innerHTML,/href="javascript:/);
+  delete listing.seller_assessment;h.view.render();await h.flush();
+  detail=h.node('match-detail').innerHTML;
+  assert.match(detail,/Seller: Unknown/);assert.match(detail,/Re-check this listing/);
+});

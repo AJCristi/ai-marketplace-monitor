@@ -16,6 +16,7 @@ from rich.pretty import pretty_repr
 
 from .listing import Listing
 from .marketplace import ItemConfig, Marketplace, MarketplaceConfig, WebPage
+from .seller import evidence_fresh, parse_seller_evidence
 from .utils import (
     BaseConfig,
     CounterItem,
@@ -559,7 +560,7 @@ class FacebookMarketplace(Marketplace):
                         continue
                     # currently we trust the other items from summary page a bit better
                     # so we do not copy title, description etc from the detailed result
-                    for attr in ("condition", "seller", "description"):
+                    for attr in ("condition", "seller", "description", "seller_profile"):
                         # other attributes should be consistent
                         setattr(listing, attr, getattr(details, attr))
                     listing.name = item_config.name
@@ -594,29 +595,37 @@ class FacebookMarketplace(Marketplace):
     ) -> Tuple[Listing, bool]:
         assert post_url.startswith("https://www.facebook.com")
         details = None if force_refresh else Listing.from_cache(post_url)
-        if (
+        unchanged = (
             details is not None
             and (price is None or details.price == price)
             and (title is None or details.title == title)
-        ):
-            # if the price and title are the same, we assume everything else is unchanged.
+        )
+        if details is not None and unchanged and evidence_fresh(details.seller_profile):
+            # Preserve listing reuse while periodically refreshing seller evidence.
             return details, True
 
-        if not self.page:
-            self.login()
+        try:
+            if not self.page:
+                self.login()
 
-        assert self.page is not None
-        self.goto_url(post_url)
-        counter.increment(CounterItem.LISTING_QUERY, item_config.name)
-        details = parse_listing(self.page, post_url, self.translator, self.logger)
-        if details is None:
-            raise ValueError(
-                f"Failed to get item details of listing {post_url}. "
-                "The listing might be missing key information (e.g. seller) or not in English."
-                "Please add option language to your marketplace configuration is the latter is the case. See https://github.com/BoPeng/ai-marketplace-monitor?tab=readme-ov-file#support-for-non-english-languages for details."
-            )
-        details.to_cache(post_url)
-        return details, False
+            assert self.page is not None
+            self.goto_url(post_url)
+            counter.increment(CounterItem.LISTING_QUERY, item_config.name)
+            refreshed = parse_listing(self.page, post_url, self.translator, self.logger)
+            if refreshed is None:
+                raise ValueError(
+                    f"Failed to get item details of listing {post_url}. "
+                    "The listing might be missing key information (e.g. seller) or not in English."
+                    "Please add option language to your marketplace configuration is the latter is the case. See https://github.com/BoPeng/ai-marketplace-monitor?tab=readme-ov-file#support-for-non-english-languages for details."
+                )
+        except Exception:
+            if details is not None and unchanged:
+                # An optional seller refresh must not block an otherwise reusable
+                # listing. Keep the original timestamp so stale evidence stays Unknown.
+                return details, True
+            raise
+        refreshed.to_cache(post_url)
+        return refreshed, False
 
     def check_listing(
         self: "FacebookMarketplace",
@@ -840,6 +849,17 @@ class FacebookItemPage(WebPage):
     def get_seller(self: "FacebookItemPage") -> str:
         raise NotImplementedError("get_seller is not implemented for this page")
 
+    def get_seller_profile(self: "FacebookItemPage") -> dict[str, Any]:
+        try:
+            return parse_seller_evidence(
+                self.page.content(),
+                self.translator("Seller information"),
+                self.translator("Joined Facebook in"),
+            )
+        except Exception:
+            # Optional evidence must never prevent a listing from matching.
+            return parse_seller_evidence("")
+
     def get_description(self: "FacebookItemPage") -> str:
         raise NotImplementedError("get_description is not implemented for this page")
 
@@ -899,6 +919,7 @@ class FacebookItemPage(WebPage):
             condition=self.get_condition(),
             description=description,
             seller=self.get_seller(),
+            seller_profile=self.get_seller_profile(),
         )
         if self.logger:
             self.logger.debug(f"{hilight('[Retrieve]', 'succ')} {pretty_repr(res)}")

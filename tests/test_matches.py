@@ -250,6 +250,7 @@ def test_recheck_never_removes_match(
 
 
 def test_force_refresh_and_event_wakeup(listing: Listing, monkeypatch: pytest.MonkeyPatch) -> None:
+    listing.seller_profile = {"checked_at": datetime.now(timezone.utc).isoformat()}
     market: Any = object.__new__(FacebookMarketplace)
     market.page = Mock()
     market.translator = Mock()

@@ -37,6 +37,33 @@ adds personal filing labels without changing the listing's rating. These labels
 count in search groups and carry a “filed by you” marker. Original matches remain
 under their searches.
 
+## Seller credibility
+
+Each match shows a separate **Seller: Established / Caution / Unknown** label.
+Open the match for the supporting reasons, the time evidence was collected, and
+a link to the seller's Marketplace profile when it is available.
+
+This assessment runs automatically, without an AI request. It uses explicit
+account join year and seller rating/review count from the listing's seller panel:
+
+- **Established:** joined at least two calendar years ago, with a rating of at
+  least 4/5 from at least five reviews.
+- **Caution:** joined this calendar year, or a rating below 3/5 from at least five
+  reviews. The reasons explain which signal applies; this does not mean “fake.”
+- **Unknown:** missing, ambiguous, insufficient, or outdated evidence. A private
+  profile, missing reviews, nickname, or meme avatar is not evidence of fraud.
+
+Evidence is shared by profile URL, never by seller name. It expires for assessment
+after 30 days. Existing cached listings are refreshed when encountered by a search;
+use **Re-check now** to collect or refresh evidence for an older match. An old match
+that is never encountered or re-checked remains Unknown. Unrecognized layouts or
+rating languages also remain Unknown; rating parsing currently supports explicit
+English labels. This version reads the seller panel only, without visiting profile
+timelines, downloading avatars, or collecting friends or posts.
+
+The label does not verify identity or guarantee a safe transaction. It does not
+change listing scores, filters, notifications, or personal states.
+
 ## Re-checks
 
 **Re-check now** opens a listing again and applies its search's current filters

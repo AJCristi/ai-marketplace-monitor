@@ -11,6 +11,7 @@ from diskcache import Cache  # type: ignore
 
 from .ai import AIResponse
 from .listing import Listing
+from .seller import assess_seller, profile_url
 from .utils import CacheType
 
 
@@ -164,6 +165,15 @@ def load_matches(local_cache: Cache) -> list[dict[str, Any]]:
             state=state,
             **{name: saved.get(name) for name in ("score", "conclusion", "comment", "ai_name")},
         )
+        evidence = detail.get("seller_profile")
+        if isinstance(evidence, dict):
+            url = profile_url(str(evidence.get("profile_url") or ""))
+            shared = local_cache.get((CacheType.SELLER_PROFILE.value, url)) if url else None
+            if isinstance(shared, dict) and str(shared.get("checked_at", "")) > str(
+                evidence.get("checked_at", "")
+            ):
+                evidence = shared
+        row["seller_assessment"] = assess_seller(evidence)
         row["recheck"] = (
             {
                 "at": saved["rechecked_at"],
