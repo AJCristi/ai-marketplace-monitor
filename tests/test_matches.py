@@ -716,11 +716,19 @@ def test_new_badges_and_manual_groups(match_cache: Cache, listing: Listing) -> N
     )
 
 
-def test_due_search_precedes_one_recheck(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("work_kind", ["recheck", "image"])
+def test_due_search_precedes_background_work(
+    monkeypatch: pytest.MonkeyPatch, work_kind: str
+) -> None:
     monitor: Any = object.__new__(MarketplaceMonitor)
     monitor.search_requested = threading.Event()
     monitor.rechecks = RecheckQueue()
-    monitor.rechecks.enqueue([{"marketplace": "facebook", "listing_id": "1"}], None, True)
+    if work_kind == "recheck":
+        monitor.rechecks.enqueue([{"marketplace": "facebook", "listing_id": "1"}], None, True)
+    monitor.image_matcher = SimpleNamespace(
+        automatic=False, queue=SimpleNamespace(pending=lambda: work_kind == "image"), scan=Mock()
+    )
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.load_matches", lambda cache: [])
     monitor.recheck_after = 0
     monitor.keyboard_monitor = None
     monitor.defer_login_until_credentials = False
@@ -753,6 +761,12 @@ def test_due_search_precedes_one_recheck(monkeypatch: pytest.MonkeyPatch) -> Non
         raise RuntimeError("safe point reached")
 
     monitor.process_recheck = recheck
+
+    def image_check(rows: Any) -> None:
+        events.append("image")
+        raise RuntimeError("safe point reached")
+
+    monitor.image_matcher.process = image_check
     with pytest.raises(RuntimeError, match="safe point reached"):
         monitor.start_monitor()
-    assert events == ["initial search", "due search", "recheck"]
+    assert events == ["initial search", "due search", work_kind]

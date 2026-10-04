@@ -190,7 +190,7 @@ function renderSidebar() {
   if ($('#sidebar').dataset.signature !== signature) {
     $('#sidebar').dataset.signature = signature;
     if (settings) {
-      const rows = [['marketplace','Marketplace',Object.keys(state.config.marketplace || {}).join(' · ')],['ai','AI providers',Object.keys(state.config.ai || {}).join(' · ') || 'None'],['notifications','Notifications',Object.keys(state.config.user || {}).join(' · ')],['more','Proxy, regions, languages','Network and locale options'],['config','config.toml','Edit the file directly']];
+      const rows = [['marketplace','Marketplace',Object.keys(state.config.marketplace || {}).join(' · ')],['ai','AI providers',Object.keys(state.config.ai || {}).join(' · ') || 'None'],['notifications','Notifications',Object.keys(state.config.user || {}).join(' · ')],['more','Image matching and more','Image matching, network and locale options'],['config','config.toml','Edit the file directly']];
       $('#sidebar').innerHTML = '<div class="sh">Settings</div>' + rows.map(([key,title,summary]) => `<a class="it ${parts[1]===key?'on':''}" href="#/settings/${key}" ${parts[1]===key?'aria-current="page"':''}><div class="t">${title}</div><div class="s">${esc(summary)}</div></a>`).join('');
     } else {
       $('#sidebar').innerHTML = `<a class="it ${parts[1]==='all'?'on':''}" href="#/monitor/all"><span class="b">All activity</span><span class="m d" style="float:right">last ${state.capacity.toLocaleString()} events</span></a><div class="sh">Saved searches · ${Object.keys(state.config.item || {}).length}</div>` + Object.entries(state.config.item || {}).map(([name,item]) => `<a class="it ${parts[2]===name || decodeName(parts[2]||'')===name ? 'on':''}" href="${itemRoute(name)}"><div class="row sb"><span class="t m ${item.enabled===false?'d':''}">${esc(name)}</span><span data-item-badge="${esc(name)}" class="m xs d">${item.enabled===false?'disabled':state.form?.name===name?'editing':''}</span></div><div class="s">${esc(searchSummary(name))}</div></a>`).join('') + '<p class="sidebar-note">* marks a Marketplace or built-in default. Earlier files also contribute values. “New” counts come from recent activity.</p>';
@@ -529,7 +529,7 @@ function formHtml() {
 }
 function mountForm(prefix,name,isNew = false,preset = {},standalone = true) {
   prepareForm(prefix,name,isNew,preset);
-  const title=prefix==='item'?(isNew?'New search':'Edit · '+name):prefix==='monitor'?'Proxy':'Edit · '+name;
+  const title=prefix==='item'?(isNew?'New search':'Edit · '+name):prefix==='monitor'?'Image matching and proxy':'Edit · '+name;
   const actions=!isNew&&prefix!=='monitor'?`<a class="btn q" href="#/settings/config?section=${encodeURIComponent(prefix+'.'+name)}">View in config.toml</a><button class="btn x" id="delete-section">Delete</button>`:'';
   if(standalone)$('#pane').innerHTML=pageHeader(title,'',actions)+formHtml();
   else $('#settings-form-host').innerHTML=(actions?`<div class="bar">${actions}</div>`:'')+formHtml();
@@ -770,7 +770,7 @@ function renderSettings() {
   }
   if(section==='more'){
     if(query.get('type')==='region' || query.has('new')){mountForm('region',query.get('edit')||'my_region',query.has('new'));return;}
-    $('#pane').innerHTML=pageHeader('Proxy, regions, languages','Network and locale options')+'<div id="settings-form-host"></div>';
+    $('#pane').innerHTML=pageHeader('Image matching and more','Automatic photo checks, network and locale options')+'<div id="settings-form-host"></div>';
     mountForm('monitor','',false,{},false);
     const extra=document.createElement('div');extra.className='body';
     extra.innerHTML=`<section class="sect"><h2>Regions</h2><p class="mu sm">Built in: ${BUILT_IN_REGIONS.join(' · ')}. Each expands to cities with radius and currency.</p><div>${Object.keys(state.config.region||{}).filter(name=>!BUILT_IN_REGIONS.includes(name)||own(state.local.region,name)).map(name=>`<a class="btn sm" href="#/settings/more?type=region&edit=${encodeURIComponent(name)}">${esc(name)}</a>`).join(' ')}</div><a class="btn sm" href="#/settings/more?new=1&type=region&edit=my_region">+ Add custom region</a></section><section class="sect"><h2>Languages</h2><p class="mu sm">A locale and dictionary are needed for non-English Facebook. ${Object.keys(state.config.translation||{}).length} language definitions loaded.</p><a class="btn sm" href="#/settings/config">Edit languages in config.toml</a></section>`;

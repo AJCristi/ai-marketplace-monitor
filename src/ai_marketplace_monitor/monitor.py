@@ -18,6 +18,7 @@ from rich.prompt import Prompt
 
 from .ai import AIBackend, AIResponse
 from .config import Config, supported_ai_backends, supported_marketplaces
+from .image_matching import ImageMatcher
 from .listing import Listing
 from .marketplace import Marketplace, TItemConfig, TMarketplaceConfig
 from .matches import (
@@ -78,6 +79,8 @@ class MarketplaceMonitor:
         self.logger = logger
         self.search_requested = threading.Event()
         self.rechecks = RecheckQueue()
+        self.image_matcher = ImageMatcher(cache)
+        self.image_matcher.queue.wake = self.rechecks.wake
         self.recheck_after = 0.0
 
     def request_search(self: "MarketplaceMonitor") -> None:
@@ -97,6 +100,7 @@ class MarketplaceMonitor:
                 # if the config file is ok, break
                 assert self.logger is not None
                 self.config = Config(self.config_files, self.logger)
+                self.image_matcher.configure(self.config)
                 self.config_hash = new_file_hash
                 # self.logger.debug(self.config)
                 assert self.config is not None
@@ -651,7 +655,32 @@ class MarketplaceMonitor:
                         break
                     self.process_recheck()
                     continue
+                if self.image_matcher.automatic or self.image_matcher.queue.pending():
+                    if (
+                        calculate_file_hash(self.config_files) != self.config_hash
+                        or self.search_requested.is_set()
+                    ):
+                        self.search_requested.clear()
+                        schedule.clear()
+                        break
+                    image_rows = load_matches(cache)
+                    self.image_matcher.scan(image_rows)
+                    if self.image_matcher.queue.pending():
+                        image_job = self.image_matcher.process(image_rows)
+                        if image_job and image_job["state"] in ("done", "stopped") and self.logger:
+                            self.logger.info(
+                                "Image matching %s",
+                                image_job["state"],
+                                extra=aimm_event(
+                                    "image_matching_done", job_id=image_job["job_id"]
+                                ),
+                            )
+                        continue
+                    idle_seconds = min(idle_seconds, 60)
                 self.rechecks.wake.clear()
+                if self.image_matcher.queue.pending():
+                    # A manual request can arrive between the earlier check and clear.
+                    idle_seconds = min(idle_seconds, 1)
                 if self.rechecks.pending():
                     idle_seconds = min(idle_seconds, max(1, self.recheck_after - time.monotonic()))
                 if idle_seconds > 60:

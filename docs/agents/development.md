@@ -48,6 +48,7 @@ do not copy Linux system-package commands into PowerShell.
 | CLI/config loading | `tests/test_cli.py`, `tests/test_aimm.py` |
 | Facebook parsing/filtering | `tests/test_facebook.py`, `tests/test_facebook_keyword_filtering.py`, `tests/test_facebook_sort_by.py` |
 | AI prompts | `tests/test_ai.py` (live provider evaluation is skipped) |
+| Image matching | `tests/test_image_matching.py`, `tests/test_webui_related.mjs`, Node form tests; use synthetic photos and mocked HTTP/model calls |
 | Notifications | `tests/test_notification.py` |
 | Config editing/masked secrets | `tests/test_webui_config_api.py`, `tests/test_webui_secrets_redact.py`, Node form tests |
 | Credentials/sessions | `tests/test_webui_config_auth.py`, `tests/test_webui_auth.py` |

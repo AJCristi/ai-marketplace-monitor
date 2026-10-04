@@ -327,6 +327,42 @@ class BaseConfig:
 
 @dataclass
 class MonitorConfig(BaseConfig):
+    image_matching: bool = False
+    image_matching_ai: str | None = None
+    image_matching_daily_budget: float = 0.0
+    image_matching_input_cost: float = 0.435
+    image_matching_output_cost: float = 0.87
+
+    def handle_image_matching(self) -> None:
+        if type(self.image_matching) is not bool:
+            raise ValueError("image_matching must be a boolean.")
+
+    def handle_image_matching_ai(self) -> None:
+        if self.image_matching_ai is not None and (
+            not isinstance(self.image_matching_ai, str) or not self.image_matching_ai.strip()
+        ):
+            raise ValueError("image_matching_ai must name an AI section.")
+
+    def _image_matching_amount(self, field: str) -> None:
+        import math
+
+        value = getattr(self, field)
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"{field} must be a finite non-negative USD amount.")
+
+    def handle_image_matching_daily_budget(self) -> None:
+        self._image_matching_amount("image_matching_daily_budget")
+
+    def handle_image_matching_input_cost(self) -> None:
+        self._image_matching_amount("image_matching_input_cost")
+        if self.image_matching_input_cost == 0:
+            raise ValueError("image_matching_input_cost must be positive.")
+
+    def handle_image_matching_output_cost(self) -> None:
+        self._image_matching_amount("image_matching_output_cost")
+        if self.image_matching_output_cost == 0:
+            raise ValueError("image_matching_output_cost must be positive.")
+
     proxy_server: List[str] | None = None
     proxy_bypass: str | None = None
     proxy_username: str | None = None

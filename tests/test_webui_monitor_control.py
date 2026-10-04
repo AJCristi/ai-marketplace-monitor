@@ -70,10 +70,19 @@ def test_build_revision_uses_source_checkout_and_handles_missing_git(
     assert server._build_info()["sha"] is None
 
 
-def test_request_runs_again_with_unchanged_config(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("image_arrives_during_clear", [False, True])
+def test_request_runs_again_with_unchanged_config(
+    monkeypatch: pytest.MonkeyPatch, image_arrives_during_clear: bool
+) -> None:
     monitor: Any = object.__new__(MarketplaceMonitor)
     monitor.search_requested = threading.Event()
     monitor.rechecks = RecheckQueue()
+    pending_image: list[bool] = []
+    monitor.image_matcher = SimpleNamespace(
+        automatic=False, queue=SimpleNamespace(pending=lambda: bool(pending_image))
+    )
+    if image_arrives_during_clear:
+        monkeypatch.setattr(monitor.rechecks.wake, "clear", lambda: pending_image.append(True))
     monitor.recheck_after = 0.0
     monitor.keyboard_monitor = None
     monitor.defer_login_until_credentials = False
@@ -97,6 +106,7 @@ def test_request_runs_again_with_unchanged_config(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr("ai_marketplace_monitor.monitor.schedule.clear", clear)
 
     def wake(*args):
+        assert args[0] == (1 if image_arrives_during_clear else 5)
         monitor.request_search()
         return SleepStatus.BY_FILE_CHANGE
 
@@ -243,6 +253,9 @@ def test_fixed_times_do_not_repeat_initial_search(monkeypatch: pytest.MonkeyPatc
     monitor: Any = object.__new__(MarketplaceMonitor)
     monitor.search_requested = threading.Event()
     monitor.rechecks = RecheckQueue()
+    monitor.image_matcher = SimpleNamespace(
+        automatic=False, queue=SimpleNamespace(pending=lambda: False)
+    )
     monitor.recheck_after = 0.0
     monitor.keyboard_monitor = None
     monitor.defer_login_until_credentials = False
