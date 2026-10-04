@@ -53,7 +53,7 @@ from .auth import (
 )
 from .config_api import ConfigFileService
 from .config_auth import extract_credentials
-from .found_export import iter_found_csv, iter_found_rows
+from .found_export import iter_found_csv, iter_found_rows, iter_match_rows
 from .log_handler import LogBroadcastHandler
 
 # Ensure the vendored toml-edit-js WASM bundle is served with the right
@@ -623,6 +623,33 @@ def create_app(
             return recheck_queue().stop(job_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Re-check job not found") from None
+
+    @app.get("/api/matches.csv")
+    def export_matches_csv(
+        item: str | None = None,
+        min_score: int | None = Query(default=None, ge=1, le=5),
+        status: str = Query(default="all", pattern="^(all|shortlisted|contacted|dismissed)$"),
+        include_dismissed: bool = False,
+        q: str = Query(default="", max_length=500),
+        sort: str = Query(default="newest", pattern="^(newest|price|score)$"),
+        _: str = Depends(require_session),
+    ) -> StreamingResponse:
+        matches = query_matches(
+            cache,
+            item=item,
+            min_score=min_score,
+            status=status,
+            include_dismissed=include_dismissed,
+            q=q,
+            sort=sort,
+            limit=None,
+        )["matches"]
+        filename = f"matches-{time.strftime('%Y%m%d-%H%M%S')}.csv"
+        return StreamingResponse(
+            iter_found_csv(iter_match_rows(matches)),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     @app.get("/api/found.csv")
     def export_found_csv(_: str = Depends(require_session)) -> StreamingResponse:

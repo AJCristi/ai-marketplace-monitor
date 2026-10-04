@@ -6,7 +6,7 @@ import csv
 import io
 from typing import Dict, List
 
-from ai_marketplace_monitor.webui.found_export import CSV_COLUMNS, rows_to_csv
+from ai_marketplace_monitor.webui.found_export import CSV_COLUMNS, iter_match_rows, rows_to_csv
 
 
 def _parse(text: str) -> List[Dict[str, str]]:
@@ -46,6 +46,36 @@ def test_rows_to_csv_neutralizes_formula_injection() -> None:
     assert parsed[0]["title"] == '\'=HYPERLINK("http://evil")'
     assert parsed[0]["seller"] == "'+cmd"
     assert parsed[0]["ai_comment"] == "'@SUM(1)"
+
+
+def test_match_csv_keeps_current_price_search_rating_and_sanitizes_cells() -> None:
+    rows = _parse(
+        rows_to_csv(
+            iter_match_rows(
+                [
+                    {
+                        "item": "camera",
+                        "title": '=HYPERLINK("http://evil")',
+                        "price": "$100",
+                        "current_price": "$80",
+                        "score": 5,
+                        "comment": "+formula",
+                        "notified_users": ["amy", "ben"],
+                    },
+                    {"item": "gear", "price": "$100", "score": None, "notified_users": []},
+                ]
+            )
+        )
+    )
+    assert rows[0]["title"] == '\'=HYPERLINK("http://evil")'
+    assert rows[0]["ai_comment"] == "'+formula"
+    assert rows[0]["price"] == "$80"
+    assert rows[0]["rating"] == "5"
+    assert rows[0]["notified_user"] == "amy, ben"
+    assert rows[1]["item"] == "gear"
+    assert rows[1]["price"] == "$100"
+    assert rows[1]["rating"] == ""
+    assert rows[1]["notified_user"] == ""
 
 
 from pathlib import Path  # noqa: E402

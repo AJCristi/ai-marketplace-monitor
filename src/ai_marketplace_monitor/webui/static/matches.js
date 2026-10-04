@@ -48,16 +48,20 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   const $ = selector=>document.querySelector(selector);
   let data=null, rows=[], selected=null, request=0, cutoff='', visited=false, error='', loading=false;
   const expanded=new Set(), collapsed=new Set(), jobs=new Map();
-  let busy=false, refreshTimer=null;
+  let busy=false, refreshTimer=null, filterTimer=null;
   const storage=(store,key,value)=>{try{return value===undefined?store.getItem(key):value===null?store.removeItem(key):store.setItem(key,value);}catch{return null;}};
   try{cutoff=localStorage.getItem('aimm-matches-seen')||'';}catch{}
   try{for(const id of JSON.parse(sessionStorage.getItem('aimm-recheck-jobs')||'[]'))jobs.set(id,{job_id:id,state:'queued',results:[],done:0,total:0});}catch{}
   const active=()=>state.route.split('?')[0]==='#/monitor/matches';
   const query=()=>new URLSearchParams(state.route.split('?')[1]||'');
+  const viewKeys=['item','min_score','status','include_dismissed','q','sort','group'];
+  const filters=()=>[...query()].filter(([key,value])=>viewKeys.includes(key)&&!['group','sort'].includes(key)&&value&&!(key==='status'&&value==='all')&&!(key==='include_dismissed'&&value!=='true'));
+  function rememberView(p){try{storage(localStorage,'aimm-matches-view',new URLSearchParams([...p].filter(([key])=>viewKeys.includes(key))).toString());}catch{}}
+  function updateQuery(p){state.route='#/monitor/matches'+(p.size?'?'+p:'');history.replaceState(null,'',state.route);rememberView(p);const clear=$('#matches-clear');if(clear)clear.hidden=!filters().length;}
   const running=()=>[...jobs.values()].some(job=>['queued','running'].includes(job.state));
   const rememberJobs=()=>{try{storage(sessionStorage,'aimm-recheck-jobs',JSON.stringify([...jobs.values()].filter(job=>['queued','running'].includes(job.state)).map(job=>job.job_id)));}catch{}};
   const params=()=>{const p=query();p.delete('group');p.set('limit','200');if(cutoff)p.set('since',cutoff);return p;};
-  function setFilter(name,value){const p=query();if(value)p.set(name,value);else p.delete(name);state.route='#/monitor/matches'+(p.size?'?'+p:'');history.replaceState(null,'',state.route);expanded.clear();load();}
+  function setFilter(name,value){if(!active())return;const p=query();if(value)p.set(name,value);else p.delete(name);p.delete('cursor');updateQuery(p);expanded.clear();load();}
   function notify(message, action) {
     toast(message);
     if(action){const button=document.createElement('button');button.className='btn';button.textContent='Undo';button.onclick=action;$('#toast').append(' ',button);}
@@ -80,7 +84,16 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   }
   function renderCounts(){for(const button of document.querySelectorAll('[data-match-status]')){const name=button.dataset.matchStatus;button.textContent=({all:'All',shortlisted:'★ Shortlist',contacted:'Contacted',dismissed:'Dismissed'})[name]+' '+(data?.counts[name]??'—');}}
   function selectHtml(name,label,options){const value=query().get(name)||'';return `<label class="sm">${label}<select class="in" data-match-filter="${name}">${options.map(([id,text])=>`<option value="${esc(id)}" ${id===value?'selected':''}>${esc(text)}</option>`).join('')}</select></label>`;}
-  function render() {
+  function render(restore=true) {
+    clearTimeout(filterTimer);
+    if(restore&&!state.route.includes('?')){
+      try{
+        const saved=new URLSearchParams(storage(localStorage,'aimm-matches-view')||''), p=new URLSearchParams([...saved].filter(([key])=>viewKeys.includes(key)));
+        if(p.has('item')&&!Object.hasOwn(state.config.item||{},p.get('item')))p.delete('item');
+        for(const [key,values] of Object.entries({status:['all','shortlisted','contacted','dismissed'],min_score:['1','2','3','4','5'],sort:['newest','price','score'],group:['search','date','none'],include_dismissed:['true','false']}))if(p.has(key)&&!values.includes(p.get(key)))p.delete(key);
+        updateQuery(p);
+      }catch{}
+    }else rememberView(query());
     try{cutoff=storage(localStorage,'aimm-matches-seen')||'';}catch{}visited=false;
     const p=query();
     $('#pane').innerHTML=pageHeader('Matches',"Every listing that passed a search’s filters and AI minimum. Read from the monitor’s cache, so it’s still here after a restart.",'<button class="btn" id="export-csv">Export CSV</button>')+
@@ -89,11 +102,12 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
       selectHtml('min_score','AI rating',[['','Any'],['4','≥4'],['5','5']])+
       selectHtml('group','Group by',[['','Search'],['date','Date found'],['none','None']])+
       selectHtml('sort','Sort',[['','Newest'],['price','Price ↑'],['score','Rating ↓']])+
-      `<label class="sm">Contains<input class="in" type="search" id="matches-query" value="${esc(p.get('q')||'')}" placeholder="Title, seller…"></label></div><div id="matches-progress"></div><span class="vh" id="matches-announcement" aria-live="polite" aria-atomic="true"></span><div id="matches-body"></div>`;
-    $('#export-csv').onclick=exportCsv;
+      `<label class="sm">Contains<input class="in" type="search" id="matches-query" value="${esc(p.get('q')||'')}" placeholder="Title, seller…"></label><button class="btn" id="matches-clear" ${filters().length?'':'hidden'}>Clear filters</button></div><div id="matches-progress"></div><span class="vh" id="matches-announcement" aria-live="polite" aria-atomic="true"></span><div id="matches-body"></div>`;
+    $('#export-csv').onclick=()=>{clearTimeout(filterTimer);const p=query(), text=$('#matches-query').value;if(text!==(p.get('q')||'')){if(text)p.set('q',text);else p.delete('q');p.delete('cursor');updateQuery(p);load();}const exportParams=new URLSearchParams([...p].filter(([key])=>viewKeys.includes(key)&&key!=='group'));return exportCsv({url:'/api/matches.csv'+(exportParams.size?'?'+exportParams:''),emptyMessage:'No matches for these filters to export.',filename:'matches.csv'});};
+    $('#matches-clear').onclick=()=>{clearTimeout(filterTimer);const p=query();for(const key of [...viewKeys,'cursor'])if(!['sort','group'].includes(key))p.delete(key);updateQuery(p);expanded.clear();render(false);$('#matches-query').focus();};
     document.querySelectorAll('[data-match-status]').forEach(button=>button.onclick=()=>{setFilter('status',button.dataset.matchStatus);document.querySelectorAll('[data-match-status]').forEach(b=>b.setAttribute('aria-pressed',b===button));});
-    document.querySelectorAll('[data-match-filter]').forEach(select=>select.onchange=()=>{if(select.dataset.matchFilter==='group'){const p=query();p.set('group',select.value);state.route='#/monitor/matches?'+p;history.replaceState(null,'',state.route);renderBody();}else setFilter(select.dataset.matchFilter,select.value);});
-    $('#matches-query').oninput=event=>{clearTimeout(refreshTimer);const value=event.target.value;refreshTimer=setTimeout(()=>setFilter('q',value),250);};
+    document.querySelectorAll('[data-match-filter]').forEach(select=>select.onchange=()=>{if(select.dataset.matchFilter==='group'){const p=query();if(select.value)p.set('group',select.value);else p.delete('group');updateQuery(p);renderBody();}else setFilter(select.dataset.matchFilter,select.value);});
+    $('#matches-query').oninput=event=>{clearTimeout(filterTimer);const input=event.target,value=input.value;filterTimer=setTimeout(()=>{if(active()&&$('#matches-query')===input)setFilter('q',value);},250);};
     renderCounts();renderProgress();load();pollJobs();
   }
   function rowHtml(row,index,group) {
@@ -109,7 +123,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     const focusValue=focusAttribute?focused.getAttribute(focusAttribute):null, focusId=focused?.id;
     if(loading){$('#matches-body').innerHTML='<div class="match-skeleton" role="status">Loading matches…</div>'.repeat(3);return;}
     if(error){$('#matches-body').innerHTML=`<div class="empty"><p class="err">${esc(error)}</p><button class="btn" id="matches-retry">Retry</button></div>`;$('#matches-retry').onclick=()=>load();return;}
-    if(!rows.length){const p=query(), filtered=[...p].filter(([key,value])=>!['group','sort','status'].includes(key)&&value||key==='status'&&value!=='all');$('#matches-body').innerHTML=`<div class="empty"><h2>${filtered.length?'No matches for these filters':'No matches yet'}</h2><p>${filtered.length?esc(filtered.map(([k,v])=>k+': '+v).join(' · ')):"Listings that pass a search’s filters and AI minimum will collect here."}</p>${filtered.length?'<button class="btn" id="matches-clear">Clear filters</button>':'<a href="#/monitor/all">View searches</a>'}</div>`;$('#matches-clear')?.addEventListener('click',()=>{state.route='#/monitor/matches';history.replaceState(null,'',state.route);render();});return;}
+    if(!rows.length){const filtered=filters();$('#matches-body').innerHTML=`<div class="empty"><h2>${filtered.length?'No matches for these filters':'No matches yet'}</h2><p>${filtered.length?esc(filtered.map(([k,v])=>k+': '+v).join(' · ')):"Listings that pass a search’s filters and AI minimum will collect here."}</p>${filtered.length?'':'<a href="#/monitor/all">View searches</a>'}</div>`;return;}
     if(!rows.some(row=>matchId(row)===selected))selected=matchId(rows[0]);
     const by=query().get('group')||'search', groups=groupMatches(rows,by,query().get('item')||'');
     $('#matches-body').innerHTML='<div class="matches-layout"><div class="matches-list">'+[...groups].map(([name,entries])=>{
@@ -129,8 +143,18 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   function bindPhotos(){document.querySelectorAll('.match-photo img').forEach(img=>{img.onerror=()=>img.remove();});}
   function renderDetail() {
     const row=rows.find(row=>matchId(row)===selected);if(!row||!$('#match-detail'))return;
+    const listingUrl=safeUrl(row.url);
     const others=Object.entries(state.config.item||{}).filter(([name,item])=>name!==row.item&&item.enabled!==false);
-    $('#match-detail').innerHTML=photo(row,true)+`<h2>${esc(row.title||'Listing details unavailable')}</h2><p class="m d">${esc(row.price||'—')} · price when found${row.current_price&&row.current_price!==row.price?'<br>Current price: '+esc(row.current_price):''}</p><p><span class="m ai">${score(row)}</span> <strong>${esc(row.conclusion||'')}</strong></p>${row.comment?`<blockquote>${esc(row.comment)}</blockquote>`:'<p class="sm d">no AI rating — sends every listing that passes the filters</p>'}<dl>${[['Location',row.location],['Seller',row.seller],['Condition',row.condition],['Search',row.item],['Filed by you',row.state.filed_under.join(', ')],['Found',matchDate(row.found_at)],['Sent to',row.notified_users.join(', ')]].map(([label,value])=>`<dt>${label}</dt><dd>${esc(value||'—')}</dd>`).join('')}</dl><details><summary>Seller’s description</summary><p>${esc(row.description||'—')}</p></details><div class="row wr">${safeUrl(row.url)?`<a class="btn p" href="${esc(safeUrl(row.url))}" target="_blank" rel="noopener noreferrer">Open on Facebook ↗</a>`:''}<button class="btn" data-state="shortlisted" aria-pressed="${row.state.shortlisted}">★ ${row.state.shortlisted?'Shortlisted':'Shortlist'}</button></div><div class="match-recheck"><h3>Re-check</h3><p class="sm d">${esc(lastCheck(row))}</p>${row.recheck?.reason?`<p class="sm warn">${esc(row.recheck.reason)}</p>${state.status.vnc_enabled?'<a href="/vnc/vnc.html?autoconnect=true&path=ws/vnc" target="_blank" rel="noopener">Open Browser ↗</a>':''}`:''}<button class="btn" id="recheck-one" ${running()?'disabled':''}>↻ Re-check now</button><p class="sm d">Opens the listing again and rates it against ${esc(row.item||'the original search')}’s current settings.</p><label class="sm" for="check-other">Check against another search</label><div class="row"><select class="in gr" id="check-other"><option value="">Choose search</option>${others.map(([name])=>`<option>${esc(name)}</option>`).join('')}</select><button class="btn" id="recheck-other" ${running()?'disabled':''}>Run</button></div><p class="sm d">If it passes there, it’s filed under that search too.</p><details><summary>Move to…</summary><p class="sm d">File by hand without changing its rating.</p>${Object.keys(state.config.item||{}).filter(name=>name!==row.item).map(name=>`<label class="row sm"><input type="checkbox" data-file-under="${esc(name)}" ${row.state.filed_under.includes(name)?'checked':''}>${esc(name)}</label>`).join('')}</details></div><div class="row wr"><button class="btn" data-state="contacted" aria-pressed="${row.state.contacted}">${row.state.contacted?'Contacted':'Mark contacted'}</button><button class="btn q" data-state="dismissed" aria-pressed="${row.state.dismissed}">${row.state.dismissed?'Restore':'Dismiss'}</button></div><p class="xs d">The photo link may stop working. Shortlist, contacted and dismiss states are saved to the monitor and show on every device. Clearing all cache also clears this library.</p>`;
+    $('#match-detail').innerHTML=photo(row,true)+`<h2>${esc(row.title||'Listing details unavailable')}</h2><p class="m d">${esc(row.price||'—')} · price when found${row.current_price&&row.current_price!==row.price?'<br>Current price: '+esc(row.current_price):''}</p><p><span class="m ai">${score(row)}</span> <strong>${esc(row.conclusion||'')}</strong></p>${row.comment?`<blockquote>${esc(row.comment)}</blockquote>`:'<p class="sm d">no AI rating — sends every listing that passes the filters</p>'}<dl>${[['Location',row.location],['Seller',row.seller],['Condition',row.condition],['Search',row.item],['Filed by you',row.state.filed_under.join(', ')],['Found',matchDate(row.found_at)],['Sent to',row.notified_users.join(', ')]].map(([label,value])=>`<dt>${label}</dt><dd>${esc(value||'—')}</dd>`).join('')}</dl><details><summary>Seller’s description</summary><p>${esc(row.description||'—')}</p></details><div class="row wr">${listingUrl?`<a class="btn p" href="${esc(listingUrl)}" target="_blank" rel="noopener noreferrer">Open on Facebook ↗</a><button class="btn" id="copy-listing-link">Copy link</button>`:''}<button class="btn" data-state="shortlisted" aria-pressed="${row.state.shortlisted}">★ ${row.state.shortlisted?'Shortlisted':'Shortlist'}</button></div>${listingUrl?`<div id="copy-link-fallback" hidden><label class="sm" for="listing-link">Listing link — select and copy</label><input class="in" id="listing-link" type="text" readonly value="${esc(listingUrl)}"></div>`:''}<div class="match-recheck"><h3>Re-check</h3><p class="sm d">${esc(lastCheck(row))}</p>${row.recheck?.reason?`<p class="sm warn">${esc(row.recheck.reason)}</p>${state.status.vnc_enabled?'<a href="/vnc/vnc.html?autoconnect=true&path=ws/vnc" target="_blank" rel="noopener">Open Browser ↗</a>':''}`:''}<button class="btn" id="recheck-one" ${running()?'disabled':''}>↻ Re-check now</button><p class="sm d">Opens the listing again and rates it against ${esc(row.item||'the original search')}’s current settings.</p><label class="sm" for="check-other">Check against another search</label><div class="row"><select class="in gr" id="check-other"><option value="">Choose search</option>${others.map(([name])=>`<option>${esc(name)}</option>`).join('')}</select><button class="btn" id="recheck-other" ${running()?'disabled':''}>Run</button></div><p class="sm d">If it passes there, it’s filed under that search too.</p><details><summary>Move to…</summary><p class="sm d">File by hand without changing its rating.</p>${Object.keys(state.config.item||{}).filter(name=>name!==row.item).map(name=>`<label class="row sm"><input type="checkbox" data-file-under="${esc(name)}" ${row.state.filed_under.includes(name)?'checked':''}>${esc(name)}</label>`).join('')}</details></div><div class="row wr"><button class="btn" data-state="contacted" aria-pressed="${row.state.contacted}">${row.state.contacted?'Contacted':'Mark contacted'}</button><button class="btn q" data-state="dismissed" aria-pressed="${row.state.dismissed}">${row.state.dismissed?'Restore':'Dismiss'}</button></div><p class="xs d">The photo link may stop working. Shortlist, contacted and dismiss states are saved to the monitor and show on every device. Clearing all cache also clears this library.</p>`;
+    const copyButton=$('#copy-listing-link'), copyFallback=$('#copy-link-fallback'), copyInput=$('#listing-link');
+    if(copyButton)copyButton.onclick=async()=>{
+      copyButton.disabled=true;
+      try{await navigator.clipboard.writeText(listingUrl);toast('Listing link copied.');}
+      catch{
+        if(copyButton.isConnected){copyFallback.hidden=false;copyInput.focus();copyInput.select();toast('Could not copy automatically. Copy the selected listing link.');}
+      }
+      finally{copyButton.disabled=false;}
+    };
     document.querySelectorAll('[data-state]').forEach(button=>button.onclick=()=>saveState(row,{[button.dataset.state]:!row.state[button.dataset.state]}));
     document.querySelectorAll('[data-file-under]').forEach(input=>input.onchange=()=>saveState(row,{filed_under:[...document.querySelectorAll('[data-file-under]:checked')].map(el=>el.dataset.fileUnder)}));
     $('#recheck-one').onclick=()=>start([row]);$('#recheck-other').onclick=()=>{const item=$('#check-other').value;if(item)start([row],item);else toast('Choose a search first.');};bindPhotos();

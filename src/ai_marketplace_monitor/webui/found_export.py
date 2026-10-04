@@ -194,6 +194,19 @@ def build_found_rows(local_cache: Cache) -> List[Dict[str, str]]:
     return list(iter_found_rows(local_cache))
 
 
+def iter_match_rows(matches: Iterable[Dict[str, Any]]) -> Iterator[Dict[str, str]]:
+    """Map filtered library matches to the shared CSV columns, one row per search."""
+    for match in matches:
+        row = {key: str(match.get(key) or "") for key in CSV_COLUMNS}
+        row.update(
+            price=str(match.get("current_price") or match.get("price") or ""),
+            rating=str(match["score"]) if match.get("score") is not None else "",
+            ai_comment=match.get("comment") or "",
+            notified_user=", ".join(match.get("notified_users", [])),
+        )
+        yield row
+
+
 def _drain(buffer: io.StringIO) -> str:
     """Return and clear the buffer's contents."""
     text = buffer.getvalue()

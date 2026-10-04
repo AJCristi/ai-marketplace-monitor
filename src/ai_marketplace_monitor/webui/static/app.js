@@ -375,15 +375,15 @@ function connectStream() {
   };
   socket.onerror = () => socket.close();
 }
-async function exportCsv() {
+async function exportCsv({url:exportUrl='/api/found.csv',emptyMessage='Nothing to export yet. The cache has no notified listings.',filename='notified-listings.csv'} = {}) {
   const button = $('#export-csv'); button.disabled=true;
   try {
-    const response = await api('/api/found.csv');
+    const response = await api(exportUrl);
     if (!response.ok) throw new Error('Export failed. Try again.');
     const blob = await response.blob(); const content = await blob.text();
-    if (content.trim().split(/\r?\n/).length<2) {toast('Nothing to export yet. The cache has no notified listings.');return;}
+    if (content.trim().split(/\r?\n/).length<2) {toast(emptyMessage);return;}
     const url=URL.createObjectURL(blob), anchor=document.createElement('a'); anchor.href=url;
-    anchor.download=response.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] || 'notified-listings.csv';
+    anchor.download=response.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] || filename;
     anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
   } catch(error) {toast(error.message);} finally {button.disabled=false;}
 }

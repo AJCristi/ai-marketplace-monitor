@@ -20,7 +20,7 @@ function consoleUnderTest() {
   const document={querySelector:control,querySelectorAll:()=>[],addEventListener(){},cookie:''};
   const sandbox={...model,parse,edit:(content,path,value)=>edit(content,path,structuredClone(value)),FORM_SCHEMAS,BUILT_IN_REGIONS,document,location:{hash:'#/monitor'},history:{replaceState(){}},window:{addEventListener(){}},localStorage:{getItem:()=>null},structuredClone,URLSearchParams,URL,console,setTimeout:()=>0,clearTimeout(){}};
   const context=vm.createContext(sandbox);
-  vm.runInContext(source.slice(0,source.lastIndexOf('try{await initToml')).replace(/^import .*;\r?\n/gm,'')+'\nresult={state,prepareForm,candidateFromForm,fieldDefault,refreshData,locationHtml,renderFeed,acceptRecords,renderConflict,deleteSection,showLogin,bindChips,saveRaw,toggleSearch,renderActivity};',context);
+  vm.runInContext(source.slice(0,source.lastIndexOf('try{await initToml')).replace(/^import .*;\r?\n/gm,'')+'\nresult={state,prepareForm,candidateFromForm,fieldDefault,refreshData,locationHtml,renderFeed,acceptRecords,renderConflict,deleteSection,showLogin,bindChips,saveRaw,toggleSearch,renderActivity,exportCsv};',context);
   sandbox.result.control=control;
   sandbox.result.run=(code,values={})=>{Object.assign(sandbox,values);return vm.runInContext(code,context);};
   return sandbox.result;
@@ -227,4 +227,29 @@ test('saved search header wires pause and resume to the current search',async()=
   await app.control('#toggle-search').click();assert.equal(toggled,'camera');
   app.state.config.item.camera.enabled=false;app.renderActivity('camera');
   assert.match(app.control('#pane').innerHTML,/id="toggle-search"[^>]*>Resume search/);
+});
+
+test('CSV downloads use the requested collection and preserve the default notified export',async()=>{
+  const app=consoleUnderTest(),paths=[],downloads=[];
+  app.run('api=request;URL={createObjectURL:()=>"blob:export",revokeObjectURL(){}};document.createElement=()=>({click(){download(this.download);}});',{
+    request:async path=>{paths.push(path);return {ok:true,headers:{get:()=>null},blob:async()=>({text:async()=> 'title\r\nCamera\r\n'})};},
+    download:name=>downloads.push(name),
+  });
+  await app.exportCsv({url:'/api/matches.csv?status=shortlisted',filename:'matches.csv'});
+  await app.exportCsv();
+  assert.deepEqual(paths,['/api/matches.csv?status=shortlisted','/api/found.csv']);
+  assert.deepEqual(downloads,['matches.csv','notified-listings.csv']);
+  assert.equal(app.control('#export-csv').disabled,false);
+});
+
+test('empty and failed Matches exports show useful feedback and restore the button',async()=>{
+  const app=consoleUnderTest();
+  app.run('api=async()=>({ok:true,blob:async()=>({text:async()=>"title\\r\\n"})});');
+  await app.exportCsv({url:'/api/matches.csv',emptyMessage:'No matches for these filters to export.'});
+  assert.equal(app.control('#toast').textContent,'No matches for these filters to export.');
+  assert.equal(app.control('#export-csv').disabled,false);
+  app.run('api=async()=>({ok:false});');
+  await app.exportCsv({url:'/api/matches.csv'});
+  assert.equal(app.control('#toast').textContent,'Export failed. Try again.');
+  assert.equal(app.control('#export-csv').disabled,false);
 });

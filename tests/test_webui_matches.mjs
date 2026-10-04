@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {groupMatches, mergeMatchRows, applyRecheckResult, priceDropped, matchDate} from '../src/ai_marketplace_monitor/webui/static/matches.js';
+import {groupMatches, mergeMatchRows, applyRecheckResult, priceDropped, matchDate, createMatchesView} from '../src/ai_marketplace_monitor/webui/static/matches.js';
 
 const row = (key,item,extra={})=>({key,item,filed_under:[item],found_at:'2026-10-03T10:00:00',...extra});
 test('manual filing counts once and a real target evaluation wins over a manual label',()=>{
@@ -32,4 +32,75 @@ test('live below-threshold results update even when the active rating filter hid
   assert.equal(mergeMatchRows(changed,[],true)[0].score,2);
   assert.equal(changed[0].current_price,'$100');
   assert.equal(applyRecheckResult(rows,{marketplace:'fb',listing_id:'1',original_item:'camera',item:'other',status:'passed',score:3})[0].score,5);
+});
+
+function viewHarness(t,{route='#/monitor/matches',saved='',matches=[],storageFails=false,storageReadOnly=false}={}) {
+  const nodes=new Map(), controls=[], timers=new Map(), stored=new Map([['aimm-matches-view',saved]]), requests=[], exports=[];
+  let timerId=0;
+  const decode=value=>value.replaceAll('&amp;','&').replaceAll('&quot;','"').replaceAll('&#39;',"'").replaceAll('&lt;','<').replaceAll('&gt;','>');
+  function element(id='',attributes='') {
+    return {id,dataset:{},hidden:/\bhidden\b/.test(attributes),value:decode(attributes.match(/value="([^"]*)"/)?.[1]||''),textContent:'',
+      setAttribute(){},hasAttribute(){return false;},addEventListener(name,fn){this['on'+name]=fn;},focus(){this.focused=true;},
+      get innerHTML(){return this.html||'';},set innerHTML(html){this.html=html;if(id==='pane'){nodes.clear();nodes.set('pane',this);controls.length=0;}
+        for(const match of html.matchAll(/<(?:button|input|select|div|span|aside)\b([^>]*)>/g)){
+          const attributes=match[1], childId=attributes.match(/\bid="([^"]+)"/)?.[1], filter=attributes.match(/data-match-filter="([^"]+)"/)?.[1], status=attributes.match(/data-match-status="([^"]+)"/)?.[1];
+          if(!childId&&!filter&&!status)continue;const child=element(childId,attributes);
+          if(childId)nodes.set(childId,child);if(filter)child.dataset.matchFilter=filter;if(status)child.dataset.matchStatus=status;if(filter||status)controls.push(child);
+        }
+      }};
+  }
+  nodes.set('pane',element('pane'));
+  const storage={getItem(key){if(storageFails)throw new Error('Storage blocked');return stored.get(key)||null;},setItem(key,value){if(storageFails||storageReadOnly)throw new Error('Storage full');stored.set(key,value);},removeItem(key){stored.delete(key);}};
+  const globals={document:{querySelector:selector=>nodes.get(selector.slice(1))||null,querySelectorAll:selector=>selector==='[data-match-filter]'?controls.filter(el=>el.dataset.matchFilter):selector==='[data-match-status]'?controls.filter(el=>el.dataset.matchStatus):[],getElementById:id=>nodes.get(id)},localStorage:storage,sessionStorage:{...storage,getItem:()=>null},history:{replaceState(){}},setInterval:()=>0,setTimeout:fn=>{timers.set(++timerId,fn);return timerId;},clearTimeout:id=>timers.delete(id)};
+  for(const [key,value] of Object.entries(globals)){const original=Object.getOwnPropertyDescriptor(globalThis,key);Object.defineProperty(globalThis,key,{value,configurable:true,writable:true});t.after(()=>{if(original)Object.defineProperty(globalThis,key,original);else delete globalThis[key];});}
+  const state={route,config:{item:{camera:{},gear:{}}},records:[],status:{}};
+  const view=createMatchesView({state,json:async url=>{requests.push(url);return {matches,counts:{all:matches.length},groups:[{item:'camera',count:matches.length}]};},pageHeader:(_title,_description,actions)=>actions,exportCsv:options=>exports.push(options),toast(){},renderSidebar(){},searchSummary:()=>''});
+  return {state,view,stored,requests,exports,node:id=>nodes.get(id),filter:(name,value)=>{const control=controls.find(el=>el.dataset.matchFilter===name);control.value=value;control.onchange();},status:name=>controls.find(el=>el.dataset.matchStatus===name).onclick(),flush:async()=>{await Promise.resolve();},tick:async()=>{const pending=[...timers.values()];timers.clear();pending.forEach(fn=>fn());await Promise.resolve();}};
+}
+
+test('Matches restores saved filters and layout on return; explicit URLs replace saved preferences',async t=>{
+  const h=viewHarness(t,{saved:'item=camera&status=shortlisted&min_score=4&q=lens&sort=price&group=date'});
+  h.view.render();await h.flush();
+  assert.match(h.requests.at(-1),/item=camera/);assert.match(h.requests.at(-1),/status=shortlisted/);
+  assert.equal(h.node('matches-query').value,'lens');assert.match(h.state.route,/group=date/);
+  h.filter('sort','score');h.filter('group','none');h.status('contacted');
+  h.state.route='#/monitor/matches';h.view.render();await h.flush();
+  assert.match(h.state.route,/sort=score/);assert.match(h.state.route,/group=none/);assert.match(h.state.route,/status=contacted/);
+  h.state.route='#/monitor/matches?item=gear';h.view.render();await h.flush();
+  assert.equal(h.state.route,'#/monitor/matches?item=gear');assert.equal(h.stored.get('aimm-matches-view'),'item=gear');
+  h.state.route='#/monitor/matches?';h.view.render();await h.flush();
+  assert.equal(h.stored.get('aimm-matches-view'),'');
+});
+
+test('saved removed searches are discarded and unavailable storage does not block Matches',async t=>{
+  await t.test('removed search and invalid values',async t=>{const h=viewHarness(t,{saved:'item=deleted&sort=price&group=date&cursor=old&status=invalid&min_score=0&include_dismissed=invalid'});h.view.render();await h.flush();assert.equal(h.state.route,'#/monitor/matches?sort=price&group=date');assert.equal(h.stored.get('aimm-matches-view'),'sort=price&group=date');});
+  await t.test('storage unavailable',async t=>{const h=viewHarness(t,{storageFails:true});h.view.render();await h.flush();h.filter('min_score','5');await h.flush();assert.match(h.requests.at(-1),/min_score=5/);});
+  await t.test('readable storage cannot restore filters while clearing',async t=>{const h=viewHarness(t,{saved:'status=shortlisted&q=camera',storageReadOnly:true});h.view.render();await h.flush();h.node('matches-clear').onclick();await h.flush();assert.equal(h.state.route,'#/monitor/matches');assert.equal(h.node('matches-query').value,'');assert.equal(h.node('matches-clear').hidden,true);assert.equal(new URL(h.requests.at(-1),'http://localhost').searchParams.has('status'),false);});
+});
+
+test('Clear filters remains visible with results and preserves layout without reviving pending text',async t=>{
+  const listing=row('fb:1','camera',{state:{filed_under:[]},notified_users:[]});
+  const h=viewHarness(t,{route:'#/monitor/matches?status=shortlisted&item=camera&min_score=4&q=lens&sort=price&group=none&cursor=old',matches:[listing]});
+  h.view.render();await h.flush();
+  assert.match(h.node('matches-body').innerHTML,/matches-layout/);assert.equal(h.node('matches-clear').hidden,false);
+  const input=h.node('matches-query');input.value='pending';input.oninput({target:input});h.node('matches-clear').onclick();await h.tick();
+  assert.equal(h.state.route,'#/monitor/matches?sort=price&group=none');assert.equal(h.node('matches-query').value,'');assert.equal(h.node('matches-clear').hidden,true);
+  assert.equal(h.node('matches-query').focused,true);
+  assert.equal(h.stored.get('aimm-matches-view'),'sort=price&group=none');
+});
+
+test('text filters survive live-event debounce and cannot navigate back after leaving Matches',async t=>{
+  const h=viewHarness(t);h.view.render();await h.flush();
+  const input=h.node('matches-query');input.value='camera';input.oninput({target:input});h.view.onRecord({extra:{kind:'match_recorded'}});await h.tick();
+  assert.match(h.state.route,/q=camera/);
+  input.value='pending';input.oninput({target:input});h.state.route='#/monitor/all';await h.tick();assert.equal(h.state.route,'#/monitor/all');
+  h.state.route='#/monitor/matches';h.view.render();await h.flush();assert.equal(h.node('matches-query').value,'camera');
+});
+
+test('Matches export includes current filters and pending text without pagination or display parameters',async t=>{
+  const h=viewHarness(t,{route:'#/monitor/matches?item=camera&min_score=4&status=shortlisted&include_dismissed=true&q=old&sort=price&group=date&cursor=old&limit=1&since=yesterday'});
+  h.view.render();await h.flush();const input=h.node('matches-query');input.value='new & lens';input.oninput({target:input});h.node('export-csv').onclick();await h.tick();
+  assert.deepEqual(h.exports,[{url:'/api/matches.csv?item=camera&min_score=4&status=shortlisted&include_dismissed=true&q=new+%26+lens&sort=price',emptyMessage:'No matches for these filters to export.',filename:'matches.csv'}]);
+  assert.equal(new URLSearchParams(h.state.route.split('?')[1]).get('q'),'new & lens');
+  const requestCount=h.requests.length;h.node('export-csv').onclick();assert.equal(h.requests.length,requestCount);
 });

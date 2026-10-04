@@ -11,8 +11,17 @@ AI ratings appear as missing; they are not reconstructed from guesses.
 
 Filter by search, rating, status or text, and group by search or date found.
 Filters stay in the URL, for example `#/monitor/matches?item=office_chair`.
-The CSV button continues to export **notified listings**, independently of these
-filters. It does not export the entire Matches library.
+This browser remembers your filters, sorting and grouping when you return to
+Matches. A URL with explicit filters takes precedence. **Clear filters** resets
+the search, rating, status and text filters while keeping sorting and grouping.
+
+**Export CSV** exports every match that meets the active filters, in the selected
+sort order, including results beyond the loaded page and matches without a
+notification. It uses the latest known price and keeps each search's rating in
+its own row. The export in **All activity** still contains notified listings.
+
+Use **Copy link** beside **Open on Facebook** to share a listing. If browser
+clipboard access is unavailable, the link is shown for manual copying.
 
 Shortlist, contacted and dismissed states are shared across searches and devices.
 Dismiss hides a listing; use **Dismissed → Restore** to bring it back. **Move to…**

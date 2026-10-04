@@ -194,7 +194,7 @@ def query_matches(
     include_dismissed: bool = False,
     q: str = "",
     sort: str = "newest",
-    limit: int = 200,
+    limit: int | None = 200,
     cursor: int = 0,
     since: datetime | None = None,
 ) -> dict[str, Any]:
@@ -253,7 +253,7 @@ def query_matches(
     elif sort == "score":
         rows.sort(key=lambda row: row["score"] or 0, reverse=True)
     return {
-        "matches": rows[cursor : cursor + limit],
+        "matches": rows[cursor : cursor + limit if limit is not None else None],
         "total": len(rows),
         "library_total": counts["all"],
         "new_count": new_count,
@@ -262,5 +262,7 @@ def query_matches(
             {"item": name, "count": count, "new_since": new_groups.get(name, 0)}
             for name, count in sorted(groups.items())
         ],
-        "next_cursor": str(cursor + limit) if cursor + limit < len(rows) else None,
+        "next_cursor": (
+            str(cursor + limit) if limit is not None and cursor + limit < len(rows) else None
+        ),
     }

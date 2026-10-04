@@ -1,6 +1,8 @@
 """Matches persistence, delivery independence, and monitor-thread re-checks."""
 
+import csv
 import dataclasses
+import io
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -290,12 +292,15 @@ def test_api_auth_validation_and_persistence(
     )
     url = f"/api/matches/facebook/{listing.id}/state"
     assert client.get("/api/matches").status_code == 401
+    assert client.get("/api/matches.csv").status_code == 401
     client.post("/api/login", data={"username": "test", "password": "synthetic-password"})
     assert client.put(url, json={"shortlisted": True}).status_code == 403
     headers = {CSRF_HEADER: client.cookies["aimm_csrf"]}
     assert client.put(url, json={"shortlisted": "yes"}, headers=headers).status_code == 400
     assert client.put(url, json={"shortlisted": True}, headers=headers).json()["shortlisted"]
     assert client.get("/api/matches?sort=invalid").status_code == 422
+    for query in ("sort=invalid", "status=invalid", "min_score=6", "include_dismissed=invalid"):
+        assert client.get("/api/matches.csv?" + query).status_code == 422
     body: dict[str, Any] = {
         "listings": [{"marketplace": "facebook", "listing_id": listing.id}],
         "refresh": True,
@@ -315,6 +320,66 @@ def test_api_auth_validation_and_persistence(
     assert client.delete(job_url).status_code == 403
     assert client.delete(job_url, headers=headers).json()["state"] == "stopped"
     assert client.get("/api/matches?status=shortlisted").json()["total"] == 1
+
+
+def test_matches_csv_filters_all_pages_without_notification(
+    match_cache: Cache, listing: Listing, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("ai_marketplace_monitor.webui.server.cache", match_cache)
+    path = tmp_path / "config.toml"
+    path.write_text("", encoding="utf-8")
+    client = TestClient(
+        create_app(
+            WebUIConfig(config_files=[path]),
+            AuthState(),
+            ConfigFileService([path]),
+            LogBroadcastHandler(),
+        )
+    )
+    with match_cache.transact():
+        for index in range(204):
+            entry = dataclasses.replace(
+                listing,
+                id=str(index),
+                title="Camera" if index < 3 else "Other",
+                post_url=f"https://www.facebook.com/marketplace/item/{index}/",
+                price=f"${100 - index}" if index < 3 else "$200",
+            )
+            record_match(
+                match_cache,
+                entry,
+                "test" if index < 3 else "batch",
+                AIResponse(5 if index == 0 else 4, "good"),
+            )
+    update_state(match_cache, "facebook", "0", {"shortlisted": True, "filed_under": ["gear"]})
+    update_state(match_cache, "facebook", "1", {"contacted": True})
+    update_state(match_cache, "facebook", "2", {"dismissed": True})
+
+    def export(query: str = "") -> list[dict[str, str]]:
+        response = client.get("/api/matches.csv" + query)
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/csv")
+        assert 'filename="matches-' in response.headers["content-disposition"]
+        return list(csv.DictReader(io.StringIO(response.text)))
+
+    assert len(client.get("/api/matches").json()["matches"]) == 200
+    all_rows = export()
+    assert len(all_rows) == 203
+    assert all(row["notified_user"] == "" for row in all_rows)
+    assert len(export("?item=batch")) == 201
+    cases = [
+        ("?q=CAMERA&sort=price", ["1", "0"]),
+        ("?item=test&sort=score", ["0", "1"]),
+        ("?min_score=5", ["0"]),
+        ("?status=shortlisted&item=gear&q=Camera&min_score=5", ["0"]),
+        ("?status=contacted", ["1"]),
+        ("?status=dismissed", ["2"]),
+        ("?item=test&include_dismissed=true&sort=price", ["2", "1", "0"]),
+        ("?q=absent", []),
+    ]
+    for query, expected in cases:
+        assert [row["url"].rstrip("/").split("/")[-1] for row in export(query)] == expected
+    assert list(csv.DictReader(io.StringIO(client.get("/api/found.csv").text))) == []
 
 
 def test_price_bounds_do_not_guess_unknown_units() -> None:
