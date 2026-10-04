@@ -25,6 +25,9 @@ test('missing dates and prices are not invented',()=>{
   assert.equal(priceDropped({price:'$360',current_price:'$320'}),true);
   assert.equal(priceDropped({price:'Ask seller',current_price:'$320'}),false);
   assert.equal(priceDropped({price:'$360',current_price:null}),false);
+  assert.equal(priceDropped({price:'$100',current_price:'$80',recheck:{old_price:'$70'}}),false);
+  assert.equal(priceDropped({price:'$100',current_price:'$80',recheck:{old_price:'$90'}}),true);
+  assert.equal(priceDropped({price:'$100–$200',current_price:'$80'}),false);
 });
 test('live below-threshold results update even when the active rating filter hides them from the API',()=>{
   const rows=[row('fb:1','camera',{marketplace:'fb',listing_id:'1',score:5})];
@@ -39,8 +42,8 @@ function viewHarness(t,{route='#/monitor/matches',saved='',matches=[],storageFai
   let timerId=0;
   const decode=value=>value.replaceAll('&amp;','&').replaceAll('&quot;','"').replaceAll('&#39;',"'").replaceAll('&lt;','<').replaceAll('&gt;','>');
   function element(id='',attributes='') {
-    return {id,dataset:{},hidden:/\bhidden\b/.test(attributes),value:decode(attributes.match(/value="([^"]*)"/)?.[1]||''),textContent:'',
-      setAttribute(){},hasAttribute(){return false;},addEventListener(name,fn){this['on'+name]=fn;},focus(){this.focused=true;},
+    return {id,dataset:{},hidden:/\bhidden\b/.test(attributes),disabled:/\bdisabled\b/.test(attributes),value:decode(attributes.match(/value="([^"]*)"/)?.[1]||''),textContent:'',
+      setAttribute(){},hasAttribute(){return false;},addEventListener(name,fn){this['on'+name]=fn;},focus(){this.focused=true;},scrollIntoView(){},
       get innerHTML(){return this.html||'';},set innerHTML(html){this.html=html;if(id==='pane'){nodes.clear();nodes.set('pane',this);controls.length=0;}
         for(const match of html.matchAll(/<(?:button|input|select|div|span|aside)\b([^>]*)>/g)){
           const attributes=match[1], childId=attributes.match(/\bid="([^"]+)"/)?.[1], filter=attributes.match(/data-match-filter="([^"]+)"/)?.[1], status=attributes.match(/data-match-status="([^"]+)"/)?.[1];
@@ -103,4 +106,42 @@ test('Matches export includes current filters and pending text without paginatio
   assert.deepEqual(h.exports,[{url:'/api/matches.csv?item=camera&min_score=4&status=shortlisted&include_dismissed=true&q=new+%26+lens&sort=price',emptyMessage:'No matches for these filters to export.',filename:'matches.csv'}]);
   assert.equal(new URLSearchParams(h.state.route.split('?')[1]).get('q'),'new & lens');
   const requestCount=h.requests.length;h.node('export-csv').onclick();assert.equal(h.requests.length,requestCount);
+});
+
+test('price-drop filter is remembered, exported and cleared',async t=>{
+  const h=viewHarness(t);h.view.render();await h.flush();
+  h.filter('price_drop','true');await h.flush();
+  assert.match(h.requests.at(-1),/price_drop=true/);assert.equal(h.node('matches-clear').hidden,false);
+  h.state.route='#/monitor/matches';h.view.render();await h.flush();
+  assert.match(h.state.route,/price_drop=true/);
+  h.node('export-csv').onclick();assert.match(h.exports[0].url,/price_drop=true/);
+  h.node('matches-clear').onclick();await h.flush();
+  assert.equal(new URL(h.requests.at(-1),'http://localhost').searchParams.has('price_drop'),false);
+});
+
+test('Previous and Next follow group order, reveal hidden rows and stop at loaded boundaries',async t=>{
+  const listing=(id,item,extra={})=>row('fb:'+id,item,{title:'Listing '+id,state:{filed_under:[]},notified_users:[],...extra});
+  const h=viewHarness(t,{matches:[listing(1,'camera',{filed_under:['camera','gear']}),listing(2,'gear'),listing(3,'camera'),listing(4,'camera'),listing(5,'camera')]});
+  h.view.render();await h.flush();
+  assert.equal(h.node('match-previous').disabled,true);
+  assert.match(h.node('match-detail').innerHTML,/1 of 5 loaded/);
+  for(const [position,id] of [[2,3],[3,4],[4,5],[5,2]]){
+    h.node('match-next').onclick();
+    assert.match(h.node('match-detail').innerHTML,new RegExp(`<h2>Listing ${id}</h2>`));
+    assert.ok(h.node('match-detail').innerHTML.includes(`${position} of 5 loaded`));
+  }
+  assert.equal(h.node('match-next').disabled,true);assert.equal(h.node('match-detail').focused,true);
+  assert.match(h.node('matches-body').innerHTML,/data-match-row="3"/);
+  h.node('match-previous').onclick();assert.match(h.node('match-detail').innerHTML,/<h2>Listing 5<\/h2>/);
+});
+
+test('arrow keys navigate match details while preserving field editing and modifier shortcuts',async t=>{
+  const h=viewHarness(t,{matches:[row('fb:1','camera',{title:'First',state:{filed_under:[]},notified_users:[]}),row('fb:2','camera',{title:'Second',state:{filed_under:[]},notified_users:[]})]});
+  h.view.render();await h.flush();
+  const key=(key,editing=false,extra={})=>{let prevented=false;h.node('matches-body').onkeydown({key,target:{closest:selector=>selector.startsWith('input')?editing:true},preventDefault(){prevented=true;},...extra});return prevented;};
+  assert.equal(key('ArrowRight',true),false);assert.equal(key('ArrowRight',false,{ctrlKey:true}),false);
+  assert.match(h.node('match-detail').innerHTML,/<h2>First<\/h2>/);
+  assert.equal(key('ArrowRight'),true);assert.match(h.node('match-detail').innerHTML,/<h2>Second<\/h2>/);
+  assert.equal(h.node('matches-announcement').textContent,'Second. Match 2 of 2 loaded.');
+  assert.equal(key('ArrowLeft'),true);assert.match(h.node('match-detail').innerHTML,/<h2>First<\/h2>/);
 });

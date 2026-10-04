@@ -17,7 +17,13 @@ from fastapi.testclient import TestClient
 from ai_marketplace_monitor.ai import AIResponse
 from ai_marketplace_monitor.facebook import FacebookMarketplace
 from ai_marketplace_monitor.listing import Listing
-from ai_marketplace_monitor.matches import load_matches, query_matches, record_match, update_state
+from ai_marketplace_monitor.matches import (
+    load_matches,
+    price_dropped,
+    query_matches,
+    record_match,
+    update_state,
+)
 from ai_marketplace_monitor.monitor import MarketplaceMonitor
 from ai_marketplace_monitor.notification import NotificationStatus
 from ai_marketplace_monitor.recheck import RecheckQueue, price_filter_reason
@@ -299,7 +305,14 @@ def test_api_auth_validation_and_persistence(
     assert client.put(url, json={"shortlisted": "yes"}, headers=headers).status_code == 400
     assert client.put(url, json={"shortlisted": True}, headers=headers).json()["shortlisted"]
     assert client.get("/api/matches?sort=invalid").status_code == 422
-    for query in ("sort=invalid", "status=invalid", "min_score=6", "include_dismissed=invalid"):
+    for query in (
+        "sort=invalid",
+        "status=invalid",
+        "min_score=6",
+        "include_dismissed=invalid",
+        "price_drop=invalid",
+    ):
+        assert client.get("/api/matches?" + query).status_code == 422
         assert client.get("/api/matches.csv?" + query).status_code == 422
     body: dict[str, Any] = {
         "listings": [{"marketplace": "facebook", "listing_id": listing.id}],
@@ -380,6 +393,46 @@ def test_matches_csv_filters_all_pages_without_notification(
     for query, expected in cases:
         assert [row["url"].rstrip("/").split("/")[-1] for row in export(query)] == expected
     assert list(csv.DictReader(io.StringIO(client.get("/api/found.csv").text))) == []
+
+    for index in [0, *range(3, 204)]:
+        key = (CacheType.MATCHED.value, "facebook", str(index), "test" if index == 0 else "batch")
+        saved = match_cache[key]
+        saved.update(
+            current_price="$80" if index == 0 else "$150",
+            old_price="$90" if index == 0 else "$200",
+            rechecked_at="2026-10-04T12:00:00",
+        )
+        match_cache[key] = saved
+    dropped = client.get("/api/matches?price_drop=true").json()
+    assert dropped["total"] == 202
+    assert len(dropped["matches"]) == 200
+    assert len(export("?price_drop=true")) == 202
+    assert len(export("?price_drop=true&item=batch")) == 201
+    assert [row["price"] for row in export("?price_drop=true&item=gear&min_score=5")] == ["$80"]
+    assert export("?price_drop=true&status=contacted") == []
+
+
+@pytest.mark.parametrize(
+    ("previous", "current", "old_price", "expected"),
+    [
+        ("$100", "$80", None, True),
+        ("$100", "$80", "$70", False),
+        ("$100", "$80", "$90", True),
+        ("$100", "$100", None, False),
+        ("$100", None, None, False),
+        ("Ask seller", "$80", None, False),
+        ("$100-$200", "$80", None, False),
+    ],
+)
+def test_price_drop_requires_known_lower_prices(
+    previous: str, current: str | None, old_price: str | None, expected: bool
+) -> None:
+    assert (
+        price_dropped(
+            {"price": previous, "current_price": current, "recheck": {"old_price": old_price}}
+        )
+        is expected
+    )
 
 
 def test_price_bounds_do_not_guess_unknown_units() -> None:

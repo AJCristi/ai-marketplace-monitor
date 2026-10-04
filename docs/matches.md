@@ -9,11 +9,19 @@ listings with no notification recipient or a failed delivery. Existing notified
 listings are included when their cache records are available. Missing details or
 AI ratings appear as missing; they are not reconstructed from guesses.
 
-Filter by search, rating, status or text, and group by search or date found.
+Use **View matches** on a saved search to jump directly to its results.
+Filter by search, rating, status, price drops or text, and group by search or date found.
+**Price dropped** shows known current prices below the previous re-check price
+(or the price when first found if there is no previous re-check price).
 Filters stay in the URL, for example `#/monitor/matches?item=office_chair`.
 This browser remembers your filters, sorting and grouping when you return to
 Matches. A URL with explicit filters takes precedence. **Clear filters** resets
-the search, rating, status and text filters while keeping sorting and grouping.
+the search, rating, status, price-drop and text filters while keeping sorting and grouping.
+
+Use **Previous** and **Next**, or the left/right arrow keys in the match list or
+details, to review loaded matches in group order. Navigation reveals hidden rows
+and stops at the first or last loaded match; use **Load more matches** for the
+next page. Arrow keys keep their normal behavior in editable fields.
 
 **Export CSV** exports every match that meets the active filters, in the selected
 sort order, including results beyond the loaded page and matches without a

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from typing import Any
@@ -185,6 +186,13 @@ def price_number(value: Any) -> float:
     return float(match[1].replace(",", "")) if match else float("inf")
 
 
+def price_dropped(row: dict[str, Any]) -> bool:
+    """Compare known prices against the last re-check, or the first observation."""
+    previous = price_number((row.get("recheck") or {}).get("old_price") or row.get("price"))
+    current = price_number(row.get("current_price"))
+    return math.isfinite(previous) and math.isfinite(current) and current < previous
+
+
 def query_matches(
     local_cache: Cache,
     *,
@@ -192,6 +200,7 @@ def query_matches(
     min_score: int | None = None,
     status: str = "all",
     include_dismissed: bool = False,
+    price_drop: bool = False,
     q: str = "",
     sort: str = "newest",
     limit: int | None = 200,
@@ -231,6 +240,7 @@ def query_matches(
         row
         for row in rows
         if (not item or item in row["filed_under"])
+        and (not price_drop or price_dropped(row))
         and (min_score is None or (row["score"] is not None and row["score"] >= min_score))
         and (status == "all" or row["state"].get(status))
         and (
