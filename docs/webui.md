@@ -2,7 +2,10 @@
 
 AI Marketplace Monitor includes a built-in web interface for editing your configuration and monitoring activity in real time. The web UI starts automatically when you run the monitor — no extra setup needed.
 
-![Web UI Screenshot](webui_screenshot.png)
+For step-by-step instructions, examples, and 18 pictures, read the
+[illustrated user guide](webui-guide.md).
+
+![The Monitor console](images/webui/01-monitor.jpg)
 
 ## Overview
 

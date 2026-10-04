@@ -27,6 +27,7 @@ Reference & Setup
    configuration-guide
    Configuration Reference <configuration>
    webui
+   Illustrated User Guide <webui-guide>
    troubleshooting
 
 Development & Reference
