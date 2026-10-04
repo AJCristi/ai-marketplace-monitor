@@ -42,6 +42,18 @@ test('one currency chip applies to every region city',()=>{
   assert.equal(parse(draft.content).region.local.currency,'USD');
 });
 
+test('image matching toggle and fractional budget preserve inherited settings and TOML comments',()=>{
+  const app=consoleUnderTest();app.state.context={inherited:{monitor:{image_matching_ai:'mimo',image_matching_daily_budget:1}}};
+  app.state.content='# keep this comment\n[monitor]\nproxy_server="https://proxy.example.com"\n';
+  app.refreshData();app.prepareForm('monitor','');
+  app.state.form.changes={image_matching:true,image_matching_daily_budget:0.5};
+  const draft=app.candidateFromForm(), parsed=parse(draft.content);
+  assert.equal(parsed.monitor.image_matching,true);assert.equal(parsed.monitor.image_matching_daily_budget,0.5);
+  assert.equal(parsed.monitor.proxy_server,'https://proxy.example.com');
+  assert.equal(Object.hasOwn(parsed.monitor,'image_matching_ai'),false);
+  assert.match(draft.content,/# keep this comment/);
+});
+
 test('Enter adds one chip even when replacing the focused input fires blur',()=>{
   const app=consoleUnderTest();app.state.context={inherited:{}};app.state.local={};
   app.prepareForm('region','local',true);

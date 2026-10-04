@@ -271,6 +271,7 @@ def main(
                             log_handler=log_broadcast_handler,
                             request_search=monitor.request_search,
                             rechecks=monitor.rechecks,
+                            image_matcher=monitor.image_matcher,
                         ),
                         logger=logger,
                     )

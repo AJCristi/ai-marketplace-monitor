@@ -257,6 +257,11 @@ FORM_SCHEMAS['ai.*'].unshift(statusField);
 FORM_SCHEMAS['user.*'].push(...notificationMore);
 FORM_SCHEMAS['notification.*'] = FORM_SCHEMAS['user.*'].filter(field => !['notify_with','remind'].includes(field.key));
 FORM_SCHEMAS.monitor = [
+  {key:'image_matching',label:'Automatic image matching',type:'boolean',help:'Compare saved listing photos for reused images, distinctive item details and matching plates. Off by default.'},
+  {key:'image_matching_ai',label:'Image matching AI',type:'text',help:'Name of an OpenAI-compatible AI section, for example mimo. Set its model to mimo-v2.6-pro and its base URL to https://api.xiaomimimo.com/v1.'},
+  {key:'image_matching_daily_budget',label:'Daily image matching budget (USD)',type:'number',help:'Shared by automatic and manual checks; resets at midnight UTC. Set a positive amount before running checks.'},
+  {key:'image_matching_input_cost',label:'Input cost per million tokens (USD)',type:'number',advanced:true,help:'Default: 0.435 for MiMo V2.6 Pro. Update when your provider pricing changes.'},
+  {key:'image_matching_output_cost',label:'Output cost per million tokens (USD)',type:'number',advanced:true,help:'Default: 0.87 for MiMo V2.6 Pro. Budget accounting uses these configured rates.'},
   {key:'proxy_server',label:'Proxy servers',type:'list',help:'One or more http:// or https:// URLs.'},
   {key:'proxy_bypass',label:'Bypass',type:'text'},
   {key:'proxy_username',label:'Proxy username',type:'password'},

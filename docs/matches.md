@@ -102,13 +102,94 @@ observed listings to the top; **New** continues to mean a newly found match.
 Deleted searches retain their historical matches and appear as removed searches in the
 filter. To re-check one, choose an available search. Personal states survive new sightings.
 
+## Related listings from photos
+
+**Find related listings** on a saved listing compares its saved primary photo with
+up to eight candidate saved listings across searches. **Recheck** downloads current
+saved photo URLs and requests fresh analysis. Both buttons work when automatic
+checks are off. The monitor processes image work between searches, one model call
+per step; due searches and listing re-checks take priority.
+
+In **Settings → Image matching and more**, choose a vision AI section, set a daily
+USD budget, and optionally enable **Automatic image matching**. Automatic checking
+starts with existing saved matches and picks up newly saved listings and changed
+photo URLs. It is off by default. The default budget is zero, so configure a
+positive limit before either automatic or manual analysis can run. Turning off
+automation stops its queued work at the next safe point and preserves findings.
+
+For Xiaomi MiMo V2.6 Pro, configure an OpenAI-compatible AI section:
+
+```toml
+[ai.mimo]
+provider = "openai"
+model = "mimo-v2.6-pro"
+base_url = "https://api.xiaomimimo.com/v1"
+api_key = "${MIMO_API_KEY}"
+
+[monitor]
+image_matching_ai = "mimo"
+image_matching = false
+image_matching_daily_budget = 1.0 # Example; choose your own limit
+```
+
+Set the API key in the monitor's environment or the existing masked AI-provider
+editor. Image comparisons do not change ordinary rating or notification state.
+Searches keep their existing AI selection; choose their `ai` lists explicitly if
+text ratings should use a different provider. Image matching sends resized saved
+photos to the selected vision
+provider; it does not visit seller profiles or look up vehicle owners.
+
+Connections distinguish **reused photo**, **possibly the same item**, and
+**matching plate**. The detail panel shows the two photos, evidence, and
+Confirm/Dismiss controls. Those controls review the connection in both directions;
+they do not merge, dismiss, re-rate, or suppress notifications for either listing.
+Unreadable plates and conflicting independent plate readings cannot create a
+plate-match flag. Model suggestions do not prove fraud, ownership or identity.
+
+### Cost, caching and limits
+
+- Automatic and manual checks share a persistent budget that resets at midnight
+  UTC. Usage is estimated from provider token counts and configured rates. Defaults
+  are $0.435 input and $0.87 output per million tokens, matching MiMo V2.6 Pro's
+  published overseas pricing on October 4, 2026. Update the advanced rates when
+  pricing or provider changes; this is not a provider billing cap.
+- Each request reserves estimated maximum cost before sending. Successful usage
+  replaces that reservation; failed requests or responses without usage keep it
+  counted because billing may have occurred. SDK retries are disabled. Budget-limited
+  automatic jobs become eligible again the next UTC day or when the limit increases.
+- Photo observations and comparisons are cached by image content, endpoint, model,
+  and prompt version. Normal checks reuse these results. Fresh rechecks consume
+  budget again. Failed analysis is visible and requires a manual retry, apart from
+  the budget-resume behavior above.
+- If the provider rejects the image request (including unsupported image or JSON
+  inputs), a manual check returns an error in the listing's results. An automatic
+  check records a visible skip and monitoring continues. Check the model name,
+  base URL and image/JSON support in Settings, then retry manually. Authentication,
+  rate-limit and server failures remain provider errors, not capability diagnoses.
+- Downloads accept Facebook image CDNs only, follow at most three redirects,
+  and are limited to 5 MiB and 20 million pixels. Resized JPEGs omit original metadata;
+  downloaded image data is cached for 24 hours. Photo links may expire. Re-check
+  the listing itself to obtain a fresh photo URL.
+- Candidate selection uses cached visual fingerprints, extracted plate readings,
+  categories, titles and recency. Eight candidates per check is deliberately bounded,
+  not an exhaustive duplicate search. Only the primary photo is available: a plate
+  hidden in another gallery photo will not be detected. Plate normalization supports
+  Latin letters and digits without guessing ambiguous characters.
+- Findings and reviews survive restart; pending jobs do not. Clearing all cache
+  also clears findings, observations, reviews and the local budget ledger.
+
+Provider contracts: [image inputs](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/multimodal-understanding/image-understanding),
+[JSON output](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/text-generation/structured-output),
+and [pricing](https://mimo.mi.com/docs/en-US/price/pay-as-you-go).
+
 ## Storage and limitations
 
 The library lives in `~/.ai-marketplace-monitor/matches.sqlite3`, independently of the
 search/AI cache. **`--clear-cache all` preserves the library**, listing snapshots, history,
 and personal states. It still clears the existing notification deduplication cache, so
 later searches may send notifications again under the existing notification rules.
-Photo URLs can expire; image files are not downloaded or archived.
+Photo URLs can expire; image files are not archived in the library. Image matching
+downloads photos into a temporary cache for up to 24 hours when a check needs them.
 
 On first use, existing cached matches and notified listings are imported transactionally.
 Import is safe to retry and runs before CLI cache clearing. The original cache records
