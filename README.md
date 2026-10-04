@@ -148,9 +148,9 @@ For a local-only dashboard that opens without a sign-in form, replace
 published port to localhost; leave it unset for network access. Marketplace
 credentials are still used for Facebook login.
 
-Mounting `~/.ai-marketplace-monitor` shares your existing config, cache, and logs between the host install and the container — so you can switch back and forth freely. Update with `docker pull ghcr.io/bopeng/ai-marketplace-monitor:latest && docker restart aimm`.
+Mounting `~/.ai-marketplace-monitor` shares your existing config, cache, and logs between the host install and the container — so you can switch back and forth freely. To update, pull the new image, then stop and recreate the container using the same mount, environment variables, port bindings, and restart policy. Restarting an existing container continues using its original image.
 
-To build the image yourself instead of pulling: `docker build -t aimm .` from a checkout of this repo.
+To build the image yourself instead of pulling: `docker build -t aimm .` from a checkout of this repo. Rebuild after source changes and recreate the container to use that build; starting or restarting the old container does not load the changed source.
 
 ## 💡 Example Usage
 
