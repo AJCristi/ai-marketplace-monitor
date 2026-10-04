@@ -222,6 +222,25 @@ class Config(Generic[TAIConfig, TItemConfig, TMarketplaceConfig]):
                     )
 
     def validate_ais(self: "Config") -> None:
+        vision = self.monitor.image_matching_ai
+        if vision is not None:
+            if vision not in self.ai:
+                raise ValueError("image_matching_ai must name an existing AI section.")
+            backend = self.ai[vision]
+            if (
+                (backend.provider or vision).lower() != "openai"
+                or not backend.model
+                or not backend.base_url
+            ):
+                raise ValueError(
+                    "Image matching needs an OpenAI-compatible provider with an explicit model and base_url."
+                )
+        if self.monitor.image_matching and (
+            not vision or self.monitor.image_matching_daily_budget <= 0
+        ):
+            raise ValueError(
+                "Choose image_matching_ai and a positive daily budget before enabling image matching."
+            )
         # if ai is specified in other section, they must exist
         for config in chain(self.marketplace.values(), self.item.values()):
             for ai in config.ai or []:

@@ -39,6 +39,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
+from ..image_matching import ImageMatcher
 from ..matches import library, load_matches, query_matches, update_state
 from ..recheck import RecheckQueue
 from ..utils import cache
@@ -110,6 +111,7 @@ class WebUIConfig:
     log_handler: LogBroadcastHandler | None = None
     request_search: Callable[[], None] | None = None
     rechecks: RecheckQueue | None = None
+    image_matcher: ImageMatcher | None = None
 
 
 @dataclass
@@ -554,7 +556,7 @@ def create_app(
         since: datetime | None = None,
         _: str = Depends(require_session),
     ) -> Dict[str, Any]:
-        return query_matches(
+        result = query_matches(
             cache,
             item=item,
             min_score=min_score,
@@ -567,6 +569,12 @@ def create_app(
             cursor=cursor,
             since=since,
         )
+        if config.image_matcher:
+            for row in result["matches"]:
+                row["related_count"] = sum(
+                    pair["review"] != "dismissed" for pair in config.image_matcher.related(row)
+                )
+        return result
 
     def require_match(marketplace: str, listing_id: str) -> list[dict[str, Any]]:
         rows = [
@@ -601,6 +609,54 @@ def create_app(
         require_match(marketplace, listing_id)
         try:
             return update_state(cache, marketplace, listing_id, body)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from None
+
+    def image_matcher() -> ImageMatcher:
+        if config.image_matcher is None:
+            raise HTTPException(
+                status_code=503, detail="The monitor is not available for image matching"
+            )
+        return config.image_matcher
+
+    @app.get("/api/matches/{marketplace}/{listing_id}/related")
+    def get_related(
+        marketplace: str, listing_id: str, _: str = Depends(require_session)
+    ) -> Dict[str, Any]:
+        row = require_match(marketplace, listing_id)[0]
+        return image_matcher().status(row)
+
+    @app.post("/api/matches/{marketplace}/{listing_id}/related")
+    def find_related(
+        marketplace: str,
+        listing_id: str,
+        body: Dict[str, Any],
+        _: str = Depends(require_session),
+        __: None = Depends(require_csrf),
+    ) -> Dict[str, Any]:
+        row = require_match(marketplace, listing_id)[0]
+        if body.keys() - {"refresh"} or type(body.get("refresh", False)) is not bool:
+            raise HTTPException(status_code=400, detail="refresh must be a boolean")
+        try:
+            return image_matcher().enqueue(row, refresh=body.get("refresh", False))
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from None
+
+    @app.put("/api/matches/{marketplace}/{listing_id}/related/{pair_id}")
+    def review_related(
+        marketplace: str,
+        listing_id: str,
+        pair_id: str,
+        body: Dict[str, Any],
+        _: str = Depends(require_session),
+        __: None = Depends(require_csrf),
+    ) -> Dict[str, Any]:
+        row = require_match(marketplace, listing_id)[0]
+        if set(body) != {"review"} or not isinstance(body["review"], str):
+            raise HTTPException(status_code=400, detail="Supply a review state")
+        try:
+            image_matcher().review(row, pair_id, body["review"])
+            return image_matcher().status(row)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from None
 
