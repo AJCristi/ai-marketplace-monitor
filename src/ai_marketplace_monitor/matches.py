@@ -161,6 +161,71 @@ def record_delivery(local_cache: Cache, listing: Listing, user: str) -> None:
             store.save_listing(listing.marketplace, listing.id, saved)
 
 
+def record_manual_listing(
+    local_cache: Cache,
+    listing: Listing,
+    rating: AIResponse | None = None,
+    status: str = "pending",
+    reason: str = "",
+) -> None:
+    """An empty search key holds a general assessment, never a search pass or sighting."""
+    with library(local_cache) as store:
+        market, listing_id = listing.marketplace, listing.id
+        fields = asdict(listing) | {"url": listing.post_url}
+        if store.listing(market, listing_id) is None:
+            store.save_listing(
+                market,
+                listing_id,
+                fields
+                | {
+                    "state": default_state(),
+                    "notified_users": [],
+                    "tracking_since": now(),
+                    "imported": False,
+                },
+            )
+        else:
+            store.snapshot(market, listing_id, fields, "manual listing details")
+        saved = store.match(market, listing_id, "")
+        if saved is None:
+            saved = {
+                "found_at": now(),
+                "price": listing.price,
+                "source": "manual",
+                "recheck": None,
+                "score": None,
+                "conclusion": None,
+                "comment": None,
+                "ai_name": None,
+            }
+            store.event(market, listing_id, "manual", None, {})
+        if rating is not None:
+            saved.update(rating_fields(rating))
+            saved["conclusion"] = {
+                1: "Poor prospect",
+                2: "Needs clarification",
+                3: "Fair prospect",
+                4: "Good prospect",
+                5: "Great deal",
+            }[rating.score]
+        if not saved.get("price") and listing.price:
+            saved["price"] = listing.price
+        saved.update(evaluation_status=status, assessment_reason=reason, assessed_at=now())
+        store.save_match(market, listing_id, "", saved)
+        if status != "pending":
+            store.event(
+                market,
+                listing_id,
+                "assessment",
+                None,
+                {
+                    "status": status,
+                    "reason": reason,
+                    **{key: saved[key] for key in ("score", "conclusion", "comment", "ai_name")},
+                },
+            )
+
+
 def record_failed_rating(
     local_cache: Cache, listing: Listing, item: str, rating: AIResponse
 ) -> None:

@@ -59,7 +59,7 @@ function viewHarness(t,{route='#/monitor/matches',saved='',matches=[],groups,fil
       get innerHTML(){return this.html||'';},set innerHTML(html){this.html=html;if(id==='pane'){nodes.clear();nodes.set('pane',this);controls.length=0;}
         for(const old of this.children){const position=controls.indexOf(old);if(position>=0)controls.splice(position,1);if(old.id&&nodes.get(old.id)===old)nodes.delete(old.id);}
         this.children=[];
-        for(const match of html.matchAll(/<(button|input|select|a|h1|div|span|article|section|aside|details)\b([^>]*)>/g)){
+        for(const match of html.matchAll(/<(form|p|button|input|select|a|h1|div|span|article|section|aside|details)\b([^>]*)>/g)){
           const attributes=match[2],childId=attributes.match(/\bid="([^"]+)"/)?.[1];
           if(!childId&&!/data-/.test(attributes))continue;
           const child=element(childId,attributes,match[1]);
@@ -102,6 +102,44 @@ test('historical searches remain selectable and last-seen sorting survives retur
   h.node('export-csv').onclick();
   assert.match(h.exports.at(-1).url,/item=removed_camera/);
   assert.match(h.exports.at(-1).url,/sort=last_seen/);
+});
+
+test('paste URL saves and opens a manual listing with general assessment and retry',async t=>{
+  const manual={...row('facebook:222',''),marketplace:'facebook',listing_id:'222',source:'manual',evaluation_status:'error',assessment_reason:'AI unavailable',score:null,comment:null,title:'Pasted camera'};
+  const requests=[];
+  const h=viewHarness(t,{matches:[manual],respond:(url,options)=>{
+    if(url==='/api/matches/manual'){requests.push(JSON.parse(options.body));return {existing:false,match:manual,job_id:'manual-job',queued:1};}
+    if(url==='/api/matches/recheck/manual-job')return {job_id:'manual-job',state:'stopped',done:1,total:1,searches:[''],results:[{status:'error',reason:'AI unavailable'}]};
+    if(url==='/api/matches/recheck'){requests.push(JSON.parse(options.body));return {job_id:'retry-job',queued:1};}
+  }});
+  h.view.render();await h.flush();
+  assert.equal(h.node('add-listing-form').hidden,true);
+  h.node('add-listing').onclick();
+  assert.equal(h.node('add-listing-form').hidden,false);
+  assert.equal(h.node('add-listing-url').focused,true);
+  h.node('add-listing-url').value=' https://m.facebook.com/marketplace/item/222/?ref=test ';
+  await h.node('add-listing-form').onsubmit({preventDefault(){}});await h.flush();
+  assert.deepEqual(requests[0],{url:'https://m.facebook.com/marketplace/item/222/?ref=test'});
+  assert.match(h.state.route,/matches\/facebook\/222\?.*match_item=/);
+  assert.match(h.node('match-detail').innerHTML,/Added manually · general assessment/);
+  assert.match(h.node('match-detail').innerHTML,/AI unavailable/);
+  assert.match(h.node('match-detail').innerHTML,/Retry assessment/);
+  assert.doesNotMatch(h.node('match-detail').innerHTML,/sends every listing|Original search removed/);
+  assert.equal(h.node('recheck-one').disabled,false);
+  await h.node('recheck-one').onclick();
+  assert.deepEqual(requests[1].listings,[{marketplace:'facebook',listing_id:'222',original_item:''}]);
+});
+
+test('invalid pasted links stay in the form with an accessible error',async t=>{
+  const h=viewHarness(t,{respond:(url)=>{if(url==='/api/matches/manual')throw new Error('Paste a direct Facebook Marketplace listing URL');}});
+  h.view.render();await h.flush();h.node('add-listing').onclick();
+  h.node('add-listing-url').value='https://example.com';
+  await h.node('add-listing-form').onsubmit({preventDefault(){}});
+  assert.equal(h.node('add-listing-error').getAttribute('role'),'alert');
+  assert.match(h.node('add-listing-error').textContent,/direct Facebook/);
+  assert.equal(h.node('add-listing-url').focused,true);
+  assert.equal(h.node('add-listing-submit').disabled,false);
+  assert.equal(h.state.route,'#/monitor/matches');
 });
 
 test('a successful re-check clears a previous failed evaluation only for its search',()=>{

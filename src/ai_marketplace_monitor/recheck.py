@@ -8,8 +8,32 @@ import re
 import threading
 import uuid
 from typing import Any
+from urllib.parse import urlsplit
 
 from .matches import price_number
+
+
+def facebook_listing_id(value: Any) -> str:
+    """Accept direct listing URLs only; never follow arbitrary user-supplied links."""
+    if not isinstance(value, str) or len(value) > 4096:
+        raise ValueError("Paste a Facebook Marketplace listing URL")
+    url = urlsplit(value.strip())
+    match = re.fullmatch(r"/marketplace/item/([0-9]{1,40})/?", url.path)
+    if (
+        url.scheme != "https"
+        or url.netloc.lower()
+        not in {
+            "facebook.com",
+            "www.facebook.com",
+            "m.facebook.com",
+            "web.facebook.com",
+        }
+        or match is None
+    ):
+        raise ValueError(
+            "Paste a direct https://www.facebook.com/marketplace/item/... listing URL"
+        )
+    return match[1]
 
 
 def price_filter_reason(price: str, item: Any, marketplace: Any) -> str:
@@ -54,7 +78,7 @@ def price_filter_reason(price: str, item: Any, marketplace: Any) -> str:
 class RecheckQueue:
     def __init__(self) -> None:
         self.wake = threading.Event()
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.jobs: dict[str, dict[str, Any]] = {}
 
     def enqueue(

@@ -10,6 +10,29 @@ listings are included when their cache records are available. Missing details or
 AI ratings appear as missing; they are not reconstructed from guesses.
 
 Use **View matches** on a saved search to jump directly to its results.
+
+Use **Add listing** to paste a direct Facebook Marketplace listing URL, then select
+**Save and assess**. The link is saved immediately under **Manually added**. The
+monitor fetches its details and gallery and automatically runs a general AI buying
+assessment, using the active Facebook marketplace's configured AI providers. This
+assessment covers price/value, stated condition, missing information and concerns
+supported by the listing, with a 1–5 score and explanation. It does not use a saved
+search's criteria or minimum rating; low-rated listings stay saved.
+
+Adding an existing listing opens its saved record without replacing ratings or
+personal state. Direct `facebook.com`, `www`, `m` and `web` listing links are accepted;
+tracking parameters are discarded. Short share links must first be opened on
+Facebook to obtain the direct listing URL.
+
+Manual additions send no notifications and do not count as search sightings. Fetch
+or AI failures keep the saved link and any collected details; open the listing and
+use **Retry assessment** after checking browser login and AI settings. **Assess again**
+fetches current details and reruns the general assessment. The same monitor-thread
+job limits and scheduling rules as re-checks apply. A stopped job or process restart
+can leave an entry awaiting assessment; use **Assess again** to resume it. Existing
+shortlist, contacted, dismissal, filing and **Check against another search** actions
+also apply to manually added listings. Search evaluations keep their own ratings.
+
 Filter by search, rating, status, price drops or text, and group by search or date found.
 **Price dropped** shows known current prices below the previous re-check price
 (or the price when first found if there is no previous re-check price).

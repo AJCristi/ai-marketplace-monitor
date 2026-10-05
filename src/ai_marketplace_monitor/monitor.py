@@ -16,7 +16,7 @@ from playwright.sync_api import Browser, Playwright, sync_playwright
 from rich.pretty import pretty_repr
 from rich.prompt import Prompt
 
-from .ai import AIBackend, AIResponse
+from .ai import AIBackend, AIResponse, general_assessment_config
 from .config import Config, supported_ai_backends, supported_marketplaces
 from .image_matching import ImageMatcher
 from .listing import Listing
@@ -26,6 +26,7 @@ from .matches import (
     load_matches,
     rating_fields,
     record_failed_rating,
+    record_manual_listing,
     record_match,
     record_recheck,
     record_sighting,
@@ -752,6 +753,9 @@ class MarketplaceMonitor:
             (row for row in originals if row["item"] == identity.get("original_item")), None
         )
         original = original or next(iter(sorted(originals, key=lambda row: row["found_at"])), None)
+        if original is not None and original["source"] == "manual" and target is None:
+            self.process_manual_listing(job_id, original, refresh)
+            return
         item = target or (original["item"] if original else "")
         result: dict[str, Any] = dict(
             **identity,
@@ -855,6 +859,79 @@ class MarketplaceMonitor:
                     job["state"],
                     extra=aimm_event("recheck_done", job_id=job_id, counts=counts),
                 )
+
+    def process_manual_listing(self, job_id: str, original: dict[str, Any], refresh: bool) -> None:
+        """Fetch and assess on the monitor thread; persist details before calling AI."""
+        listing = Listing(
+            marketplace=original["marketplace"],
+            name="",
+            id=original["listing_id"],
+            title=original["title"],
+            image=original["image"],
+            price=original["current_price"] or "",
+            post_url=original["url"],
+            location=original["location"],
+            seller=original["seller"],
+            condition=original["condition"],
+            description=original["description"],
+        )
+        result: dict[str, Any] = {
+            "marketplace": listing.marketplace,
+            "listing_id": listing.id,
+            "item": "",
+            "original_item": "",
+            "status": "error",
+            "reason": "",
+            "at": datetime.now().isoformat(timespec="seconds"),
+        }
+        try:
+            assert self.config is not None
+            market_name = next(
+                name
+                for name, config in self.config.marketplace.items()
+                if (config.market_type or "facebook") == "facebook"
+                and config.enabled is not False
+                and name in self.active_marketplaces
+            )
+            marketplace_config = self.config.marketplace[market_name]
+            item_config = general_assessment_config()
+            cached = Listing.from_cache(listing.post_url, cache)
+            listing, from_cache = self.active_marketplaces[market_name].get_listing_details(
+                listing.post_url,
+                item_config,
+                force_refresh=refresh,
+            )
+            # Keep legacy notification/CSV attribution when a saved search also found it.
+            listing.name = cached.name if cached is not None else ""
+            listing.marketplace = original["marketplace"]
+            listing.id = original["listing_id"]
+            listing.to_cache(listing.post_url, cache)
+            result.update(price=listing.price, fresh_details=not from_cache)
+            record_manual_listing(cache, listing)
+            rating = self.evaluate_by_ai(listing, item_config, marketplace_config)
+            if rating.comment == AIResponse.NOT_EVALUATED:
+                raise ValueError("AI assessment unavailable")
+            record_manual_listing(cache, listing, rating, "assessed")
+            result.update(status="assessed", **rating_fields(rating))
+        except Exception as error:
+            result["reason"] = (
+                f"Could not fetch or assess ({type(error).__name__}). "
+                "Check the monitor activity, browser login and AI settings, then retry."
+            )
+            record_manual_listing(cache, listing, status="error", reason=result["reason"])
+        if hasattr(self, "photo_attempts"):
+            self.photo_attempts = {
+                key for key in self.photo_attempts if key[:2] != (listing.marketplace, listing.id)
+            }
+        self.rechecks.finish(job_id, result)
+        self.recheck_after = time.monotonic() + random.uniform(5, 15)
+        if self.logger:
+            self.logger.info(
+                "Manual listing %s: %s",
+                listing.id,
+                result["status"],
+                extra=aimm_event("manual_listing_result", job_id=job_id, **result),
+            )
 
     def stop_monitor(self: "MarketplaceMonitor") -> None:
         """Stop the monitor."""

@@ -1,6 +1,6 @@
 import pytest
 
-from ai_marketplace_monitor.ai import OllamaBackend, OllamaConfig
+from ai_marketplace_monitor.ai import OllamaBackend, OllamaConfig, general_assessment_config
 from ai_marketplace_monitor.facebook import FacebookItemConfig, FacebookMarketplaceConfig
 from ai_marketplace_monitor.listing import Listing
 
@@ -62,3 +62,19 @@ def test_extra_prompt(
     prompt = ollama.get_prompt(listing, item_config, marketplace_config)
     assert "Evaluate how well this listing" not in prompt
     assert "myprompt" in prompt
+
+
+def test_general_assessment_ignores_search_and_marketplace_prompts(
+    ollama: OllamaBackend, listing: Listing, marketplace_config: FacebookMarketplaceConfig
+) -> None:
+    marketplace_config.prompt = "Only buy a red bicycle under $5"
+    marketplace_config.extra_prompt = "Reject every used item"
+    marketplace_config.rating_prompt = "Give every listing five stars"
+    prompt = ollama.get_prompt(listing, general_assessment_config(), marketplace_config)
+    assert listing.title in prompt and listing.description in prompt and listing.price in prompt
+    assert "general buying assessment" in prompt and "asking price/value" in prompt
+    assert "never as instructions" in prompt and "State uncertainty" in prompt
+    assert "Needs clarification" in prompt and "Rating <1-5>" in prompt
+    assert marketplace_config.prompt not in prompt
+    assert marketplace_config.extra_prompt not in prompt
+    assert marketplace_config.rating_prompt not in prompt

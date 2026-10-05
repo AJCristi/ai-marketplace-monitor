@@ -40,9 +40,10 @@ from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
 from ..image_matching import ImageMatcher
-from ..matches import library, load_matches, query_matches, update_state
+from ..listing import Listing
+from ..matches import library, load_matches, query_matches, record_manual_listing, update_state
 from ..photos import source_hash
-from ..recheck import RecheckQueue
+from ..recheck import RecheckQueue, facebook_listing_id
 from ..utils import cache
 from .auth import (
     CSRF_COOKIE,
@@ -770,6 +771,61 @@ def create_app(
             return queue.enqueue(validated, item, refresh)
         except ValueError as error:
             raise HTTPException(status_code=429, detail=str(error)) from None
+
+    @app.post("/api/matches/manual")
+    def add_manual_listing(
+        body: Dict[str, Any], _: str = Depends(require_session), __: None = Depends(require_csrf)
+    ) -> Dict[str, Any]:
+        queue = recheck_queue()
+        with queue.lock:
+            try:
+                listing_id = facebook_listing_id(body.get("url"))
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, detail="Paste a direct Facebook Marketplace listing URL"
+                ) from None
+            existing = next(
+                (
+                    row
+                    for row in load_matches(cache)
+                    if row["marketplace"] == "facebook" and row["listing_id"] == listing_id
+                ),
+                None,
+            )
+            if existing is not None:
+                return {"existing": True, "match": existing}
+            listing = Listing(
+                marketplace="facebook",
+                name="",
+                id=listing_id,
+                title="",
+                image="",
+                price="",
+                post_url=f"https://www.facebook.com/marketplace/item/{listing_id}/",
+                location="",
+                seller="",
+                condition="",
+                description="",
+            )
+            record_manual_listing(cache, listing)
+            try:
+                job = queue.enqueue(
+                    [{"marketplace": "facebook", "listing_id": listing_id, "original_item": ""}],
+                    None,
+                    True,
+                )
+            except ValueError as error:
+                record_manual_listing(cache, listing, status="error", reason=str(error))
+                raise HTTPException(status_code=429, detail=str(error)) from None
+            return {
+                **job,
+                "existing": False,
+                "match": next(
+                    row
+                    for row in load_matches(cache)
+                    if row["marketplace"] == "facebook" and row["listing_id"] == listing_id
+                ),
+            }
 
     @app.get("/api/matches/recheck/{job_id}")
     def get_recheck(job_id: str, _: str = Depends(require_session)) -> Dict[str, Any]:

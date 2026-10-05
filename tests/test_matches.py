@@ -4,6 +4,7 @@ import csv
 import dataclasses
 import io
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,13 +27,14 @@ from ai_marketplace_monitor.matches import (
     query_matches,
     record_delivery,
     record_failed_rating,
+    record_manual_listing,
     record_match,
     record_sighting,
     update_state,
 )
 from ai_marketplace_monitor.monitor import MarketplaceMonitor
 from ai_marketplace_monitor.notification import NotificationStatus
-from ai_marketplace_monitor.recheck import RecheckQueue, price_filter_reason
+from ai_marketplace_monitor.recheck import RecheckQueue, facebook_listing_id, price_filter_reason
 from ai_marketplace_monitor.utils import CacheType, SleepStatus, doze
 from ai_marketplace_monitor.webui.auth import CSRF_HEADER, AuthConfig, hash_password
 from ai_marketplace_monitor.webui.config_api import ConfigFileService
@@ -564,6 +566,7 @@ def test_api_auth_validation_and_persistence(
     with library(match_cache) as store:
         store.save_photo("facebook", listing.id, "source", digest, b"synthetic photo")
     assert client.get("/api/matches").status_code == 401
+    assert client.post("/api/matches/manual", json={"url": listing.post_url}).status_code == 401
     assert client.get("/api/matches.csv").status_code == 401
     assert client.get(f"/api/matches/facebook/{listing.id}/history").status_code == 401
     assert client.get(detail_url).status_code == 401
@@ -584,6 +587,43 @@ def test_api_auth_validation_and_persistence(
     assert client.get(detail_url.replace("item=test", "item=missing")).status_code == 404
     assert client.put(url, json={"shortlisted": True}).status_code == 403
     headers = {CSRF_HEADER: client.cookies["aimm_csrf"]}
+    manual_url = "https://m.facebook.com/marketplace/item/222/?tracking=discarded"
+    assert client.post("/api/matches/manual", json={"url": manual_url}).status_code == 403
+    assert (
+        client.post(
+            "/api/matches/manual",
+            json={"url": "https://example.com/marketplace/item/222/"},
+            headers=headers,
+        ).status_code
+        == 400
+    )
+    added = client.post("/api/matches/manual", json={"url": manual_url}, headers=headers).json()
+    assert added["match"]["url"] == "https://www.facebook.com/marketplace/item/222/"
+    assert added["match"]["source"] == "manual" and added["match"]["score"] is None
+    assert added["match"]["seen_count"] == 0 and not added["existing"]
+    assert client.get("/api/matches/facebook/222/detail?item=").json()["source"] == "manual"
+    repeat = client.post("/api/matches/manual", json={"url": manual_url}, headers=headers).json()
+    assert repeat["existing"] and "job_id" not in repeat
+    assert len(queue.jobs) == 1
+    prior = client.post(
+        "/api/matches/manual",
+        json={"url": "https://www.facebook.com/marketplace/item/111/"},
+        headers=headers,
+    ).json()
+    assert prior["existing"] and prior["match"]["score"] == 4
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        concurrent = list(
+            pool.map(
+                lambda _: client.post(
+                    "/api/matches/manual",
+                    json={"url": "https://www.facebook.com/marketplace/item/333/"},
+                    headers=headers,
+                ).json(),
+                range(3),
+            )
+        )
+    assert sum(not response["existing"] for response in concurrent) == 1
+    assert len(queue.jobs) == 2
     assert client.put(url, json={"shortlisted": "yes"}, headers=headers).status_code == 400
     assert client.put(url, json={"shortlisted": True}, headers=headers).json()["shortlisted"]
     assert client.get("/api/matches?sort=invalid").status_code == 422
@@ -624,6 +664,112 @@ def test_api_auth_validation_and_persistence(
     assert client.get(f"/api/matches/facebook/{listing.id}/history?cursor=-1").status_code == 422
     assert client.get("/api/matches/facebook/999/history").status_code == 404
     assert client.get("/api/matches?sort=last_seen").status_code == 200
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        123,
+        "",
+        "https://facebook.com.evil.test/marketplace/item/123/",
+        "https://facebook.com@evil.test/marketplace/item/123/",
+        "https://user@facebook.com/marketplace/item/123/",
+        "http://facebook.com/marketplace/item/123/",
+        "https://facebook.com/share/123/",
+        "https://facebook.com/marketplace/item/nope/",
+        "https://facebook.com:8443/marketplace/item/123/",
+        "https://facebook.com/marketplace/item/" + "1" * 41,
+        "https://[invalid/marketplace/item/123/",
+    ],
+)
+def test_manual_url_rejects_non_listing_urls(value: Any) -> None:
+    with pytest.raises(ValueError):
+        facebook_listing_id(value)
+
+
+@pytest.mark.parametrize("failure", [None, "fetch", "ai", "no_ai"])
+def test_manual_assessment_saves_before_ai_and_can_retry(
+    match_cache: Cache, listing: Listing, monkeypatch: pytest.MonkeyPatch, failure: str | None
+) -> None:
+    monitor = make_monitor(match_cache, listing, monkeypatch)
+    imported = dataclasses.replace(
+        listing,
+        id="222",
+        post_url="https://www.facebook.com/marketplace/item/222/",
+        image="https://scontent.xx.fbcdn.net/photo1",
+        image_urls=[
+            "https://scontent.xx.fbcdn.net/photo1",
+            "https://scontent.xx.fbcdn.net/photo2",
+        ],
+    )
+    placeholder = dataclasses.replace(imported, title="", price="", image="", image_urls=[])
+    record_manual_listing(match_cache, placeholder)
+    update_state(match_cache, "facebook", "222", {"shortlisted": True})
+    market = monitor.active_marketplaces["facebook"]
+    market.get_listing_details.return_value = (imported, False)
+
+    def assess(*args: Any) -> AIResponse:
+        row = next(row for row in load_matches(match_cache) if row["listing_id"] == "222")
+        assert row["title"] == imported.title and row["photo_pending"] == 2
+        assert row["evaluation_status"] == "pending"
+        if failure == "ai":
+            raise ValueError("private provider details")
+        return (
+            AIResponse(5, AIResponse.NOT_EVALUATED)
+            if failure == "no_ai"
+            else AIResponse(1, "poor value")
+        )
+
+    monitor.evaluate_by_ai.side_effect = assess
+    if failure == "fetch":
+        market.get_listing_details.side_effect = ValueError("private browser details")
+    identity = {"marketplace": "facebook", "listing_id": "222", "original_item": ""}
+    job = monitor.rechecks.enqueue([identity], None, True)
+    monitor.process_recheck()
+    row = next(row for row in load_matches(match_cache) if row["listing_id"] == "222")
+    assert row["evaluation_status"] == ("error" if failure else "assessed")
+    assert row["score"] == (None if failure else 1)
+    assert row["seen_count"] == 0 and row["last_seen"] is None
+    assert row["state"]["shortlisted"] and row["notified_users"] == []
+    market.check_listing.assert_not_called()
+    assert "private" not in str(monitor.rechecks.get(job["job_id"]))
+    assert not any(key[0] == "user-notifications" for key in match_cache.iterkeys())
+    original = next(row for row in load_matches(match_cache) if row["item"] == "test")
+    assert original["score"] == 5 and original["source"] == "matched"
+    if failure:
+        failure = None
+        market.get_listing_details.side_effect = None
+        monitor.rechecks.enqueue([identity], None, True)
+        monitor.process_recheck()
+        row = next(row for row in load_matches(match_cache) if row["listing_id"] == "222")
+    assert row["score"] == 1 and row["evaluation_status"] == "assessed"
+    assert row["price"] == imported.price and row["conclusion"] == "Poor prospect"
+    assert len([row for row in load_matches(match_cache) if row["listing_id"] == "222"]) == 1
+    with library(match_cache) as store:
+        assert {event["kind"] for event in store.history("facebook", "222", 0, 25)["events"]} >= {
+            "manual",
+            "assessment",
+        }
+    monitor.evaluate_by_ai.side_effect = None
+    monitor.evaluate_by_ai.return_value = AIResponse(5, "search-specific match")
+    monitor.rechecks.enqueue([identity], "other", False)
+    monitor.process_recheck()
+    ratings = {row["item"]: row for row in load_matches(match_cache) if row["listing_id"] == "222"}
+    assert ratings[""]["score"] == 1 and ratings[""]["evaluation_status"] == "assessed"
+    assert ratings["other"]["score"] == 5 and ratings["other"]["source"] == "recheck"
+    assert ratings["other"]["state"]["shortlisted"]
+    # A later general assessment must not erase a real search's legacy cache label.
+    imported.name = "other"
+    imported.to_cache(imported.post_url, match_cache)
+    market.get_listing_details.return_value = (dataclasses.replace(imported, name=""), False)
+    monitor.evaluate_by_ai.return_value = AIResponse(2, "needs clarification")
+    monitor.rechecks.enqueue([identity], None, True)
+    monitor.process_recheck()
+    cached = Listing.from_cache(imported.post_url, match_cache)
+    assert cached is not None and cached.name == "other"
+    ratings = {row["item"]: row for row in load_matches(match_cache) if row["listing_id"] == "222"}
+    assert ratings[""]["score"] == 2 and ratings["other"]["score"] == 5
 
 
 def test_matches_csv_filters_all_pages_without_notification(
