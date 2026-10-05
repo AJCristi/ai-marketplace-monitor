@@ -38,6 +38,15 @@ def _run(c: Context, command: str) -> Optional[Result]:
 
 
 @task()
+def docker_rebuild(c: Context) -> None:
+    """Rebuild and restart the local Docker container on Windows."""
+    _run(
+        c,
+        f'powershell -NoProfile -ExecutionPolicy Bypass -File "{ROOT_DIR / "docker" / "rebuild.ps1"}"',
+    )
+
+
+@task()
 def clean_build(c: Context) -> None:
     """Clean up files from package building."""
     _run(c, "rm -fr build/")

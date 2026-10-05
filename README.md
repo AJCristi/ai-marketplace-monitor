@@ -152,6 +152,32 @@ Mounting `~/.ai-marketplace-monitor` shares your existing config, cache, and log
 
 To build the image yourself instead of pulling: `docker build -t aimm .` from a checkout of this repo. Rebuild after source changes and recreate the container to use that build; starting or restarting the old container does not load the changed source.
 
+On Windows, rebuild and restart the local-only setup with:
+
+```powershell
+uv run inv docker-rebuild
+```
+
+This uses the project's Invoke task runner in `tasks.py`. Without `uv`, use
+`.\.venv\Scripts\python.exe -m invoke docker-rebuild` with an existing development
+environment, or run the script directly:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\docker\rebuild.ps1
+```
+
+Run this from the repository root with Docker Desktop running. The execution-policy
+option applies only to this PowerShell process. It builds the current
+checkout (including uncommitted source changes), then replaces `aimm` and waits for
+its web server. It uses port `127.0.0.1:8467`, `unless-stopped`, and the existing
+`$env:USERPROFILE\.ai-marketplace-monitor` config/cache directory. Use
+`-ConfigDirectory 'D:\path\to\config'` for another existing directory. Credentials
+must be in that configuration; this script does not copy custom container environment
+variables, ports, or other Docker options. It starts the app even if it was stopped.
+If startup fails, it restores the previous container and its running/stopped state.
+It does not pull Git changes, push commits, or delete persistent data. A successful
+update briefly interrupts monitoring; Docker's build cache avoids unnecessary work.
+
 ## 💡 Example Usage
 
 **Find GoPro cameras under $300:**
