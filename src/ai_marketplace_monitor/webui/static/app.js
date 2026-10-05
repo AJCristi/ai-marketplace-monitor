@@ -12,7 +12,7 @@ const state = {
   open:true, initialized:false, status:{}, context:{inherited:{},environment:{},sources:[]},
   base:'', content:'', mtime:null, file:null, config:{}, local:{},
   route:location.hash || '#/monitor', form:null, saving:false, editor:null, editorSetting:false,
-  conflict:null, error:'', saved:'', rawInvalid:false, records:[], capacity:2000, streamId:null, ws:null,
+  conflict:null, error:'', saved:'', rawInvalid:false, records:[], lastSearches:new Map(), capacity:2000, streamId:null, ws:null,
   connected:false, announceCount:0, disconnectedAt:null, following:true, pending:0, frozen:[], expanded:new Set(),
   credentials:null, credentialsId:0, monitorIssue:null, incidentId:0, loginId:0, loginUntil:0, feedTimer:null, announceTimer:null, pollBusy:false,
 };
@@ -177,6 +177,10 @@ function searchSummary(name) {
   const rating = list(itemValue(state.config,name,'rating')).join('/');
   return [phrases.length > 1 ? `${phrases[0]} +${phrases.length-1}` : phrases[0],price?price+inheritedMark('max_price'):price,scheduleLabel(state.config,name)+inheritedMark('search_interval'),ai.length ? `AI ≥${rating}${inheritedMark('rating')}` : 'no AI'].filter(Boolean).join(' · ');
 }
+function lastSearchedLabel(name) {
+  const record = state.lastSearches.get(name);
+  return `Last searched at: ${record ? time(record.time) : '—'}`;
+}
 function renderSidebar() {
   const {parts} = routeParts(); const settings = parts[0] === 'settings';
   const matches = !settings && parts[1]==='matches';
@@ -193,7 +197,7 @@ function renderSidebar() {
       const rows = [['marketplace','Marketplace',Object.keys(state.config.marketplace || {}).join(' · ')],['ai','AI providers',Object.keys(state.config.ai || {}).join(' · ') || 'None'],['notifications','Notifications',Object.keys(state.config.user || {}).join(' · ')],['more','Image matching and more','Image matching, network and locale options'],['config','config.toml','Edit the file directly']];
       $('#sidebar').innerHTML = '<div class="sh">Settings</div>' + rows.map(([key,title,summary]) => `<a class="it ${parts[1]===key?'on':''}" href="#/settings/${key}" ${parts[1]===key?'aria-current="page"':''}><div class="t">${title}</div><div class="s">${esc(summary)}</div></a>`).join('');
     } else {
-      $('#sidebar').innerHTML = `<a class="it ${parts[1]==='all'?'on':''}" href="#/monitor/all"><span class="b">All activity</span><span class="m d" style="float:right">last ${state.capacity.toLocaleString()} events</span></a><div class="sh">Saved searches · ${Object.keys(state.config.item || {}).length}</div>` + Object.entries(state.config.item || {}).map(([name,item]) => `<a class="it ${parts[2]===name || decodeName(parts[2]||'')===name ? 'on':''}" href="${itemRoute(name)}"><div class="row sb"><span class="t m ${item.enabled===false?'d':''}">${esc(name)}</span><span data-item-badge="${esc(name)}" class="m xs d">${item.enabled===false?'disabled':state.form?.name===name?'editing':''}</span></div><div class="s">${esc(searchSummary(name))}</div></a>`).join('') + '<p class="sidebar-note">* marks a Marketplace or built-in default. Earlier files also contribute values. “New” counts come from recent activity.</p>';
+      $('#sidebar').innerHTML = `<a class="it ${parts[1]==='all'?'on':''}" href="#/monitor/all"><span class="b">All activity</span><span class="m d" style="float:right">last ${state.capacity.toLocaleString()} events</span></a><div class="sh">Saved searches · ${Object.keys(state.config.item || {}).length}</div>` + Object.entries(state.config.item || {}).map(([name,item]) => `<a class="it ${parts[2]===name || decodeName(parts[2]||'')===name ? 'on':''}" href="${itemRoute(name)}"><div class="row sb"><span class="t m ${item.enabled===false?'d':''}">${esc(name)}</span><span data-item-badge="${esc(name)}" class="m xs d">${item.enabled===false?'disabled':state.form?.name===name?'editing':''}</span></div><div class="s">${esc(searchSummary(name))}</div><div class="s" data-item-last-searched="${esc(name)}">${esc(lastSearchedLabel(name))}</div></a>`).join('') + '<p class="sidebar-note">* marks a Marketplace or built-in default. Earlier files also contribute values. “New” counts come from recent activity.</p>';
     }
   }
   if (!settings) {
@@ -214,6 +218,11 @@ function renderSidebar() {
     if (state.config.item[name].enabled === false) badge.textContent = 'disabled';
     else if (state.form?.name === name) badge.textContent = 'editing';
     else {const record = state.records.findLast(record => record.extra?.kind==='search_summary' && record.extra.item===name); badge.textContent = record ? `${record.extra.new_count} new` : '';}
+  }
+  for (const label of document.querySelectorAll('[data-item-last-searched]')) {
+    const name = label.dataset.itemLastSearched, record = state.lastSearches.get(name);
+    label.textContent = lastSearchedLabel(name);
+    label.title = record ? new Date(record.time * 1000).toLocaleString() : 'No completed search in available activity';
   }
   updateStatus();
 }
@@ -242,7 +251,7 @@ function renderActivity(name = null) {
   if (name) {
     const region = itemValue(state.config,name,'search_region');
     const place = region?.length ? 'region: '+labelValue(region) : labelValue(itemValue(state.config,name,'search_city'));
-    description = `${esc(searchSummary(name))} · ${esc(place)}${!filled(item.search_city)&&!filled(item.search_region)?'*':''} · AI: ${esc(labelValue(itemValue(state.config,name,'ai')))} · notify: ${esc(labelValue(itemValue(state.config,name,'notify')))}`;
+    description = `${esc(searchSummary(name))} · ${esc(place)}${!filled(item.search_city)&&!filled(item.search_region)?'*':''} · AI: ${esc(labelValue(itemValue(state.config,name,'ai')))} · notify: ${esc(labelValue(itemValue(state.config,name,'notify')))} · <span data-item-last-searched="${esc(name)}">${esc(lastSearchedLabel(name))}</span>`;
     actions = `<a class="btn" href="#/monitor/matches?item=${encodeURIComponent(name)}">View matches</a><button class="btn" id="toggle-search" type="button" ${state.saving?'disabled':''}>${item.enabled===false?'Resume search':'Pause search'}</button><a class="btn" href="${itemRoute(name)}/edit">Edit</a><button class="btn" id="duplicate-search">Duplicate</button><button class="btn x" id="delete-search">Delete</button>`;
   }
   const types = [['','All'],['ai_eval','AI ratings'],['search_summary','Searches'],['listing_skip','Skipped'],...(!name?[['credentials_wait','Login']]:[])];
@@ -332,10 +341,12 @@ function renderFeed(reset = false) {
   updatePauseBar();
 }
 function acceptRecords(records, reset = false) {
+  if (reset) state.lastSearches.clear();
   const seen = new Set(state.records.map(record=>record.id));
   const newCount = records.filter(record=>!seen.has(record.id)).length;
   state.records = mergeRecords(reset?[]:state.records,records,state.capacity);
   for (const record of records.toSorted((a,b)=>a.id-b.id)) {
+    if (record.extra?.kind==='search_summary' && record.id>(state.lastSearches.get(record.extra.item)?.id ?? 0)) state.lastSearches.set(record.extra.item,record);
     if(record.id>state.incidentId){
       if(record.levelno>=40 && /Error parsing:|No browser could be launched|browser.*(?:crashed|closed unexpectedly)/i.test(record.message)){state.incidentId=record.id;state.monitorIssue=/Error parsing:/.test(record.message)?'The monitor could not load config.toml. Repair and save the configuration.':'The monitor browser stopped. View the error and restart the monitor process.';}
       if(record.extra?.kind==='browser_ready'){state.incidentId=record.id;state.monitorIssue=null;}
@@ -363,7 +374,7 @@ function connectStream() {
   socket.onmessage = async event => {
     let data; try {data=JSON.parse(event.data);} catch {return;}
     if (data.type==='hello') {
-      if(state.streamId && state.streamId!==data.stream_id){state.records=[];state.credentials=null;state.credentialsId=0;state.monitorIssue=null;state.incidentId=0;state.loginId=0;state.loginUntil=0;state.following=true;state.pending=0;state.expanded.clear();renderFeed(true);}state.streamId=data.stream_id;
+      if(state.streamId && state.streamId!==data.stream_id){state.records=[];state.lastSearches.clear();state.credentials=null;state.credentialsId=0;state.monitorIssue=null;state.incidentId=0;state.loginId=0;state.loginUntil=0;state.following=true;state.pending=0;state.expanded.clear();renderFeed(true);renderSidebar();}state.streamId=data.stream_id;
       state.connected=true;state.disconnectedAt=null; updateStatus();
       try {await snapshot();} catch(error) {toast(error.message);} return;
     }

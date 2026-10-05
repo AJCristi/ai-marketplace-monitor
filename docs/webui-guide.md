@@ -271,6 +271,13 @@ safe point. It does not interrupt that scan. Repeated clicks are unnecessary whi
 the request is pending. This console has no per-search Run now or next-run countdown;
 check activity or terminal output for the scheduler's next-job details.
 
+Each saved search shows **Last searched at: HH:MM** in the sidebar and its activity
+header, using your browser's local time. This is the latest completed search seen
+in available activity, including searches with zero new listings. Hover over the
+label for the full date and time. A dash means no completion is available. The
+time stays visible as events leave the feed while the page remains open; reloading
+uses the remaining activity buffer, and restarting the monitor clears it.
+
 ## 9. Duplicate, rename, disable, and delete
 
 - **Duplicate:** select a search, choose Duplicate, review the `_copy` name and

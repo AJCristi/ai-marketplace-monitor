@@ -241,6 +241,49 @@ test('saved search header wires pause and resume to the current search',async()=
   assert.match(app.control('#pane').innerHTML,/id="toggle-search"[^>]*>Resume search/);
 });
 
+test('last searched uses completed searches and survives replay and feed trimming',()=>{
+  const app=consoleUnderTest(),name='camera & lens';
+  app.state.config={item:{[name]:{search_phrases:['camera']},other:{}}};
+  app.state.route='#/monitor/item/'+encodeURIComponent(name);app.state.capacity=1;
+  app.run('renderFeed=()=>{};');
+  app.renderActivity(name);
+  assert.match(app.control('#pane').innerHTML,/Last searched at: —/);
+  const row=(id,item,kind='search_summary')=>({id,time:1800000000+id*60,message:'Activity',levelno:20,extra:{kind,item,new_count:0}});
+  const completed=row(4,name),older=row(2,name);
+  app.acceptRecords([completed,row(5,'other'),row(6,name,'ai_eval')]);
+  app.acceptRecords([older]);
+  assert.equal(app.state.records.length,1);
+  assert.equal(app.state.lastSearches.get(name).id,4);
+  assert.equal(app.state.lastSearches.get('other').id,5);
+  app.renderActivity(name);
+  const expected=new Date(completed.time*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',hour12:false});
+  assert.ok(app.control('#pane').innerHTML.includes(`data-item-last-searched="camera &amp; lens">Last searched at: ${expected}</span>`));
+  app.acceptRecords([row(1,'other')],true);
+  app.renderActivity(name);
+  assert.match(app.control('#pane').innerHTML,/Last searched at: —/);
+  assert.equal(app.state.lastSearches.get('other').id,1);
+});
+
+test('live search completions update sidebar and activity labels while the feed is paused',()=>{
+  const app=consoleUnderTest();app.state.config={item:{camera:{search_phrases:['camera']}}};
+  app.state.route='#/monitor/item/camera';app.state.following=false;
+  const labels=[{dataset:{itemLastSearched:'camera'}},{dataset:{itemLastSearched:'camera'}}];
+  let refresh;
+  app.run('document.querySelectorAll=selector=>selector==="[data-item-last-searched]"?labels:[];setTimeout=callback=>{refresh(callback);return 0;};updateStatus=()=>{};',{labels,refresh:callback=>{refresh=callback;}});
+  for(const selector of ['#monitor-nav','#matches-top-nav','#settings-nav','#matches-nav']){
+    app.control(selector).classList={toggle(){}};app.control(selector).removeAttribute=()=>{};
+  }
+  app.run('renderSidebar();');
+  assert.match(app.control('#sidebar').innerHTML,/data-item-last-searched="camera">Last searched at: —/);
+  app.acceptRecords([{id:1,time:1800000000,message:'Search finished',levelno:20,extra:{kind:'search_summary',item:'camera',new_count:0}}]);
+  refresh();
+  const expected=new Date(1800000000*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',hour12:false});
+  for(const label of labels){
+    assert.equal(label.textContent,`Last searched at: ${expected}`);
+    assert.equal(label.title,new Date(1800000000*1000).toLocaleString());
+  }
+});
+
 test('View matches scopes results to the saved search with a safely encoded name',()=>{
   const app=consoleUnderTest(),name='camera & lens/#?';app.state.config={item:{[name]:{search_phrases:['camera']}}};
   app.run('renderFeed=()=>{};');app.renderActivity(name);
