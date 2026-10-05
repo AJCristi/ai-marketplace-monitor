@@ -133,6 +133,7 @@ def test_cache_shares_latest_seller_but_preserves_listing_hash_and_old_records(
     original_hash = listing.hash
     old_payload = asdict(listing)
     del old_payload["seller_profile"]
+    del old_payload["image_urls"]
     assert original_hash == hash_dict(
         {
             key: (value.split("?")[0] if key == "post_url" else value)

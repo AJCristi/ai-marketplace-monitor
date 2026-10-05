@@ -1,4 +1,4 @@
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Optional, Tuple, Type
 
 from diskcache import Cache  # type: ignore
@@ -22,6 +22,7 @@ class Listing:
     condition: str
     description: str
     seller_profile: dict[str, Any] | None = None
+    image_urls: list[str] = field(default_factory=list)
 
     @property
     def content(self: "Listing") -> Tuple[str, str, str]:
@@ -35,7 +36,7 @@ class Listing:
             {
                 x: (y.split("?")[0] if x == "post_url" else y)
                 for x, y in asdict(self).items()
-                if x not in {"image", "seller_profile"}
+                if x not in {"image", "image_urls", "seller_profile"}
             }
         )
 

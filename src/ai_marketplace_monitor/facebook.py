@@ -7,7 +7,7 @@ from enum import Enum
 from itertools import repeat
 from logging import Logger
 from typing import Any, Callable, Generator, List, Tuple, Type, cast
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import humanize
 from currency_converter import CurrencyConverter  # type: ignore
@@ -564,9 +564,18 @@ class FacebookMarketplace(Marketplace):
                         continue
                     # currently we trust the other items from summary page a bit better
                     # so we do not copy title, description etc from the detailed result
-                    for attr in ("condition", "seller", "description", "seller_profile"):
+                    for attr in (
+                        "condition",
+                        "seller",
+                        "description",
+                        "seller_profile",
+                        "image_urls",
+                    ):
                         # other attributes should be consistent
                         setattr(listing, attr, getattr(details, attr))
+                    if details.image:
+                        # Keep the primary photo aligned with the collected detail gallery.
+                        listing.image = details.image
                     listing.name = item_config.name
                     if self.logger:
                         self.logger.debug(
@@ -850,6 +859,24 @@ class FacebookItemPage(WebPage):
     def get_image_url(self: "FacebookItemPage") -> str:
         raise NotImplementedError("get_image_url is not implemented for this page")
 
+    def get_image_urls(self: "FacebookItemPage") -> list[str]:
+        # Product photos and gallery thumbnails only; recommendations and avatars are excluded.
+        urls = [self.get_image_url()]
+        try:
+            urls.extend(
+                self.page.locator(
+                    'img[alt^="Product photo"], [aria-label^="Thumbnail"] img'
+                ).evaluate_all("images => images.map(image => image.currentSrc || image.src)")
+            )
+        except Exception:
+            # Optional gallery extraction must not prevent a listing from matching.
+            return [url for url in urls if url]
+        distinct: dict[str, str] = {}
+        for url in urls:
+            if url and urlsplit(url).scheme == "https":
+                distinct.setdefault(urlsplit(url).path, url)
+        return list(distinct.values())
+
     def get_seller(self: "FacebookItemPage") -> str:
         raise NotImplementedError("get_seller is not implemented for this page")
 
@@ -917,6 +944,7 @@ class FacebookItemPage(WebPage):
             id=post_url.split("?")[0].rstrip("/").split("/")[-1],
             title=title,
             image=self.get_image_url(),
+            image_urls=self.get_image_urls(),
             price=extract_price(price),
             post_url=post_url,
             location=self.get_location(),

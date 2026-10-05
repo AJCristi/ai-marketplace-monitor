@@ -93,3 +93,8 @@ export function renameSection(content, prefix, oldName, newName) {
   if (!pattern.test(content)) throw new Error('This section name needs to be renamed in config.toml.');
   return content.replace(pattern, `$1${newName}$2`);
 }
+
+export function matchPhotoUrl(row, photo = row.photos?.[0]) {
+  if (!row.marketplace || !row.listing_id || !/^[a-f0-9]{64}$/.test(photo?.digest || '')) return null;
+  return `/api/matches/${encodeURIComponent(row.marketplace)}/${encodeURIComponent(row.listing_id)}/photos/${photo.digest}.webp`;
+}

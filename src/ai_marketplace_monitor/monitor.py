@@ -31,6 +31,7 @@ from .matches import (
     record_sighting,
 )
 from .notification import NotificationStatus
+from .photos import archive_next_photo
 from .recheck import RecheckQueue, price_filter_reason
 from .user import User
 from .utils import (
@@ -82,6 +83,7 @@ class MarketplaceMonitor:
         self.image_matcher = ImageMatcher(cache)
         self.image_matcher.queue.wake = self.rechecks.wake
         self.recheck_after = 0.0
+        self.photo_attempts: set[tuple[str, str, str]] = set()
 
     def request_search(self: "MarketplaceMonitor") -> None:
         """Ask the monitor thread to run every enabled search at its next safe point."""
@@ -655,14 +657,14 @@ class MarketplaceMonitor:
                         break
                     self.process_recheck()
                     continue
+                if (
+                    calculate_file_hash(self.config_files) != self.config_hash
+                    or self.search_requested.is_set()
+                ):
+                    self.search_requested.clear()
+                    schedule.clear()
+                    break
                 if self.image_matcher.automatic or self.image_matcher.queue.pending():
-                    if (
-                        calculate_file_hash(self.config_files) != self.config_hash
-                        or self.search_requested.is_set()
-                    ):
-                        self.search_requested.clear()
-                        schedule.clear()
-                        break
                     image_rows = load_matches(cache)
                     self.image_matcher.scan(image_rows)
                     if self.image_matcher.queue.pending():
@@ -677,6 +679,8 @@ class MarketplaceMonitor:
                             )
                         continue
                     idle_seconds = min(idle_seconds, 60)
+                if self.process_photo():
+                    continue
                 self.rechecks.wake.clear()
                 if self.image_matcher.queue.pending():
                     # A manual request can arrive between the earlier check and clear.
@@ -716,6 +720,21 @@ class MarketplaceMonitor:
 
                 self.handle_pause()
                 schedule.run_pending()
+
+    def process_photo(self) -> bool:
+        """Backfill and capture one photo between searches, without AI or notification I/O."""
+        if not hasattr(self, "photo_attempts"):
+            self.photo_attempts = set()
+        result = archive_next_photo(cache, self.photo_attempts)
+        if result and self.logger:
+            self.logger.info(
+                "Photo archived" if result["saved"] else "Photo unavailable: %s",
+                *([] if result["saved"] else [result.get("reason", "Unknown error")]),
+                extra=aimm_event(
+                    "match_photo_saved" if result["saved"] else "match_photo_failed", **result
+                ),
+            )
+        return result is not None
 
     def process_recheck(self) -> None:
         """Execute at most one queued listing, on the synchronous monitor thread."""
@@ -800,6 +819,12 @@ class MarketplaceMonitor:
             )
         if original is not None:
             record_recheck(cache, original, result, listing, rating)
+            if hasattr(self, "photo_attempts"):
+                self.photo_attempts = {
+                    key
+                    for key in self.photo_attempts
+                    if key[:2] != (identity["marketplace"], identity["listing_id"])
+                }
         if listing is not None and original is not None:
             # The detail cache is shared with legacy CSV joins. A check against
             # another search must not relabel its original search in that cache.

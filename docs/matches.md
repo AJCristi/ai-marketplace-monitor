@@ -22,10 +22,33 @@ This browser remembers your filters, sorting and grouping when you return to
 Matches. A URL with explicit filters takes precedence. **Clear filters** resets
 the search, rating, status, price-drop and text filters while keeping sorting and grouping.
 
-Use **Previous** and **Next**, or the left/right arrow keys in the match list or
-details, to review loaded matches in group order. Navigation reveals hidden rows
-and stops at the first or last loaded match; use **Load more matches** for the
-next page. Arrow keys keep their normal behavior in editable fields.
+Select a listing title to open its full detail page. **Previous** and **Next** review
+loaded matches in group order and stop at the first or last loaded match. Use
+**Load more matches** in the list for the next page. **Matches** returns to your
+filters, grouping, expanded groups and scroll position. Shortlist or dismiss from
+any row; a dismissed row offers **Undo** until you leave or change filters.
+
+## Photo gallery
+
+The monitor archives listing photos as WebP images in the Matches database and
+serves them from the console's own origin. Firefox tracking protection can remain
+on: the browser does not request listing photos from Facebook's CDN. Thumbnails
+and previous/next photo buttons select the saved images; arrow keys change photos
+only while focus is in the gallery. A single photo needs no navigation controls.
+
+Capture runs between searches, without AI calls or notifications. Existing records
+can backfill their saved primary URL; collect a full gallery through an ordinary
+fresh detail fetch or **Re-check now**. Expired URLs show missing or partial photos
+until fresh URLs are collected. Failed captures preserve every previously saved
+photo. A manual listing re-check or process restart retries unavailable sources.
+Only listing photos and gallery thumbnails are collected, not avatars or
+recommendations. Some Facebook layouts expose only small thumbnail images.
+
+Each download is limited to 5 MiB and 20 million pixels. Archived images have a
+maximum dimension of 1600 pixels, quality 80, and a 512 KiB size limit; metadata is
+removed. Identical WebP content is stored once per listing and shared across its
+searches. Photos survive listing removal, cache cleanup and dismissal. There is
+no automatic deletion policy; the database grows with captured photos.
 
 **Export CSV** exports every match that meets the active filters, in the selected
 sort order, including results beyond the loaded page and matches without a
@@ -100,7 +123,7 @@ including when local filters reject it or notification deduplication skips it. A
 is not a new pass or a fresh AI evaluation. Listings absent from results are not assumed
 sold or removed. Reposts with different IDs remain separate listings.
 
-The detail panel's **History** shows collected price/title/description changes and
+The detail page's **History** shows collected price/title/description changes and
 search-specific evaluations and re-checks. Unchanged sightings update statistics without
 adding duplicate snapshots. Descriptions may come from the detail cache; returning
 listings do not force new page loads or AI calls. **Last seen** sorting brings recently
@@ -147,7 +170,7 @@ photos to the selected vision
 provider; it does not visit seller profiles or look up vehicle owners.
 
 Connections distinguish **reused photo**, **possibly the same item**, and
-**matching plate**. The detail panel shows the two photos, evidence, and
+**matching plate**. The detail page shows the two photos, evidence, and
 Confirm/Dismiss controls. Those controls review the connection in both directions;
 they do not merge, dismiss, re-rate, or suppress notifications for either listing.
 Unreadable plates and conflicting independent plate readings cannot create a
@@ -179,7 +202,7 @@ plate-match flag. Model suggestions do not prove fraud, ownership or identity.
   the listing itself to obtain a fresh photo URL.
 - Candidate selection uses cached visual fingerprints, extracted plate readings,
   categories, titles and recency. Eight candidates per check is deliberately bounded,
-  not an exhaustive duplicate search. Only the primary photo is available: a plate
+  not an exhaustive duplicate search. Image matching still uses only the primary photo: a plate
   hidden in another gallery photo will not be detected. Plate normalization supports
   Latin letters and digits without guessing ambiguous characters.
 - Findings and reviews survive restart; pending jobs do not. Clearing all cache
@@ -195,8 +218,9 @@ The library lives in `~/.ai-marketplace-monitor/matches.sqlite3`, independently 
 search/AI cache. **`--clear-cache all` preserves the library**, listing snapshots, history,
 and personal states. It still clears the existing notification deduplication cache, so
 later searches may send notifications again under the existing notification rules.
-Photo URLs can expire; image files are not archived in the library. Image matching
-downloads photos into a temporary cache for up to 24 hours when a check needs them.
+Archived WebP photos are stored in the library. Photo URLs can expire before capture.
+Image matching separately downloads primary photos into its temporary cache for up
+to 24 hours when a check needs them; its evidence is unchanged by gallery capture.
 
 On first use, existing cached matches and notified listings are imported transactionally.
 Import is safe to retry and runs before CLI cache clearing. The original cache records

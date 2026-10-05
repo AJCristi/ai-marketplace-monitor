@@ -202,6 +202,7 @@ function renderSidebar() {
       $('#sidebar').firstElementChild.after(link);
     }
     $('#matches-nav').classList.toggle('on',parts[1]==='matches');
+    if(parts[1]==='matches')$('#matches-nav').setAttribute('aria-current','page');else $('#matches-nav').removeAttribute('aria-current');
     $('#matches-nav').innerHTML=`<div class="row sb"><span class="b">Matches</span><span class="m">${state.matchSummary?.library_total??'—'}${state.matchSummary?.new_count?' · '+state.matchSummary.new_count+' new':''}</span></div><div class="s">saved library · remembers returning listings</div>`;
     for(const link of document.querySelectorAll('#sidebar a.it:not(#matches-nav)')){
       const name=link.querySelector('[data-item-badge]')?.dataset.itemBadge;

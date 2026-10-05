@@ -12,18 +12,20 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urljoin, urlsplit
 
-import requests
 from diskcache import Cache  # type: ignore
 from openai import APIStatusError, OpenAI
 from PIL import Image, ImageOps
 
+from .photos import (  # noqa: F401 — existing public helpers
+    MAX_BYTES,
+    download_image,
+    image_url_allowed,
+)
 from .recheck import RecheckQueue
 
 VERSION = "1"
 MAX_CANDIDATES = 8
-MAX_BYTES = 5 * 1024 * 1024
 MAX_OUTPUT = 2048
 TAG = "image-matching"
 POSITIVE = {"reused_photo", "possible_same_item", "matching_plate"}
@@ -52,52 +54,6 @@ def identity(row: dict[str, Any]) -> tuple[str, str]:
 
 def digest(value: str | bytes) -> str:
     return hashlib.sha256(value.encode() if isinstance(value, str) else value).hexdigest()
-
-
-def image_url_allowed(url: str) -> bool:
-    """Only Facebook image CDNs; no credentials, custom ports or arbitrary URLs."""
-    try:
-        parsed = urlsplit(url)
-        host = parsed.hostname or ""
-        return (
-            parsed.scheme == "https"
-            and parsed.port in (None, 443)
-            and not parsed.username
-            and not parsed.password
-            and any(
-                host == domain or host.endswith("." + domain)
-                for domain in ("fbcdn.net", "fbsbx.com")
-            )
-        )
-    except ValueError:
-        return False
-
-
-def download_image(url: str) -> bytes:
-    """Bound downloads and validate each redirect, without logging signed URLs."""
-    started = time.monotonic()
-    for _ in range(4):
-        if not image_url_allowed(url):
-            raise ValueError("The saved photo is not a supported Facebook image URL.")
-        try:
-            with requests.get(
-                url, timeout=(5, 15), stream=True, allow_redirects=False
-            ) as response:
-                if response.is_redirect:
-                    url = urljoin(url, response.headers.get("Location", ""))
-                    continue
-                response.raise_for_status()
-                data = bytearray()
-                for chunk in response.iter_content(65536):
-                    data.extend(chunk)
-                    if len(data) > MAX_BYTES or time.monotonic() - started > 30:
-                        raise ValueError("The saved photo exceeds the image download limit.")
-                return bytes(data)
-        except requests.RequestException:
-            raise ValueError(
-                "The saved photo could not be downloaded; re-check the listing to refresh its photo."
-            ) from None
-    raise ValueError("The saved photo redirected too many times.")
 
 
 def prepare_image(raw: bytes) -> dict[str, Any]:

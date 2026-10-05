@@ -47,17 +47,18 @@ def test_search_page(
 
 
 @pytest.mark.parametrize(
-    "filename,price,seller,location",
+    "filename,price,seller,location,gallery_count",
     [
-        ("regular_listing.html", "$10", "Austin Ewing", "MS"),
-        ("rental_listing.html", "$150", "Perry Burton", "Houston, TX"),
+        ("regular_listing.html", "$10", "Austin Ewing", "MS", 1),
+        ("rental_listing.html", "$150", "Perry Burton", "Houston, TX", 5),
         (
             "auto_with_about_and_description_listing.html",
             "**unspecified**",
             "Lily Ortiz",
             "Houston, TX",
+            17,
         ),
-        ("auto_with_description_listing.html", "€6,695", "Abdel Abdel", "Bergen op Zoom, NB"),
+        ("auto_with_description_listing.html", "€6,695", "Abdel Abdel", "Bergen op Zoom, NB", 10),
     ],
 )
 def test_listing_page(
@@ -66,12 +67,25 @@ def test_listing_page(
     price: str,
     seller: str,
     location: str,
+    gallery_count: int,
 ) -> None:
     local_file_path = Path(__file__).parent / filename
 
     page = new_context(java_script_enabled=False).new_page()
     page.goto(f"file://{local_file_path}")
     page.wait_for_load_state("domcontentloaded")
+    # Saved HTML uses local image paths. Restore CDN-shaped URLs without any network I/O.
+    page.route("https://scontent.fbcdn.net/**", lambda route: route.abort())
+    page.locator("img").evaluate_all(
+        """images => images.forEach(image => {
+        const path = new URL(image.src).pathname.split('/').pop();
+        image.removeAttribute('srcset');
+        image.src = 'https://scontent.fbcdn.net/' + path;
+    })"""
+    )
+    page.wait_for_function(
+        "Array.from(document.images).every(image => !image.currentSrc || image.currentSrc.startsWith('https://scontent.fbcdn.net/'))"
+    )
     listing = parse_listing(page, "post_url", None)
 
     assert listing is not None, f"Should be able to parse {filename}"
@@ -79,6 +93,8 @@ def test_listing_page(
     assert listing.price == price, f"Price of {filename} should be {listing.price}"
     assert listing.location == location, f"Location of {filename} should be {listing.location}"
     assert listing.seller == seller, f"Seller of {filename} should be {listing.seller}"
+    assert len(listing.image_urls) == gallery_count
+    assert listing.image_urls[0] == listing.image
     assert listing.image, f"Image of {filename} should not be empty"
     assert listing.post_url, f"post_url of {filename} should not be empty"
 

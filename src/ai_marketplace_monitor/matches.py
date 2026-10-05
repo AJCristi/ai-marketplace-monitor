@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -85,6 +86,7 @@ def record_sighting(local_cache: Cache, listing: Listing, item: str, run: str) -
                 "price": listing.price,
                 "location": listing.location,
                 "image": listing.image,
+                **({"image_urls": listing.image_urls} if listing.image_urls else {}),
                 "url": listing.post_url,
                 "description": listing.description,
                 "seller": listing.seller,
@@ -262,6 +264,19 @@ def load_matches(local_cache: Cache) -> list[dict[str, Any]]:
                 "SUM(count) AS seen_count FROM sightings GROUP BY marketplace,listing_id"
             )
         }
+        photos: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for photo in store.db.execute(
+            "SELECT marketplace,listing_id,digest,saved_at FROM photos ORDER BY position,digest"
+        ):
+            photos.setdefault((photo[0], photo[1]), []).append(
+                {"digest": photo[2], "saved_at": photo[3]}
+            )
+        saved_sources = {
+            tuple(photo)
+            for photo in store.db.execute(
+                "SELECT marketplace,listing_id,source_hash FROM photo_sources"
+            )
+        }
         profiles: dict[str, dict[str, Any]] = {}
         for saved in listings.values():
             # Repair the old vehicle-parser shape in the read view only; preserve history.
@@ -310,6 +325,13 @@ def load_matches(local_cache: Cache) -> list[dict[str, Any]]:
                     "listing_id": listing_id,
                     "item": item,
                     "key": f"{market}:{listing_id}",
+                    "photos": photos.get((market, listing_id), []),
+                    "photo_pending": sum(
+                        (market, listing_id, hashlib.sha256(url.encode()).hexdigest())
+                        not in saved_sources
+                        for url in set(detail.get("image_urls") or [detail.get("image")])
+                        if isinstance(url, str) and url
+                    ),
                     "state": state,
                     "filed_under": list(dict.fromkeys([item, *state["filed_under"]])),
                     "notified_users": sorted(detail["notified_users"]),

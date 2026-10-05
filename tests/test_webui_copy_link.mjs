@@ -6,7 +6,7 @@ async function detailView(t, url, clipboard) {
   const elements=new Map(), messages=[];
   function element(id, attributes='') {
     const node={id,hidden:attributes.includes('hidden'),isConnected:true,disabled:false,
-      addEventListener(){},focus(){this.focused=true;},select(){this.selected=true;}};
+      querySelectorAll(){return [];},addEventListener(){},focus(){this.focused=true;},select(){this.selected=true;}};
     Object.defineProperty(node,'innerHTML',{get(){return this.html||'';},set(html){
       this.html=html;
       for(const match of html.matchAll(/<[^>]*\bid="([^"]+)"[^>]*>/g))elements.set(match[1],element(match[1],match[0]));
@@ -26,13 +26,13 @@ async function detailView(t, url, clipboard) {
   }
   const row={key:'fb:1',item:'camera',url,title:'Camera',filed_under:[],notified_users:[],state:{filed_under:[]}};
   const view=createMatchesView({
-    state:{route:'#/monitor/matches',config:{item:{camera:{}}},records:[],status:{}},
-    json:async()=>({matches:[row],counts:{all:1},groups:[{item:'camera',count:1}],filtered_groups:[{item:'camera',count:1}]}),
+    state:{route:'#/monitor/matches/fb/1?match_item=camera',config:{item:{camera:{}}},records:[],status:{}},
+    json:async url=>url.includes('/detail?')?row:({matches:[row],counts:{all:1},groups:[{item:'camera',count:1}],filtered_groups:[{item:'camera',count:1}]}),
     pageHeader:(_title,_description,actions)=>actions,exportCsv(){},toast:message=>messages.push(message),renderSidebar(){},searchSummary:()=>'',
   });
   view.render();
   await new Promise(resolve=>setImmediate(resolve));
-  assert.match(elements.get('match-detail').innerHTML,/Camera/);
+  assert.match(elements.get('match-page-top').innerHTML,/Camera/);
   return {elements,messages};
 }
 

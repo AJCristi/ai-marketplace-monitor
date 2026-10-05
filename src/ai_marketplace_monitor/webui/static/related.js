@@ -1,8 +1,8 @@
-import {safeUrl} from './console-model.js';
+import {safeUrl, matchPhotoUrl} from './console-model.js';
 
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const labels={reused_photo:'Reused photo',possible_same_item:'Possibly the same item',matching_plate:'Matching plate'};
-const photo=row=>safeUrl(row.image)?`<img src="${esc(safeUrl(row.image))}" alt="${esc(row.title||'Listing photo')}" loading="lazy" referrerpolicy="no-referrer">`:'<span>No photo available</span>';
+const photo=row=>matchPhotoUrl(row)?`<img src="${esc(matchPhotoUrl(row))}" alt="${esc(row.title||'Listing photo')}" loading="lazy" referrerpolicy="no-referrer">`:'<span>Saved photo unavailable</span>';
 export function relatedHtml(row,data={}) {
   const running=['queued','running'].includes(data.job?.state), check=data.last_check;
   const failed=check&&['error','skipped'].includes(check.status);

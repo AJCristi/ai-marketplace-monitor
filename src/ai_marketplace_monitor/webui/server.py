@@ -41,6 +41,7 @@ from fastapi.staticfiles import StaticFiles
 from .. import __version__
 from ..image_matching import ImageMatcher
 from ..matches import library, load_matches, query_matches, update_state
+from ..photos import source_hash
 from ..recheck import RecheckQueue
 from ..utils import cache
 from .auth import (
@@ -586,6 +587,46 @@ def create_app(
             raise HTTPException(status_code=404, detail="Match not found")
         return rows
 
+    @app.get("/api/matches/{marketplace}/{listing_id}/detail")
+    def match_detail(
+        marketplace: str,
+        listing_id: str,
+        item: str,
+        _: str = Depends(require_session),
+    ) -> Dict[str, Any]:
+        row = next(
+            (row for row in require_match(marketplace, listing_id) if row["item"] == item), None
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Match not found for this search")
+        return row
+
+    @app.get("/api/matches/{marketplace}/{listing_id}/photos/{digest}.webp")
+    def match_photo(
+        marketplace: str,
+        listing_id: str,
+        digest: str,
+        request: Request,
+        _: str = Depends(require_session),
+    ) -> Response:
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise HTTPException(status_code=404, detail="Photo not found")
+        with library(cache) as store:
+            photo = store.db.execute(
+                "SELECT data FROM photos WHERE marketplace=? AND listing_id=? AND digest=?",
+                (marketplace, listing_id, digest),
+            ).fetchone()
+        if photo is None:
+            raise HTTPException(status_code=404, detail="Photo not found")
+        headers = {
+            "ETag": f'"{digest}"',
+            "Cache-Control": "private, no-cache",
+            "X-Content-Type-Options": "nosniff",
+        }
+        if request.headers.get("if-none-match") == headers["ETag"]:
+            return Response(status_code=304, headers=headers)
+        return Response(content=photo[0], media_type="image/webp", headers=headers)
+
     @app.get("/api/matches/{marketplace}/{listing_id}/history")
     def match_history(
         marketplace: str,
@@ -624,7 +665,21 @@ def create_app(
         marketplace: str, listing_id: str, _: str = Depends(require_session)
     ) -> Dict[str, Any]:
         row = require_match(marketplace, listing_id)[0]
-        return image_matcher().status(row)
+        result = image_matcher().status(row)
+        with library(cache) as store:
+            for pair in result.get("related", []):
+                for key in ("source", "other"):
+                    snapshot = pair.get(key, {})
+                    photo = store.db.execute(
+                        "SELECT digest FROM photo_sources WHERE marketplace=? AND listing_id=? AND source_hash=?",
+                        (
+                            snapshot.get("marketplace"),
+                            snapshot.get("listing_id"),
+                            source_hash(snapshot.get("image") or ""),
+                        ),
+                    ).fetchone()
+                    pair[key] = {**snapshot, "photos": [{"digest": photo[0]}] if photo else []}
+        return result
 
     @app.post("/api/matches/{marketplace}/{listing_id}/related")
     def find_related(

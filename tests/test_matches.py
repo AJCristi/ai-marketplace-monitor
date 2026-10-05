@@ -558,10 +558,30 @@ def test_api_auth_validation_and_persistence(
         )
     )
     url = f"/api/matches/facebook/{listing.id}/state"
+    digest = "a" * 64
+    photo_url = f"/api/matches/facebook/{listing.id}/photos/{digest}.webp"
+    detail_url = f"/api/matches/facebook/{listing.id}/detail?item=test"
+    with library(match_cache) as store:
+        store.save_photo("facebook", listing.id, "source", digest, b"synthetic photo")
     assert client.get("/api/matches").status_code == 401
     assert client.get("/api/matches.csv").status_code == 401
     assert client.get(f"/api/matches/facebook/{listing.id}/history").status_code == 401
+    assert client.get(detail_url).status_code == 401
+    assert client.get(photo_url, headers={"If-None-Match": f'"{digest}"'}).status_code == 401
     client.post("/api/login", data={"username": "test", "password": "synthetic-password"})
+    photo = client.get(photo_url)
+    assert photo.content == b"synthetic photo"
+    assert photo.headers["content-type"] == "image/webp"
+    assert photo.headers["cache-control"] == "private, no-cache"
+    assert (
+        client.get(photo_url, headers={"If-None-Match": photo.headers["etag"]}).status_code == 304
+    )
+    assert client.get(photo_url.replace(digest, "invalid")).status_code == 404
+    assert client.get(photo_url.replace(digest, "b" * 64)).status_code == 404
+    saved_photos = client.get(detail_url).json()["photos"]
+    assert len(saved_photos) == 1 and saved_photos[0]["digest"] == digest
+    assert set(saved_photos[0]) == {"digest", "saved_at"}
+    assert client.get(detail_url.replace("item=test", "item=missing")).status_code == 404
     assert client.put(url, json={"shortlisted": True}).status_code == 403
     headers = {CSRF_HEADER: client.cookies["aimm_csrf"]}
     assert client.put(url, json={"shortlisted": "yes"}, headers=headers).status_code == 400
@@ -762,7 +782,7 @@ def test_price_number_does_not_strip_ambiguous_units(price: str) -> None:
     assert price_number(price) == float("inf")
 
 
-@pytest.mark.parametrize("work_kind", ["recheck", "image"])
+@pytest.mark.parametrize("work_kind", ["recheck", "image", "photo"])
 def test_due_search_precedes_background_work(
     monkeypatch: pytest.MonkeyPatch, work_kind: str
 ) -> None:
@@ -813,6 +833,14 @@ def test_due_search_precedes_background_work(
         raise RuntimeError("safe point reached")
 
     monitor.image_matcher.process = image_check
+
+    def photo() -> bool:
+        if work_kind == "photo":
+            events.append("photo")
+            raise RuntimeError("safe point reached")
+        return False
+
+    monitor.process_photo = photo
     with pytest.raises(RuntimeError, match="safe point reached"):
         monitor.start_monitor()
     assert events == ["initial search", "due search", work_kind]

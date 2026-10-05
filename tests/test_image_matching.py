@@ -335,7 +335,7 @@ def test_download_redirect_revalidated(monkeypatch: pytest.MonkeyPatch) -> None:
     reply.__enter__ = Mock(return_value=reply)
     reply.__exit__ = Mock(return_value=False)
     get = Mock(return_value=reply)
-    monkeypatch.setattr("ai_marketplace_monitor.image_matching.requests.get", get)
+    monkeypatch.setattr("ai_marketplace_monitor.photos.requests.get", get)
     with pytest.raises(ValueError, match="supported Facebook"):
         download_image("https://scontent.fbcdn.net/a")
     assert get.call_count == 1

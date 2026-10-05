@@ -18,14 +18,15 @@ class MatchStore:
         self.db = sqlite3.connect(path, timeout=10)
         self.db.row_factory = sqlite3.Row
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1):
+        if version not in (0, 1, 2):
             self.db.close()
             raise RuntimeError("The Matches library requires a newer application version")
-        if version == 1:
+        if version == 2:
             return
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(
             """
+            BEGIN IMMEDIATE;
             CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS listings (
                 marketplace TEXT, listing_id TEXT, data TEXT NOT NULL,
@@ -41,7 +42,15 @@ class MatchStore:
                 id INTEGER PRIMARY KEY, marketplace TEXT, listing_id TEXT,
                 at TEXT NOT NULL, kind TEXT NOT NULL, item TEXT, data TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS history_listing ON history(marketplace, listing_id, id);
-            PRAGMA user_version=1;
+            CREATE TABLE IF NOT EXISTS photos (
+                marketplace TEXT, listing_id TEXT, digest TEXT, position INTEGER NOT NULL,
+                data BLOB NOT NULL, saved_at TEXT NOT NULL,
+                PRIMARY KEY (marketplace, listing_id, digest));
+            CREATE TABLE IF NOT EXISTS photo_sources (
+                marketplace TEXT, listing_id TEXT, source_hash TEXT, digest TEXT NOT NULL,
+                PRIMARY KEY (marketplace, listing_id, source_hash));
+            PRAGMA user_version=2;
+            COMMIT;
         """
         )
 
@@ -65,6 +74,30 @@ class MatchStore:
             "SELECT data FROM listings WHERE marketplace=? AND listing_id=?", (market, listing_id)
         ).fetchone()
         return json.loads(row[0]) if row else None
+
+    def photos(self, market: str, listing_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.db.execute(
+                "SELECT digest,saved_at FROM photos WHERE marketplace=? AND listing_id=? "
+                "ORDER BY position,digest",
+                (market, listing_id),
+            )
+        ]
+
+    def save_photo(
+        self, market: str, listing_id: str, source_hash: str, digest: str, data: bytes
+    ) -> None:
+        self.db.execute(
+            "INSERT OR IGNORE INTO photos SELECT ?,?,?,COALESCE(MAX(position)+1,0),?,? "
+            "FROM photos WHERE marketplace=? AND listing_id=?",
+            (market, listing_id, digest, data, now(), market, listing_id),
+        )
+        self.db.execute(
+            "INSERT INTO photo_sources VALUES (?,?,?,?) ON CONFLICT(marketplace,listing_id,"
+            "source_hash) DO UPDATE SET digest=excluded.digest",
+            (market, listing_id, source_hash, digest),
+        )
 
     def save_listing(self, market: str, listing_id: str, data: dict[str, Any]) -> None:
         self.db.execute(
@@ -119,7 +152,7 @@ class MatchStore:
             if key in ("title", "price", "description") and value and value != saved.get(key)
         }
         # Empty summary fields cannot erase a previously collected detail snapshot.
-        saved.update({key: value for key, value in fields.items() if value not in (None, "")})
+        saved.update({key: value for key, value in fields.items() if value not in (None, "", [])})
         self.save_listing(market, listing_id, saved)
         if changes:
             self.event(market, listing_id, "changed", None, {"source": source, "changes": changes})

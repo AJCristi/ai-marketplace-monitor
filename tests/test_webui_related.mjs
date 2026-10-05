@@ -72,3 +72,12 @@ test('review writes identify the connection and preserve the chosen review state
   assert.equal(write.url,'/api/matches/facebook/one/related/abc');
   assert.equal(write.options.method,'PUT');assert.deepEqual(JSON.parse(write.options.body),{review:'confirmed'});
 });
+
+
+test('related photos use the archived snapshot and never render remote CDN sources',()=>{
+  const snapshot={...row,photos:[{digest:'a'.repeat(64)}]};
+  const html=relatedHtml(row,{related:[{pair_id:'test',source:snapshot,other:{...snapshot,listing_id:'two'}}]});
+  assert.match(html,/src="\/api\/matches\/facebook\/one\/photos\/a{64}\.webp"/);
+  assert.match(html,/src="\/api\/matches\/facebook\/two\/photos\/a{64}\.webp"/);
+  assert.doesNotMatch(html,/fbcdn/);
+});
