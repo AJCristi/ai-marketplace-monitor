@@ -1317,7 +1317,19 @@ class FacebookAutoItemWithDescriptionPage(FacebookAutoItemWithAboutAndDescriptio
                     # find the an array of elements
                     lambda y: len(y) > 2,
                     # and return the texts.
-                    lambda y: f"""\n\n{self.translator("Seller's description")}\n\n{y[1].text_content() or self.translator("**unspecified**")}""",
+                    lambda y: "\n\n"
+                    + self.translator("Seller's description")
+                    + "\n\n"
+                    + "\n".join(
+                        element.text_content() or self.translator("**unspecified**")
+                        for element in (
+                            y[1:2]
+                            if y[0].query_selector(
+                                f'span:text-is("{self.translator("Condition")}")'
+                            )
+                            else y[:2]
+                        )
+                    ),
                 ),
             )
         except KeyboardInterrupt:
@@ -1347,7 +1359,13 @@ class FacebookAutoItemWithDescriptionPage(FacebookAutoItemWithAboutAndDescriptio
                     # find the an array of elements
                     lambda y: len(y) > 2,
                     # and return the texts after seller's description.
-                    lambda y: y[0].text_content() or self.translator("**unspecified**"),
+                    # Some vehicle layouts omit Condition; the first child is then
+                    # seller prose, which belongs in the description instead.
+                    lambda y: (
+                        (y[0].text_content() or "")
+                        if y[0].query_selector(f'span:text-is("{self.translator("Condition")}")')
+                        else self.translator("**unspecified**")
+                    ),
                 ),
             )
             if res.startswith(self.translator("Condition")):

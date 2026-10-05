@@ -22,6 +22,7 @@ from ai_marketplace_monitor.matches import (
     library,
     load_matches,
     price_dropped,
+    price_number,
     query_matches,
     record_delivery,
     record_failed_rating,
@@ -104,6 +105,21 @@ def test_durable_sightings_states_and_history(match_cache: Cache, listing: Listi
             second = store.history("facebook", listing.id, first["next_cursor"], 1)
             assert second["events"][0]["kind"] == "matched"
             assert second["next_cursor"] is None
+
+
+def test_legacy_vehicle_prose_is_presented_as_description_without_rewriting_storage(
+    match_cache: Cache, listing: Listing
+) -> None:
+    prose = "Complete motorcycle with service records and original paperwork. " * 3
+    listing.condition = prose
+    listing.description = "Seller's description\n\n**unspecified**"
+    record_match(match_cache, listing, "test", AIResponse(4, "good"))
+    row = load_matches(match_cache)[0]
+    assert row["condition"] == ""
+    assert row["description"] == prose
+    with library(match_cache) as store:
+        original = store.listing("facebook", listing.id)
+        assert original is not None and original["condition"] == prose
 
 
 def test_migration_rollback_and_retry_preserves_sources(
@@ -714,6 +730,36 @@ def test_new_badges_and_manual_groups(match_cache: Cache, listing: Listing) -> N
         query_matches(match_cache, since=datetime(2100, 1, 1, tzinfo=timezone.utc))["new_count"]
         == 0
     )
+
+
+def test_filtered_group_counts_cover_all_pages_and_deduplicate(
+    match_cache: Cache, listing: Listing
+) -> None:
+    record_match(match_cache, listing, "test", AIResponse(5, "good"))
+    record_match(match_cache, listing, "other", AIResponse(5, "good"))
+    update_state(match_cache, "facebook", listing.id, {"filed_under": ["other"]})
+    second = dataclasses.replace(listing, id="222", title="Another listing")
+    record_match(match_cache, second, "test", AIResponse(3, "fair"))
+    result = query_matches(match_cache, min_score=5, limit=1)
+    assert result["total"] == 2
+    assert result["filtered_groups"] == [
+        {"item": "other", "count": 1},
+        {"item": "test", "count": 1},
+    ]
+    assert next(group for group in result["groups"] if group["item"] == "test")["count"] == 2
+    assert query_matches(match_cache, q="not present")["filtered_groups"] == []
+    update_state(match_cache, "facebook", listing.id, {"dismissed": True})
+    assert query_matches(match_cache, status="dismissed")["filtered_groups"] == [
+        {"item": "other", "count": 1},
+        {"item": "test", "count": 1},
+    ]
+
+
+@pytest.mark.parametrize(
+    "price", ["PHP225K", "PHP200 | PHP210", "$100-$200", "-10", "1,5", "100 negotiable"]
+)
+def test_price_number_does_not_strip_ambiguous_units(price: str) -> None:
+    assert price_number(price) == float("inf")
 
 
 @pytest.mark.parametrize("work_kind", ["recheck", "image"])

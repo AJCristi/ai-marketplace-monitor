@@ -14,6 +14,10 @@ Filter by search, rating, status, price drops or text, and group by search or da
 **Price dropped** shows known current prices below the previous re-check price
 (or the price when first found if there is no previous re-check price).
 Filters stay in the URL, for example `#/monitor/matches?item=office_chair`.
+Group counts and group re-checks respect the active filters. **Listed price ↑**
+uses the amount written in the listing, without guessing missing thousands or
+substituting AI estimates. Confirm shorthand or placeholder prices with the seller;
+compound and unrecognized price formats sort last and cannot indicate a price drop.
 This browser remembers your filters, sorting and grouping when you return to
 Matches. A URL with explicit filters takes precedence. **Clear filters** resets
 the search, rating, status, price-drop and text filters while keeping sorting and grouping.
@@ -76,6 +80,9 @@ wait 5–15 seconds between listing checks. A due scheduled search runs first. S
 finishes the current listing before stopping the job. Browser reloads recover
 pending job progress; restarting the monitor process discards pending jobs.
 Match records and saved personal states survive process restarts.
+Older vehicle records with seller prose incorrectly stored as Condition are displayed
+with that prose under Description when the old parser's missing-description pattern
+is recognized. Original stored records and history remain unchanged.
 
 Failed re-checks leave the original match in the library. The current Facebook
 parser cannot reliably distinguish a removed listing from a parsing/login error,

@@ -264,6 +264,14 @@ def load_matches(local_cache: Cache) -> list[dict[str, Any]]:
         }
         profiles: dict[str, dict[str, Any]] = {}
         for saved in listings.values():
+            # Repair the old vehicle-parser shape in the read view only; preserve history.
+            if (
+                len(saved.get("condition") or "") > 100
+                and (saved.get("description") or "").strip()
+                == "Seller's description\n\n**unspecified**"
+            ):
+                saved["description"] = saved["condition"]
+                saved["condition"] = ""
             evidence = saved.get("seller_profile")
             if isinstance(evidence, dict):
                 url = profile_url(str(evidence.get("profile_url") or ""))
@@ -467,7 +475,12 @@ def load_legacy_matches(local_cache: Cache) -> list[dict[str, Any]]:
 
 def price_number(value: Any) -> float:
     """Unknown or compound prices sort last; do not guess a price for them."""
-    match = re.fullmatch(r"[^\d]*([\d,]+(?:\.\d+)?)[^\d]*", str(value or ""))
+    match = re.fullmatch(
+        r"\s*(?:[A-Z]{3}|[$£€₱¥])?\s*((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)"
+        r"\s*(?:[A-Z]{3}|[$£€₱¥])?\s*",
+        str(value or ""),
+        re.IGNORECASE,
+    )
     return float(match[1].replace(",", "")) if match else float("inf")
 
 
@@ -542,6 +555,11 @@ def query_matches(
             ).casefold()
         )
     ]
+    filtered_groups: dict[str, set[str]] = {}
+    for row in rows:
+        for name in row["filed_under"]:
+            if not item or name == item:
+                filtered_groups.setdefault(name, set()).add(row["key"])
     rows.sort(key=lambda row: (row["found_at"], row["key"], row["item"]), reverse=True)
     if sort == "price":
         rows.sort(key=lambda row: price_number(row["current_price"] or row["price"]))
@@ -555,6 +573,9 @@ def query_matches(
         "library_total": counts["all"],
         "new_count": new_count,
         "counts": counts,
+        "filtered_groups": [
+            {"item": name, "count": len(keys)} for name, keys in sorted(filtered_groups.items())
+        ],
         "groups": [
             {"item": name, "count": count, "new_since": new_groups.get(name, 0)}
             for name, count in sorted(groups.items())

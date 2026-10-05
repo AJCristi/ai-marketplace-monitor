@@ -4,7 +4,11 @@ from pathlib import Path
 import pytest
 from pytest_playwright.pytest_playwright import CreateContextCallback  # type: ignore
 
-from ai_marketplace_monitor.facebook import FacebookSearchResultPage, parse_listing
+from ai_marketplace_monitor.facebook import (
+    FacebookAutoItemWithDescriptionPage,
+    FacebookSearchResultPage,
+    parse_listing,
+)
 
 
 def test_search_page(
@@ -77,3 +81,31 @@ def test_listing_page(
     assert listing.seller == seller, f"Seller of {filename} should be {listing.seller}"
     assert listing.image, f"Image of {filename} should not be empty"
     assert listing.post_url, f"post_url of {filename} should not be empty"
+
+
+@pytest.mark.parametrize(
+    "detail,body,condition",
+    [
+        (
+            "<span>Condition</span><span>Used - Good</span>",
+            "Motorcycle for sale. Complete papers.",
+            "Used - Good",
+        ),
+        ("Well maintained motorcycle, serviced regularly.", "", "**unspecified**"),
+    ],
+)
+def test_vehicle_condition_requires_label(
+    new_context: CreateContextCallback, detail: str, body: str, condition: str
+) -> None:
+    page = new_context(java_script_enabled=False).new_page()
+    page.set_content(
+        "<section><h2><span>Seller's description</span></h2><div><div>"
+        f"<div>{detail}</div><div>{body}</div>"
+        "<div>See translation</div></div></div></section>"
+    )
+    listing = FacebookAutoItemWithDescriptionPage(page)
+    assert listing.get_condition() == condition
+    if condition == "**unspecified**":
+        assert detail in listing.get_description()
+    else:
+        assert body in listing.get_description()

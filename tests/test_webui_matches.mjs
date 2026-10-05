@@ -28,6 +28,10 @@ test('missing dates and prices are not invented',()=>{
   assert.equal(priceDropped({price:'$100',current_price:'$80',recheck:{old_price:'$70'}}),false);
   assert.equal(priceDropped({price:'$100',current_price:'$80',recheck:{old_price:'$90'}}),true);
   assert.equal(priceDropped({price:'$100–$200',current_price:'$80'}),false);
+  assert.equal(priceDropped({price:'PHP 300,000',current_price:'PHP225k'}),false);
+  assert.equal(priceDropped({price:'$300,000',current_price:'$225 down payment'}),false);
+  assert.equal(priceDropped({price:'$300',current_price:'$2,25'}),false);
+  assert.equal(priceDropped({price:'PHP 300,000',current_price:'225,000 PHP'}),true);
 });
 test('live below-threshold results update even when the active rating filter hides them from the API',()=>{
   const rows=[row('fb:1','camera',{marketplace:'fb',listing_id:'1',score:5})];
@@ -37,27 +41,30 @@ test('live below-threshold results update even when the active rating filter hid
   assert.equal(applyRecheckResult(rows,{marketplace:'fb',listing_id:'1',original_item:'camera',item:'other',status:'passed',score:3})[0].score,5);
 });
 
-function viewHarness(t,{route='#/monitor/matches',saved='',matches=[],storageFails=false,storageReadOnly=false}={}) {
+function viewHarness(t,{route='#/monitor/matches',saved='',matches=[],groups,filteredGroups,respond,storageFails=false,storageReadOnly=false}={}) {
   const nodes=new Map(), controls=[], timers=new Map(), stored=new Map([['aimm-matches-view',saved]]), requests=[], exports=[];
   let timerId=0;
   const decode=value=>value.replaceAll('&amp;','&').replaceAll('&quot;','"').replaceAll('&#39;',"'").replaceAll('&lt;','<').replaceAll('&gt;','>');
   function element(id='',attributes='') {
-    return {id,dataset:{},hidden:/\bhidden\b/.test(attributes),disabled:/\bdisabled\b/.test(attributes),value:decode(attributes.match(/value="([^"]*)"/)?.[1]||''),textContent:'',
+    return {id,dataset:{},isConnected:true,hidden:/\bhidden\b/.test(attributes),disabled:/\bdisabled\b/.test(attributes),value:decode(attributes.match(/value="([^"]*)"/)?.[1]||''),textContent:'',
+      querySelectorAll(){return [];},querySelector(selector){return selector==='ol'?{insertAdjacentHTML(){}}:null;},
       setAttribute(){},hasAttribute(){return false;},addEventListener(name,fn){this['on'+name]=fn;},focus(){this.focused=true;},scrollIntoView(){},
       get innerHTML(){return this.html||'';},set innerHTML(html){this.html=html;if(id==='pane'){nodes.clear();nodes.set('pane',this);controls.length=0;}
-        for(const match of html.matchAll(/<(?:button|input|select|div|span|aside)\b([^>]*)>/g)){
+        for(const match of html.matchAll(/<(?:button|input|select|div|span|aside|details)\b([^>]*)>/g)){
           const attributes=match[1], childId=attributes.match(/\bid="([^"]+)"/)?.[1], filter=attributes.match(/data-match-filter="([^"]+)"/)?.[1], status=attributes.match(/data-match-status="([^"]+)"/)?.[1];
-          if(!childId&&!filter&&!status)continue;const child=element(childId,attributes);
+          const recheck=attributes.match(/data-recheck-group="([^"]+)"/)?.[1];
+          if(!childId&&!filter&&!status&&!recheck)continue;const child=element(childId,attributes);
+          if(recheck){child.dataset.recheckGroup=decode(recheck);nodes.set('recheck-group-'+recheck,child);}
           if(childId)nodes.set(childId,child);if(filter)child.dataset.matchFilter=filter;if(status)child.dataset.matchStatus=status;if(filter||status)controls.push(child);
         }
       }};
   }
   nodes.set('pane',element('pane'));
   const storage={getItem(key){if(storageFails)throw new Error('Storage blocked');return stored.get(key)||null;},setItem(key,value){if(storageFails||storageReadOnly)throw new Error('Storage full');stored.set(key,value);},removeItem(key){stored.delete(key);}};
-  const globals={document:{querySelector:selector=>nodes.get(selector.slice(1))||null,querySelectorAll:selector=>selector==='[data-match-filter]'?controls.filter(el=>el.dataset.matchFilter):selector==='[data-match-status]'?controls.filter(el=>el.dataset.matchStatus):[],getElementById:id=>nodes.get(id)},localStorage:storage,sessionStorage:{...storage,getItem:()=>null},history:{replaceState(){}},setInterval:()=>0,setTimeout:fn=>{timers.set(++timerId,fn);return timerId;},clearTimeout:id=>timers.delete(id)};
+  const globals={document:{querySelector:selector=>nodes.get(selector.slice(1))||null,querySelectorAll:selector=>selector==='[data-match-filter]'?controls.filter(el=>el.dataset.matchFilter):selector==='[data-match-status]'?controls.filter(el=>el.dataset.matchStatus):selector==='[data-recheck-group]'?[...nodes.values()].filter(el=>el.dataset.recheckGroup):[],getElementById:id=>nodes.get(id)},localStorage:storage,sessionStorage:{...storage,getItem:()=>null},history:{replaceState(){}},setInterval:()=>0,setTimeout:fn=>{timers.set(++timerId,fn);return timerId;},clearTimeout:id=>timers.delete(id)};
   for(const [key,value] of Object.entries(globals)){const original=Object.getOwnPropertyDescriptor(globalThis,key);Object.defineProperty(globalThis,key,{value,configurable:true,writable:true});t.after(()=>{if(original)Object.defineProperty(globalThis,key,original);else delete globalThis[key];});}
   const state={route,config:{item:{camera:{},gear:{}}},records:[],status:{}};
-  const view=createMatchesView({state,json:async url=>{requests.push(url);return {matches,counts:{all:matches.length},groups:[{item:'camera',count:matches.length}]};},pageHeader:(_title,_description,actions)=>actions,exportCsv:options=>exports.push(options),toast(){},renderSidebar(){},searchSummary:()=>''});
+  const view=createMatchesView({state,json:async (url,options)=>{requests.push(url);return respond?.(url,options)??{matches,counts:{all:matches.length},groups:groups??[{item:'camera',count:matches.length}],filtered_groups:filteredGroups??[{item:'camera',count:matches.length}]};},pageHeader:(_title,_description,actions)=>actions,exportCsv:options=>exports.push(options),toast(){},renderSidebar(){},searchSummary:()=>''});
   return {state,view,stored,requests,exports,node:id=>nodes.get(id),filter:(name,value)=>{const control=controls.find(el=>el.dataset.matchFilter===name);control.value=value;control.onchange();},status:name=>controls.find(el=>el.dataset.matchStatus===name).onclick(),flush:async()=>{await Promise.resolve();},tick:async()=>{const pending=[...timers.values()];timers.clear();pending.forEach(fn=>fn());await Promise.resolve();}};
 }
 
@@ -182,4 +189,39 @@ test('seller assessment appears separately with escaped reasons and safe profile
   delete listing.seller_assessment;h.view.render();await h.flush();
   detail=h.node('match-detail').innerHTML;
   assert.match(detail,/Seller: Unknown/);assert.match(detail,/Re-check this listing/);
+});
+
+test('History remains interactive after Related listings is mounted',async t=>{
+  const listing=row('fb:1','camera',{marketplace:'fb',listing_id:'1',state:{filed_under:[]},notified_users:[]});
+  const h=viewHarness(t,{matches:[listing],respond:url=>url.includes('/history?')?{events:[]}:undefined});
+  h.view.render();await h.flush();
+  assert.ok(h.node('related-listings'));
+  const history=h.node('match-history');
+  assert.equal(typeof history.ontoggle,'function');
+  history.open=true;history.ontoggle();await h.flush();
+  assert.ok(h.requests.includes('/api/matches/fb/1/history?cursor=0'));
+  assert.equal(h.node('match-history-body').textContent,'No history recorded yet.');
+});
+
+test('group counts and re-check scope honor all filters without changing sidebar totals',async t=>{
+  const listing=row('fb:1','camera',{state:{filed_under:[]},notified_users:[]});
+  const h=viewHarness(t,{route:'#/monitor/matches?item=camera&min_score=4&status=shortlisted&include_dismissed=true&price_drop=true&q=lens&sort=price&group=search&cursor=old',matches:[listing],groups:[{item:'camera',count:9}],filteredGroups:[{item:'camera',count:1}]});
+  h.view.render();await h.flush();
+  assert.match(h.node('matches-body').innerHTML,/1 matches/);
+  assert.match(h.node('matches-body').innerHTML,/↻ Re-check 1</);
+  assert.equal(h.state.matchSummary.groups[0].count,9);
+  h.node('recheck-group-camera').onclick();
+  const params=new URL(h.requests.at(-1),'http://localhost').searchParams;
+  assert.deepEqual(Object.fromEntries(params),{item:'camera',min_score:'4',status:'shortlisted',include_dismissed:'true',price_drop:'true',q:'lens',sort:'newest',limit:'25'});
+  await h.flush();
+});
+
+test('AI emphasis markers are removed while comments remain escaped plain text',async t=>{
+  const listing=row('fb:1','camera',{score:4,comment:'**Good value** with <img src=x> and 2 * 3',state:{filed_under:[]},notified_users:[]});
+  const h=viewHarness(t,{matches:[listing]});h.view.render();await h.flush();
+  for(const id of ['matches-body','match-detail']){
+    const html=h.node(id).innerHTML;
+    assert.match(html,/Good value with &lt;img src=x&gt; and 2 \* 3/);
+    assert.doesNotMatch(html,/\*\*Good value\*\*|<img src=x>/);
+  }
 });

@@ -27,7 +27,7 @@ async function detailView(t, url, clipboard) {
   const row={key:'fb:1',item:'camera',url,title:'Camera',filed_under:[],notified_users:[],state:{filed_under:[]}};
   const view=createMatchesView({
     state:{route:'#/monitor/matches',config:{item:{camera:{}}},records:[],status:{}},
-    json:async()=>({matches:[row],counts:{all:1},groups:[{item:'camera',count:1}]}),
+    json:async()=>({matches:[row],counts:{all:1},groups:[{item:'camera',count:1}],filtered_groups:[{item:'camera',count:1}]}),
     pageHeader:(_title,_description,actions)=>actions,exportCsv(){},toast:message=>messages.push(message),renderSidebar(){},searchSummary:()=>'',
   });
   view.render();
