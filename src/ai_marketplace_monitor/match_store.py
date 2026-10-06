@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -11,6 +12,20 @@ from typing import Any
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def source_hash(url: str) -> str:
+    return hashlib.sha256(url.encode()).hexdigest()
+
+
+def photo_urls(row: dict[str, Any]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            url
+            for url in (row.get("image_urls") or [row.get("image")])
+            if isinstance(url, str) and url
+        )
+    )
 
 
 class MatchStore:

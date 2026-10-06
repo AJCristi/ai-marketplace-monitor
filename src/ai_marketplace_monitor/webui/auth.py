@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import os
 import secrets
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Dict, Tuple
 
 import bcrypt
@@ -21,14 +19,6 @@ _LOCKOUT_THRESHOLD = 5
 _LOCKOUT_WINDOW = 60  # seconds
 
 
-def generate_password(length: int = 20) -> str:
-    """Generate a random user-friendly password (4 groups of 4 chars)."""
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"
-    chars = "".join(secrets.choice(alphabet) for _ in range(length))
-    # Split into groups of 4 for readability.
-    return "-".join(chars[i : i + 4] for i in range(0, length, 4))
-
-
 def hash_password(password: str) -> str:
     # bcrypt truncates at 72 bytes; reject overly long inputs at the API
     # layer rather than silently truncating, but allow generous lengths here.
@@ -40,23 +30,6 @@ def verify_password(password: str, hashed: str) -> bool:
         return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
     except (ValueError, TypeError):
         return False
-
-
-def write_password_file(path: Path, hashed: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(hashed + "\n", encoding="utf-8")
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        # Windows / unusual filesystems — best effort.
-        pass
-
-
-def read_password_file(path: Path) -> str | None:
-    if not path.exists():
-        return None
-    content = path.read_text(encoding="utf-8").strip()
-    return content or None
 
 
 @dataclass

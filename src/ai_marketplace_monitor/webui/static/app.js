@@ -1,10 +1,9 @@
 import initToml, {parse, edit} from './vendor/toml-edit-js/shims.js';
 import {FORM_SCHEMAS, BUILT_IN_REGIONS} from './fields.js';
 import {createMatchesView} from './matches.js';
-import {list, own, filled, mergeConfig, itemValue, marketplaceFor, scheduleLabel, CHANNELS, userChannels, resolvedUser, available, matchRecord, mergeRecords, safeUrl, renameSection} from './console-model.js';
+import {list, own, filled, mergeConfig, itemValue, marketplaceFor, scheduleLabel, CHANNELS, userChannels, resolvedUser, available, matchRecord, mergeRecords, safeUrl, renameSection, esc} from './console-model.js';
 
 const $ = selector => document.querySelector(selector);
-const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const time = epoch => new Date(epoch * 1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',hour12:false});
 const labelValue = value => Array.isArray(value) ? value.join(', ') : value === undefined ? 'none' : String(value);
 const itemRoute = name => '#/monitor/item/' + encodeURIComponent(name);

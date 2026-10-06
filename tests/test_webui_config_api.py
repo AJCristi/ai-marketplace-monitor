@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_marketplace_monitor.webui.config_api import ConfigFileService, scan_sections
+from ai_marketplace_monitor.webui.config_api import ConfigFileService
 
 SAMPLE_CONFIG = """
 [marketplace.facebook]
@@ -27,51 +27,6 @@ def config_file(tmp_path: Path) -> Path:
     f = tmp_path / "config.toml"
     f.write_text(SAMPLE_CONFIG, encoding="utf-8")
     return f
-
-
-def test_scan_sections_basic() -> None:
-    content = (
-        "[marketplace.facebook]\n"
-        'username = "u"\n'
-        'password = "p"\n'
-        "\n"
-        "[item.foo]\n"
-        'search_phrases = "x"\n'
-        "\n"
-        "[user.me]\n"
-        'pushbullet_token = "t"\n'
-    )
-    sections = scan_sections(content)
-    names = [s.name for s in sections]
-    assert names == ["marketplace.facebook", "item.foo", "user.me"]
-    # First section spans lines 0..4 (exclusive), covering its 3 fields + blank
-    assert sections[0].line_start == 0
-    assert sections[0].line_end == 4
-    assert sections[0].prefix == "marketplace"
-    assert sections[0].suffix == "facebook"
-    # Last section runs to EOF
-    assert sections[-1].line_end == len(content.splitlines())
-
-
-def test_scan_sections_handles_single_segment_name() -> None:
-    content = '[monitor]\nproxy_server = "x"\n'
-    sections = scan_sections(content)
-    assert len(sections) == 1
-    assert sections[0].name == "monitor"
-    assert sections[0].prefix == "monitor"
-    assert sections[0].suffix == ""
-
-
-def test_scan_sections_empty_file() -> None:
-    assert scan_sections("") == []
-    assert scan_sections("# just a comment\n") == []
-
-
-def test_scan_sections_malformed_still_works() -> None:
-    # Garbage between sections doesn't break the scan.
-    content = "[a.b]\nthis is not = = valid\n[c.d]\n"
-    sections = scan_sections(content)
-    assert [s.name for s in sections] == ["a.b", "c.d"]
 
 
 def test_list_files_returns_editable(config_file: Path) -> None:

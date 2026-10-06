@@ -132,19 +132,12 @@ def test_migration_rollback_and_retry_preserves_sources(
     from ai_marketplace_monitor.match_store import MatchStore
 
     listing.to_cache(listing.post_url, match_cache)
-    match_cache.set(
-        ("matches", "facebook", listing.id, "test"),
-        {
-            "found_at": "2025-01-02T10:00:00",
-            "price": "$10",
-            "score": 4,
-        },
-    )
+    match_cache.set(("user-notifications", "facebook", listing.id, "me"), "2025-01-02 10:00:00")
     original = MatchStore.save_match
     monkeypatch.setattr(MatchStore, "save_match", Mock(side_effect=RuntimeError("interrupted")))
     with pytest.raises(RuntimeError, match="interrupted"):
         initialize_library(match_cache)
-    assert match_cache.get(("matches", "facebook", listing.id, "test"))
+    assert match_cache.get(("user-notifications", "facebook", listing.id, "me"))
     monkeypatch.setattr(MatchStore, "save_match", original)
     initialize_library(match_cache)
     update_state(match_cache, "facebook", listing.id, {"contacted": True})
@@ -181,6 +174,7 @@ def test_repeated_search_skips_ai_but_keeps_sighting(
 ) -> None:
     record_match(match_cache, listing, "test", AIResponse(4, "good"), run="initial")
     monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.photo_attempts = set()
     monitor.config = SimpleNamespace(user={"me": SimpleNamespace(enabled=True)})
     monitor.logger = Mock()
     monitor.evaluate_by_ai = Mock(side_effect=AssertionError("No repeated AI call"))
@@ -322,8 +316,7 @@ def test_bounded_join_with_ten_thousand_details(
             detail.to_cache(detail.post_url, match_cache)
             if number < 200:
                 match_cache.set(
-                    ("matches", "facebook", detail.id, "test"),
-                    {"found_at": "2026-01-01T10:00:00", "price": detail.price, "score": 4},
+                    ("user-notifications", "facebook", detail.id, "me"), "2026-01-01 10:00:00"
                 )
     original = found_export._load_lookups
     retained = []
@@ -348,6 +341,7 @@ def test_search_records_before_delivery(
     match_cache: Cache, listing: Listing, monkeypatch: pytest.MonkeyPatch, delivery: str
 ) -> None:
     monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.photo_attempts = set()
     monitor.config = SimpleNamespace(
         user={} if delivery == "none" else {"me": SimpleNamespace(enabled=delivery != "disabled")}
     )
@@ -381,6 +375,7 @@ def test_same_text_different_ids_remain_distinct(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.photo_attempts = set()
     monitor.config = SimpleNamespace(user={})
     monitor.logger = None
     monitor.evaluate_by_ai = Mock(return_value=AIResponse(4, "good"))
@@ -397,6 +392,7 @@ def test_same_text_different_ids_remain_distinct(
 def make_monitor(match_cache: Cache, listing: Listing, monkeypatch: pytest.MonkeyPatch) -> Any:
     record_match(match_cache, listing, "test", AIResponse(5, "original"))
     monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.photo_attempts = set()
     monitor.rechecks = RecheckQueue()
     monitor.logger = Mock()
     monitor.config = SimpleNamespace(
@@ -933,6 +929,7 @@ def test_due_search_precedes_background_work(
     monkeypatch: pytest.MonkeyPatch, work_kind: str
 ) -> None:
     monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.photo_attempts = set()
     monitor.search_requested = threading.Event()
     monitor.rechecks = RecheckQueue()
     if work_kind == "recheck":

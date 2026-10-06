@@ -1,7 +1,6 @@
-import {safeUrl, matchPhotoUrl} from './console-model.js';
+import {safeUrl, matchPhotoUrl, esc} from './console-model.js';
 import {createRelatedView} from './related.js';
 
-const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 export const matchId = row => JSON.stringify([row.key, row.item]);
 export function groupMatches(rows, by = 'search', item = '') {
   const groups = new Map();
@@ -68,8 +67,8 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   let busy=false, refreshTimer=null, filterTimer=null, detailRow=null, photoIndex=0, photoSelection=null, listScroll=0, listWindowScroll=0;
   const dismissedRows=new Map(), pendingStates=new Set();
   let focusDetail=false, loadedView=null;
-  const storage=(store,key,value)=>{try{return value===undefined?store.getItem(key):value===null?store.removeItem(key):store.setItem(key,value);}catch{return null;}};
-  try{cutoff=localStorage.getItem('aimm-matches-seen')||'';}catch{}
+  const storage=(name,key,value)=>{try{const store=globalThis[name];return value===undefined?store.getItem(key):value===null?store.removeItem(key):store.setItem(key,value);}catch{return null;}};
+  cutoff=storage('localStorage','aimm-matches-seen')||'';
   try{for(const id of JSON.parse(sessionStorage.getItem('aimm-recheck-jobs')||'[]'))jobs.set(id,{job_id:id,state:'queued',results:[],done:0,total:0});}catch{}
   const active=()=>state.route.split('?')[0]==='#/monitor/matches'||state.route.startsWith('#/monitor/matches/');
   const detail=()=>state.route.split('?')[0].startsWith('#/monitor/matches/');
@@ -77,10 +76,10 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   const viewKeys=['item','min_score','status','include_dismissed','price_drop','q','sort','group'];
   const viewSignature=()=>JSON.stringify(viewKeys.filter(key=>key!=='group').map(key=>query().get(key)));
   const filters=()=>[...query()].filter(([key,value])=>viewKeys.includes(key)&&!['group','sort'].includes(key)&&value&&!(key==='status'&&value==='all')&&!(['include_dismissed','price_drop'].includes(key)&&value!=='true'));
-  function rememberView(p){try{storage(localStorage,'aimm-matches-view',new URLSearchParams([...p].filter(([key])=>viewKeys.includes(key))).toString());}catch{}}
+  function rememberView(p){storage('localStorage','aimm-matches-view',new URLSearchParams([...p].filter(([key])=>viewKeys.includes(key))).toString());}
   function updateQuery(p){state.route='#/monitor/matches'+(p.size?'?'+p:'');history.replaceState(null,'',state.route);rememberView(p);const clear=$('#matches-clear');if(clear)clear.hidden=!filters().length;}
   const running=()=>[...jobs.values()].some(job=>['queued','running'].includes(job.state));
-  const rememberJobs=()=>{try{storage(sessionStorage,'aimm-recheck-jobs',JSON.stringify([...jobs.values()].filter(job=>['queued','running'].includes(job.state)).map(job=>job.job_id)));}catch{}};
+  const rememberJobs=()=>{storage('sessionStorage','aimm-recheck-jobs',JSON.stringify([...jobs.values()].filter(job=>['queued','running'].includes(job.state)).map(job=>job.job_id)));};
   const params=()=>{const p=query();p.delete('group');p.delete('match_item');p.set('limit','200');if(cutoff)p.set('since',cutoff);return p;};
   function setFilter(name,value){if(!active())return;const p=query();if(value)p.set(name,value);else p.delete(name);p.delete('cursor');updateQuery(p);expanded.clear();dismissedRows.clear();listScroll=0;load();}
   function notify(message, action) {
@@ -88,7 +87,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     if(action){const button=document.createElement('button');button.className='btn';button.textContent='Undo';button.onclick=action;$('#toast').append(' ',button);}
   }
   async function summary(){
-    try{let seen=cutoff;try{seen=storage(localStorage,'aimm-matches-seen')||cutoff;}catch{}const p=new URLSearchParams({limit:'1'});if(seen)p.set('since',seen);const result=await json('/api/matches?'+p);state.matchSummary=result;renderSidebar();}catch{}
+    try{const seen=storage('localStorage','aimm-matches-seen')||cutoff;const p=new URLSearchParams({limit:'1'});if(seen)p.set('since',seen);const result=await json('/api/matches?'+p);state.matchSummary=result;renderSidebar();}catch{}
   }
   async function load(more=false, quiet=false, reuse=false) {
     if(!active())return;
@@ -119,7 +118,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
       if(searchSelect){const names=[...new Set([...Object.keys(state.config.item||{}),...result.groups.map(group=>group.item)])].filter(Boolean);searchSelect.innerHTML='<option value="">All searches</option>'+names.map(name=>`<option value="${esc(name)}">${esc(name)}${Object.hasOwn(state.config.item||{},name)?'':' (removed search)'}</option>`).join('');searchSelect.value=query().get('item')||'';}
       renderSidebar();renderCounts();renderBody();
       if(!detail()&&reuse){const pane=$('#pane');pane.scrollTop=listScroll;if(typeof window!=='undefined')window.scrollTo?.(0,listWindowScroll);}
-      if(!visited){visited=true;try{storage(localStorage,'aimm-matches-seen',new Date().toISOString());}catch{}}
+      if(!visited){visited=true;storage('localStorage','aimm-matches-seen',new Date().toISOString());}
     }catch(err){if(token!==request)return;loading=false;error=err.message;renderBody();}
   }
   function renderCounts(){for(const button of document.querySelectorAll('[data-match-status]')){const name=button.dataset.matchStatus;button.textContent=({all:'All',shortlisted:'★ Shortlist',contacted:'Contacted',dismissed:'Dismissed'})[name]+' '+(data?.counts[name]??'—');}}
@@ -136,13 +135,13 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     detailRow=null;dismissedRows.clear();
     if(restore&&!state.route.includes('?')){
       try{
-        const saved=new URLSearchParams(storage(localStorage,'aimm-matches-view')||''), p=new URLSearchParams([...saved].filter(([key])=>viewKeys.includes(key)));
+        const saved=new URLSearchParams(storage('localStorage','aimm-matches-view')||''), p=new URLSearchParams([...saved].filter(([key])=>viewKeys.includes(key)));
         if(p.has('item')&&!Object.hasOwn(state.config.item||{},p.get('item'))&&!state.matchSummary?.groups?.some(group=>group.item===p.get('item')))p.delete('item');
         for(const [key,values] of Object.entries({status:['all','shortlisted','contacted','dismissed'],min_score:['1','2','3','4','5'],sort:['newest','last_seen','price','score'],group:['search','date','none'],include_dismissed:['true','false'],price_drop:['true','false']}))if(p.has(key)&&!values.includes(p.get(key)))p.delete(key);
         updateQuery(p);
       }catch{}
     }else rememberView(query());
-    try{cutoff=storage(localStorage,'aimm-matches-seen')||'';}catch{}visited=false;
+    cutoff=storage('localStorage','aimm-matches-seen')||'';visited=false;
     const p=query();
     $('#pane').innerHTML=pageHeader('Matches',"Listings from your saved searches and links you add manually.",'<button class="btn p" id="add-listing">Add listing</button><button class="btn" id="export-csv">Export CSV</button>')+
       `<form id="add-listing-form" class="sect" hidden><label class="sm" for="add-listing-url">Facebook Marketplace listing URL</label><div class="row wr"><input class="in gr" id="add-listing-url" type="url" required maxlength="4096" placeholder="https://www.facebook.com/marketplace/item/…" aria-describedby="add-listing-error"><button class="btn p" id="add-listing-submit" type="submit">Save and assess</button></div><p class="err sm" id="add-listing-error" role="alert"></p></form><div class="bar matches-filters"><div class="row wr" role="group" aria-label="Match status">${['all','shortlisted','contacted','dismissed'].map(name=>`<button class="pill" data-match-status="${name}" aria-pressed="${(p.get('status')||'all')===name}">${name}</button>`).join('')}</div>`+

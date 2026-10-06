@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Annotated, Any, Callable, Dict, List
 
 import uvicorn
 from fastapi import (
@@ -41,8 +41,8 @@ from fastapi.staticfiles import StaticFiles
 from .. import __version__
 from ..image_matching import ImageMatcher
 from ..listing import Listing
+from ..match_store import source_hash
 from ..matches import library, load_matches, query_matches, record_manual_listing, update_state
-from ..photos import source_hash
 from ..recheck import RecheckQueue, facebook_listing_id
 from ..utils import cache
 from .auth import (
@@ -114,6 +114,17 @@ class WebUIConfig:
     request_search: Callable[[], None] | None = None
     rechecks: RecheckQueue | None = None
     image_matcher: ImageMatcher | None = None
+
+
+@dataclass
+class MatchFilters:
+    item: str | None = None
+    min_score: int | None = Query(default=None, ge=1, le=5)
+    status: str = Query(default="all", pattern="^(all|shortlisted|contacted|dismissed)$")
+    include_dismissed: bool = False
+    price_drop: bool = False
+    q: str = Query(default="", max_length=500)
+    sort: str = Query(default="newest", pattern="^(newest|last_seen|price|score)$")
 
 
 @dataclass
@@ -209,14 +220,7 @@ def _enumerate_urls(host: str, port: int) -> List[str]:
                         urls.append(f"http://{addr}:{port}")
         except socket.gaierror:
             pass
-        # De-duplicate preserving order.
-        seen: set[str] = set()
-        unique: List[str] = []
-        for url in urls:
-            if url not in seen:
-                seen.add(url)
-                unique.append(url)
-        return unique
+        return list(dict.fromkeys(urls))
     return [f"http://{host}:{port}"]
 
 
@@ -315,12 +319,8 @@ def create_app(
 
     @app.get("/api/status")
     async def status(_: str = Depends(require_session)) -> Dict[str, Any]:
-        files = config_service.list_files()
         return {
-            "config_files": [f.__dict__ for f in files],
             "build": build,
-            "urls": _enumerate_urls(config.host, config.port),
-            "auth_mode": "open" if is_open() else "authenticated",
             "open": is_open(),
             "vnc_enabled": os.environ.get("AIMM_ENABLE_VNC") == "1"
             and Path(os.environ.get("AIMM_NOVNC_DIR", "/usr/share/novnc")).is_dir(),
@@ -345,27 +345,7 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(error)) from None
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e)) from None
-        from .config_api import scan_sections
-        from .secrets_redact import MASK, has_mask
-
-        sections = [
-            {
-                "name": s.name,
-                "prefix": s.prefix,
-                "suffix": s.suffix,
-                "line_start": s.line_start,
-                "line_end": s.line_end,
-                "fields": s.fields,
-            }
-            for s in scan_sections(content)
-        ]
-        return {
-            "content": content,
-            "mtime": mtime,
-            "has_masked_secrets": has_mask(content),
-            "mask_token": MASK,
-            "sections": sections,
-        }
+        return {"content": content, "mtime": mtime}
 
     @app.put("/api/config/file/{file_id}", response_model=None)
     async def put_config_file(
@@ -546,31 +526,13 @@ def create_app(
     # the whole CSV, keeping memory bounded for large exports.
     @app.get("/api/matches")
     def get_matches(
-        item: str | None = None,
-        min_score: int | None = Query(default=None, ge=1, le=5),
-        status: str = Query(default="all", pattern="^(all|shortlisted|contacted|dismissed)$"),
-        include_dismissed: bool = False,
-        price_drop: bool = False,
-        q: str = Query(default="", max_length=500),
-        sort: str = Query(default="newest", pattern="^(newest|last_seen|price|score)$"),
+        filters: Annotated[MatchFilters, Depends()],
         limit: int = Query(default=200, ge=1, le=1000),
         cursor: int = Query(default=0, ge=0),
         since: datetime | None = None,
         _: str = Depends(require_session),
     ) -> Dict[str, Any]:
-        result = query_matches(
-            cache,
-            item=item,
-            min_score=min_score,
-            status=status,
-            include_dismissed=include_dismissed,
-            price_drop=price_drop,
-            q=q,
-            sort=sort,
-            limit=limit,
-            cursor=cursor,
-            since=since,
-        )
+        result = query_matches(cache, **vars(filters), limit=limit, cursor=cursor, since=since)
         if config.image_matcher:
             for row in result["matches"]:
                 row["related_count"] = sum(
@@ -579,11 +541,7 @@ def create_app(
         return result
 
     def require_match(marketplace: str, listing_id: str) -> list[dict[str, Any]]:
-        rows = [
-            row
-            for row in load_matches(cache)
-            if row["marketplace"] == marketplace and row["listing_id"] == listing_id
-        ]
+        rows = load_matches(cache, marketplace, listing_id)
         if not rows:
             raise HTTPException(status_code=404, detail="Match not found")
         return rows
@@ -740,7 +698,6 @@ def create_app(
                 detail="Supply 1-25 listings, an optional search name, and a boolean refresh",
             )
         validated = []
-        existing = load_matches(cache)
         for entry in listings:
             if (
                 not isinstance(entry, dict)
@@ -749,12 +706,7 @@ def create_app(
                 or not re.fullmatch(r"[0-9]{1,40}", entry["listing_id"])
             ):
                 raise HTTPException(status_code=400, detail="Invalid listing identity")
-            rows = [
-                row
-                for row in existing
-                if row["marketplace"] == entry["marketplace"]
-                and row["listing_id"] == entry["listing_id"]
-            ]
+            rows = load_matches(cache, entry["marketplace"], entry["listing_id"])
             if not rows:
                 raise HTTPException(status_code=404, detail="Match not found")
             original_item = entry.get("original_item")
@@ -784,14 +736,7 @@ def create_app(
                 raise HTTPException(
                     status_code=400, detail="Paste a direct Facebook Marketplace listing URL"
                 ) from None
-            existing = next(
-                (
-                    row
-                    for row in load_matches(cache)
-                    if row["marketplace"] == "facebook" and row["listing_id"] == listing_id
-                ),
-                None,
-            )
+            existing = next(iter(load_matches(cache, "facebook", listing_id)), None)
             if existing is not None:
                 return {"existing": True, "match": existing}
             listing = Listing(
@@ -820,11 +765,7 @@ def create_app(
             return {
                 **job,
                 "existing": False,
-                "match": next(
-                    row
-                    for row in load_matches(cache)
-                    if row["marketplace"] == "facebook" and row["listing_id"] == listing_id
-                ),
+                "match": load_matches(cache, "facebook", listing_id)[0],
             }
 
     @app.get("/api/matches/recheck/{job_id}")
@@ -847,26 +788,9 @@ def create_app(
 
     @app.get("/api/matches.csv")
     def export_matches_csv(
-        item: str | None = None,
-        min_score: int | None = Query(default=None, ge=1, le=5),
-        status: str = Query(default="all", pattern="^(all|shortlisted|contacted|dismissed)$"),
-        include_dismissed: bool = False,
-        price_drop: bool = False,
-        q: str = Query(default="", max_length=500),
-        sort: str = Query(default="newest", pattern="^(newest|last_seen|price|score)$"),
-        _: str = Depends(require_session),
+        filters: Annotated[MatchFilters, Depends()], _: str = Depends(require_session)
     ) -> StreamingResponse:
-        matches = query_matches(
-            cache,
-            item=item,
-            min_score=min_score,
-            status=status,
-            include_dismissed=include_dismissed,
-            price_drop=price_drop,
-            q=q,
-            sort=sort,
-            limit=None,
-        )["matches"]
+        matches = query_matches(cache, **vars(filters), limit=None)["matches"]
         filename = f"matches-{time.strftime('%Y%m%d-%H%M%S')}.csv"
         return StreamingResponse(
             iter_found_csv(iter_match_rows(matches)),
@@ -903,8 +827,6 @@ class WebUIServer:
         if config.log_handler is None:
             raise ValueError("WebUIConfig.log_handler is required")
         self._config = config
-        self._state = state
-        self._config_service = config_service
         self._app = create_app(config, state, config_service, config.log_handler)
         self._server: uvicorn.Server | None = None
         self._thread: threading.Thread | None = None
@@ -949,8 +871,6 @@ def start_webui(
     config: WebUIConfig, logger: logging.Logger | None = None
 ) -> tuple[WebUIServer, StartupInfo]:
     """Resolve auth, build the service, and start the server thread."""
-    if config.log_handler is None:
-        raise ValueError("WebUIConfig.log_handler is required")
     state, info = _resolve_auth(config)
 
     # --webui-host requires credentials. Refuse to expose without auth.

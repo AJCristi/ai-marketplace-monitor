@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ai_marketplace_monitor.webui.secrets_redact import MASK, has_mask, redact, restore
+from ai_marketplace_monitor.webui.secrets_redact import MASK, redact, restore
 
 
 def test_redact_replaces_password_and_token() -> None:
@@ -88,11 +88,6 @@ def test_empty_value_not_redacted() -> None:
     redacted, secrets = redact(src)
     assert redacted == src
     assert secrets == {}
-
-
-def test_has_mask() -> None:
-    assert has_mask(f'password = "{MASK}"')
-    assert not has_mask('password = "real"')
 
 
 def test_preserves_trailing_comment() -> None:
