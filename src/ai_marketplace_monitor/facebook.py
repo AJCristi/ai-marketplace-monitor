@@ -526,6 +526,8 @@ class FacebookMarketplace(Marketplace):
                 found_listings = FacebookSearchResultPage(
                     self.page, self.translator, self.logger
                 ).get_listings()
+                if should_stop is not None and should_stop():
+                    return
                 time.sleep(5)
                 if on_results is not None:
                     on_results(

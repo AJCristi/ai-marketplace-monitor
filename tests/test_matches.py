@@ -436,6 +436,7 @@ def test_cancel_stops_search_and_reports_partial_summary(
     assert not monitor.search_requested.is_set()
     summary = monitor.logger.info.call_args_list[-1].kwargs["extra"]["aimm"]
     assert summary["kind"] == "search_summary" and summary["cancelled"] is True
+    assert summary["checked"] == 0
 
 
 def test_ai_rating_overlaps_opening_the_next_listing(
@@ -505,6 +506,7 @@ def test_search_progress_counts_opened_listings_per_results_page(
     monitor.search_item(market, Mock(search=search), item)
     assert snapshots[0]["item"] == "test" and snapshots[0]["total"] is None
     assert snapshots[1]["done"] == 1 and snapshots[1]["total"] == 2
+    assert snapshots[1]["checked"] == 1
     assert snapshots[1]["cancelling"] is False
     assert monitor.progress_snapshot() == {"cancelling": False}
 

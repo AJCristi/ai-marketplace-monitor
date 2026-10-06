@@ -197,7 +197,7 @@ function updateStatus() {
   else if (!state.connected && state.disconnectedAt && Date.now()-state.disconnectedAt > 10000) notice = '<span>Live updates stopped. The monitor may still be running; activity reloads when it reconnects.</span><button class="btn sm" id="retry-stream">Retry</button>';
   else if (Date.now() < state.loginUntil) notice = `<span>Logging in to Facebook. If it asks for a code or CAPTCHA, finish it in ${state.status.vnc_enabled ? 'the Browser view' : 'the browser window on the computer running the monitor'}.</span>`;
   const cancelled = state.cancelNotice;
-  const html = notice ? `<div class="nt warn">${notice}</div>` : cancelled ? `<div class="nt"><span class="gr">Cancelled ${esc(cancelled.item)}${cancelled.total != null ? ` after ${cancelled.done} of ${cancelled.total} listings` : ''} · ${cancelled.found} new ${cancelled.found === 1 ? 'match' : 'matches'} saved. Other searches return to their schedule.</span><button class="btn sm q" id="dismiss-cancel">Dismiss</button></div>` : '';
+  const html = notice ? `<div class="nt warn">${notice}</div>` : cancelled ? `<div class="nt"><span class="gr">Cancelled ${esc(cancelled.item)}${cancelled.checked != null ? ` after checking ${cancelled.checked} ${cancelled.checked === 1 ? 'listing' : 'listings'}` : ''} · ${cancelled.found} new ${cancelled.found === 1 ? 'match' : 'matches'} saved. Other searches return to their schedule.</span><button class="btn sm q" id="dismiss-cancel">Dismiss</button></div>` : '';
   if ($('#global-notice').innerHTML !== html) {$('#global-notice').innerHTML = html; $('#retry-stream')?.addEventListener('click',connectStream); $('#dismiss-cancel')?.addEventListener('click',()=>{state.cancelNotice=null;updateStatus();});}
 }
 function searchSummary(name) {
@@ -335,7 +335,7 @@ function rowHtml(record) {
     body = `<div><span class="title">${esc(e.title)}</span> · ${esc(filled(e.price)?e.price:'price not listed')}</div><div class="q"><b>${esc(e.conclusion)}</b> — “${esc(e.comment)}”</div><div class="out d">${esc(e.ai_name||'AI')}${url?` · <a href="${esc(url)}" target="_blank" rel="noopener noreferrer">open listing ↗</a>`:''}</div>`;
     trailing = `<span class="score ${low?'lo':''}" aria-label="Rated ${esc(e.score)} out of 5 against your description">${esc(e.score)}/5</span>`;
   } else if (e.kind === 'search_started') {body = 'Search started'; type='search';}
-  else if (e.kind === 'search_summary') {body = `Search finished — <b>${esc(e.new_count)} new ${e.new_count===1?'listing':'listings'}</b>`; type='search';}
+  else if (e.kind === 'search_summary') {body = `Search ${e.cancelled ? 'cancelled' : 'finished'} — <b>${esc(e.new_count)} new ${e.new_count===1?'listing':'listings'}</b>`; type='search';}
   else if (e.kind === 'listing_skip') {body = `Skipped <b>${esc(e.title)}</b> — ${e.reason==='below_threshold'?`rated ${esc(e.score)}, below ${esc(e.threshold)}`:'already notified'}`; type='skip';}
   else if (e.kind === 'credentials_wait') {body = e.status==='found'?'Facebook credentials found — launching browser':'Waiting for Facebook credentials'; type='login';}
   else if (e.kind === 'browser_ready') {body = `Launched ${esc(e.engine)} browser`; type='browser';}
@@ -415,7 +415,7 @@ function announceSearch(record) {
   if (e.kind === 'search_started') $('#search-announcement').textContent = `Searching ${e.item}`;
   else if (e.kind === 'search_summary') {
     const found = `${e.new_count} new ${e.new_count === 1 ? 'listing' : 'listings'}`;
-    if (e.cancelled) state.cancelNotice = {item:e.item, found:e.new_count, done:state.progress.item === e.item ? state.progress.done : null, total:state.progress.item === e.item ? state.progress.total : null};
+    if (e.cancelled) state.cancelNotice = {item:e.item, found:e.new_count, checked:e.checked};
     $('#search-announcement').textContent = e.cancelled ? `Cancelled ${e.item}, ${found} saved` : `${e.item} finished, ${found}`;
     state.progress = {};
   }

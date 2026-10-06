@@ -220,6 +220,7 @@ class MarketplaceMonitor:
             "done": 0,
             "total": None,
             "rating": 0,
+            "checked": 0,
         }
         self.search_progress = progress
         if self.logger:
@@ -248,6 +249,7 @@ class MarketplaceMonitor:
 
         def opened(listing: Listing) -> None:
             progress["done"] += 1
+            progress["checked"] += 1
             observe(listing)
 
         def apply_rating(listing: Listing, res: AIResponse) -> None:
@@ -400,6 +402,7 @@ class MarketplaceMonitor:
                     marketplace=marketplace_config.name,
                     new_count=len(new_listings),
                     cancelled=cancelled,
+                    checked=progress["checked"],
                 ),
             )
         if new_listings:
