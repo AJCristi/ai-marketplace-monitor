@@ -73,6 +73,7 @@
 .match-photo img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:var(--s2)}
 .match-more{width:100%;border-radius:0;color:var(--acc)!important;font-size:12px}
 .match-job{padding:8px 24px;background:var(--accs);border-bottom:1px solid var(--ln)}
+.match-job progress{width:140px;accent-color:var(--acc)}
 .match-history-list li{padding:10px 0;border-bottom:1px solid var(--ln)}
 .match-history-text{white-space:pre-wrap;color:var(--fg2)}
 .match-title{color:inherit;text-decoration:none}.match-title:hover{text-decoration:underline}
@@ -111,6 +112,15 @@
 .btn.x{color:var(--err)!important}
 .btn.sm{height:28px;padding:0 10px;font-size:13px}
 .btn[disabled]{opacity:.45;cursor:not-allowed}
+.spin{display:inline-flex;align-items:center;gap:6px}
+.spin::before{content:'';flex:none;width:.85em;height:.85em;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.spin::before{animation:pulse 2s ease-in-out infinite}}
+@keyframes pulse{50%{opacity:.35}}
+.btn.busy{border-color:var(--acc);background:var(--accs);color:var(--acc)!important}
+.btn.busy[disabled]{opacity:1;cursor:progress}
+.search-progress{display:block;width:100%;height:4px;margin-top:6px;accent-color:var(--acc)}
+.tag.spin{background:var(--accs);color:var(--acc)}
 .pill{display:inline-flex;align-items:center;height:28px;padding:0 10px;border-radius:6px;border:1px solid var(--ln2);background:var(--s1);font-size:13px;font-weight:500;color:var(--fg2);cursor:pointer}
 .pill[aria-pressed="true"]{background:var(--fg);border-color:var(--fg);color:var(--inv)}
 .tag{display:inline-flex;align-items:center;font-family:var(--mono);font-size:11.5px;padding:1px 6px;border-radius:4px;background:var(--s2);color:var(--fg2);white-space:nowrap}

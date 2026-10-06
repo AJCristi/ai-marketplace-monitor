@@ -270,6 +270,8 @@ def main(
                             config_files=monitor.config_files,
                             log_handler=log_broadcast_handler,
                             request_search=monitor.request_search,
+                            cancel_search=monitor.cancel_search,
+                            search_progress=monitor.progress_snapshot,
                             rechecks=monitor.rechecks,
                             image_matcher=monitor.image_matcher,
                         ),

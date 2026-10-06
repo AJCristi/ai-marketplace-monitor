@@ -64,12 +64,19 @@ RUN if [ ! -e /usr/share/novnc/vnc.html ] && [ -e /usr/share/novnc/vnc_lite.html
 
 WORKDIR /app
 
-# Install aimm. Copy only metadata + source needed for a pip install.
+# Install dependencies and Chromium from the package metadata alone, so this layer
+# stays cached when only application source changes. The empty package is a
+# placeholder that lets pip resolve dependencies before src is copied.
 COPY pyproject.toml README.md ./
-COPY src ./src
-
-RUN pip install . \
+RUN mkdir -p src/ai_marketplace_monitor \
+    && touch src/ai_marketplace_monitor/__init__.py \
+    && pip install . \
+    && pip uninstall -y ai-marketplace-monitor \
+    && rm -rf src \
     && playwright install --with-deps chromium
+
+COPY src ./src
+RUN pip install --no-deps .
 
 # Embed the immutable source revision; the installed package has no .git directory.
 ARG AIMM_BUILD_SHA

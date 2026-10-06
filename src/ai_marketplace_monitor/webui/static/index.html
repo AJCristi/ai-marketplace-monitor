@@ -24,6 +24,7 @@
         <span id="live-status" class="m d" role="status">Connecting…</span>
         <a id="browser-link" class="btn q" target="_blank" rel="noopener" hidden>Browser ↗</a>
         <button id="search-all" class="btn" type="button">↻ Search all now</button>
+        <button id="cancel-search" class="btn q" type="button" hidden>Cancel</button>
         <a class="btn p" href="#/monitor/new">+ Add search</a>
         <button id="logout" class="btn q" type="button" hidden>Sign out</button>
       </div>
@@ -35,6 +36,7 @@
     </main>
     <div id="toast" role="status" hidden></div>
     <span id="feed-announcement" class="vh" aria-live="polite" aria-atomic="true"></span>
+    <span id="search-announcement" class="vh" role="status" aria-atomic="true"></span>
   </div>
   <dialog id="login-dialog" class="c dlg" aria-labelledby="login-title">
     <h1 id="login-title">Sign in</h1>

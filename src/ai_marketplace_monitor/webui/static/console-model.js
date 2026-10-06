@@ -85,6 +85,24 @@ export function mergeRecords(current, incoming, capacity) {
   for (const record of incoming) byId.set(record.id, record);
   return [...byId.values()].sort((a,b) => a.id - b.id).slice(-capacity);
 }
+export function searchActivity(records, enabledNames, requestedAfter = null) {
+  // The monitor searches one item at a time, so only the latest boundary event matters.
+  const last = records.findLast(record => ['search_started','search_summary','browser_ready'].includes(record.extra?.kind));
+  const running = last?.extra.kind === 'search_started' ? last.extra.item : null;
+  if (requestedAfter == null) return {running, queued:[], started:0};
+  const started = new Set(records.filter(record => record.extra?.kind === 'search_started' && record.id > requestedAfter).map(record => record.extra.item));
+  return {running, queued:enabledNames.filter(name => !started.has(name)), started:started.size};
+}
+export function searchStatusLabel({running, queued, started, requested, progress = {}}) {
+  if (!running) return requested ? {main:`Starting ${queued.length} ${queued.length === 1 ? 'search' : 'searches'}…`, detail:''} : {main:'↻ Search all now', detail:''};
+  if (progress.cancelling) return {main:'Cancelling…', detail:`· ${running}`};
+  const counted = progress.item === running && progress.total != null;
+  const tail = counted && progress.browsing === false && progress.rating ? ` · rating last ${progress.rating}` : '';
+  const counts = counted ? ` · ${progress.done}/${progress.total}${tail}` : '';
+  // A scheduled search that began before Search all was clicked is not part of the requested run.
+  if (requested && started) return {main:`Searching ${started} of ${started + queued.length}`, detail:`· ${running}${counts}`};
+  return {main:'Searching', detail:`· ${running}${counts}${requested ? ` · ${queued.length} next` : ''}`};
+}
 export function safeUrl(value) {
   try { const url = new URL(value); return ['https:', 'http:'].includes(url.protocol) ? url.href : null; } catch { return null; }
 }

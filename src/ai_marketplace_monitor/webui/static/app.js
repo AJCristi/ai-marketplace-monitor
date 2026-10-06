@@ -1,7 +1,7 @@
 import initToml, {parse, edit} from './vendor/toml-edit-js/shims.js';
 import {FORM_SCHEMAS, BUILT_IN_REGIONS} from './fields.js';
 import {createMatchesView} from './matches.js';
-import {list, own, filled, mergeConfig, itemValue, marketplaceFor, scheduleLabel, CHANNELS, userChannels, resolvedUser, available, matchRecord, mergeRecords, safeUrl, renameSection, esc} from './console-model.js';
+import {list, own, filled, mergeConfig, itemValue, marketplaceFor, scheduleLabel, CHANNELS, userChannels, resolvedUser, available, matchRecord, mergeRecords, searchActivity, searchStatusLabel, safeUrl, renameSection, esc} from './console-model.js';
 
 const $ = selector => document.querySelector(selector);
 const time = epoch => new Date(epoch * 1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',hour12:false});
@@ -11,7 +11,7 @@ const state = {
   open:true, initialized:false, status:{}, context:{inherited:{},environment:{},sources:[]},
   base:'', content:'', mtime:null, file:null, config:{}, local:{},
   route:location.hash || '#/monitor', form:null, saving:false, editor:null, editorSetting:false,
-  conflict:null, error:'', saved:'', rawInvalid:false, records:[], lastSearches:new Map(), capacity:2000, streamId:null, ws:null,
+  conflict:null, error:'', saved:'', rawInvalid:false, records:[], lastSearches:new Map(), searchRequestedAfter:null, progress:{}, cancelNotice:null, capacity:2000, streamId:null, ws:null,
   connected:false, announceCount:0, disconnectedAt:null, following:true, pending:0, frozen:[], expanded:new Set(),
   credentials:null, credentialsId:0, monitorIssue:null, incidentId:0, loginId:0, loginUntil:0, feedTimer:null, announceTimer:null, pollBusy:false,
 };
@@ -126,9 +126,15 @@ $('#logout').addEventListener('click', async () => {
   await showLogin();
 });
 $('#search-all').addEventListener('click', async () => {
-  const button = $('#search-all'); button.disabled = true;
-  try {const data = await json('/api/monitor/restart', {method:'POST'}); toast(data.message);}
-  catch(error) {toast(error.message);} finally {button.disabled = false;}
+  $('#search-all').disabled = true;
+  const requestedAfter = state.records.at(-1)?.id ?? 0;
+  try {const data = await json('/api/monitor/restart', {method:'POST'}); state.searchRequestedAfter = requestedAfter; toast(data.message);}
+  catch(error) {toast(error.message);} finally {updateStatus();}
+});
+$('#cancel-search').addEventListener('click', async () => {
+  $('#cancel-search').disabled = true;
+  try {await json('/api/monitor/search/cancel', {method:'POST'}); state.searchRequestedAfter = null; state.progress = {...state.progress, cancelling:true};}
+  catch(error) {toast(error.message);} finally {updateStatus();}
 });
 document.addEventListener('click', event => {
   const anchor = event.target.closest('a[href^="#/"]');
@@ -149,6 +155,31 @@ function setupIssues() {
   const users = Object.keys(state.config.user || {}).filter(name => resolvedUser(state.config,name).enabled !== false && !userChannels(state.config,name,state.context.environment).length);
   return users.length + Number(state.credentials === 'waiting' || (!state.context.facebook_credentials_configured && state.credentials !== 'found'));
 }
+function enabledSearches() {
+  return Object.entries(state.config.item || {}).filter(([name,item]) => item.enabled !== false && state.config.marketplace?.[marketplaceFor(state.config,name)]?.enabled !== false).map(([name]) => name);
+}
+function currentSearchActivity() {
+  const activity = searchActivity(state.records, enabledSearches(), state.searchRequestedAfter);
+  if (state.searchRequestedAfter != null && !activity.queued.length && !activity.running) {
+    const summaries = state.records.filter(record => record.extra?.kind === 'search_summary' && record.id > state.searchRequestedAfter);
+    const found = summaries.reduce((total, record) => total + (record.extra.new_count || 0), 0);
+    state.searchRequestedAfter = null;
+    if (summaries.length) toast(`✓ Searched ${summaries.length} · ${found} new ${found === 1 ? 'listing' : 'listings'}`);
+  }
+  return activity;
+}
+function updateSearchButton() {
+  const activity = currentSearchActivity(), requested = state.searchRequestedAfter != null, busy = Boolean(activity.running || requested);
+  const {main, detail} = searchStatusLabel({...activity, requested, progress:state.progress});
+  const button = $('#search-all');
+  button.innerHTML = busy ? `<span class="spin">${esc(main)}</span>${detail ? ` <span class="m d">${esc(detail)}</span>` : ''}` : esc(main);
+  button.classList.toggle('busy', busy);
+  button.setAttribute('aria-busy', String(busy));
+  button.title = requested ? 'All enabled searches are running' : activity.running ? 'A scheduled search is running' : '';
+  button.disabled = requested;
+  $('#cancel-search').hidden = !busy;
+  $('#cancel-search').disabled = Boolean(state.progress.cancelling && activity.running);
+}
 function updateStatus() {
   const el = $('#live-status');
   const waiting = state.credentials === 'waiting';
@@ -159,13 +190,15 @@ function updateStatus() {
   $('#browser-link').hidden = !state.status.vnc_enabled;
   $('#browser-link').href = '/vnc/vnc.html?path=ws/vnc&autoconnect=1&resize=scale';
   $('#logout').hidden = state.open;
+  updateSearchButton();
   let notice = '';
   if(state.monitorIssue)notice=`<span>${esc(state.monitorIssue)}</span><a class="btn sm" href="#/settings/config">Check config.toml</a><a class="btn sm" href="#/monitor/all?level=ERROR">View errors</a>`;
   else if (waiting) notice = '<span>Waiting for Facebook credentials.</span><a class="btn sm" href="#/settings/marketplace">Add login</a>';
   else if (!state.connected && state.disconnectedAt && Date.now()-state.disconnectedAt > 10000) notice = '<span>Live updates stopped. The monitor may still be running; activity reloads when it reconnects.</span><button class="btn sm" id="retry-stream">Retry</button>';
   else if (Date.now() < state.loginUntil) notice = `<span>Logging in to Facebook. If it asks for a code or CAPTCHA, finish it in ${state.status.vnc_enabled ? 'the Browser view' : 'the browser window on the computer running the monitor'}.</span>`;
-  const html = notice ? `<div class="nt warn">${notice}</div>` : '';
-  if ($('#global-notice').innerHTML !== html) {$('#global-notice').innerHTML = html; $('#retry-stream')?.addEventListener('click',connectStream);}
+  const cancelled = state.cancelNotice;
+  const html = notice ? `<div class="nt warn">${notice}</div>` : cancelled ? `<div class="nt"><span class="gr">Cancelled ${esc(cancelled.item)}${cancelled.checked != null ? ` after checking ${cancelled.checked} ${cancelled.checked === 1 ? 'listing' : 'listings'}` : ''} · ${cancelled.found} new ${cancelled.found === 1 ? 'match' : 'matches'} saved. Other searches return to their schedule.</span><button class="btn sm q" id="dismiss-cancel">Dismiss</button></div>` : '';
+  if ($('#global-notice').innerHTML !== html) {$('#global-notice').innerHTML = html; $('#retry-stream')?.addEventListener('click',connectStream); $('#dismiss-cancel')?.addEventListener('click',()=>{state.cancelNotice=null;updateStatus();});}
 }
 function searchSummary(name) {
   const inheritedMark=key=>!own(state.config.item?.[name],key)?'*':'';
@@ -180,6 +213,7 @@ function lastSearchedLabel(name) {
   const record = state.lastSearches.get(name);
   return `Last searched at: ${record ? time(record.time) : '—'}`;
 }
+const counted = name => state.progress.item === name && state.progress.total != null;
 function renderSidebar() {
   const {parts} = routeParts(); const settings = parts[0] === 'settings';
   const matches = !settings && parts[1]==='matches';
@@ -212,11 +246,20 @@ function renderSidebar() {
       if(name){const count=state.matchSummary?.groups?.find(group=>group.item===name)?.count??0;const summary=link.querySelector('.s');summary.textContent=`${count} matches · ${searchSummary(name)}`;}
     }
   }
+  const {running, queued} = currentSearchActivity();
   for (const badge of document.querySelectorAll('[data-item-badge]')) {
-    const name = badge.dataset.itemBadge;
+    const name = badge.dataset.itemBadge, searching = running === name && state.config.item[name].enabled !== false && state.form?.name !== name;
+    badge.classList.toggle('spin', searching); badge.classList.toggle('ai', searching); badge.classList.toggle('d', !searching);
     if (state.config.item[name].enabled === false) badge.textContent = 'disabled';
     else if (state.form?.name === name) badge.textContent = 'editing';
+    else if (searching) badge.textContent = counted(name) ? `searching · ${state.progress.done}/${state.progress.total}` : 'searching…';
+    else if (queued.includes(name)) badge.textContent = 'queued';
     else {const record = state.records.findLast(record => record.extra?.kind==='search_summary' && record.extra.item===name); badge.textContent = record ? `${record.extra.new_count} new` : '';}
+    const row = badge.closest('a'); let bar = row?.querySelector('progress.search-progress');
+    if (searching && counted(name)) {
+      if (!bar) {bar = document.createElement('progress'); bar.className = 'search-progress'; row.append(bar);}
+      bar.max = Math.max(state.progress.total, 1); bar.value = state.progress.done; bar.setAttribute('aria-label', `${name} listings checked`);
+    } else bar?.remove();
   }
   for (const label of document.querySelectorAll('[data-item-last-searched]')) {
     const name = label.dataset.itemLastSearched, record = state.lastSearches.get(name);
@@ -291,7 +334,8 @@ function rowHtml(record) {
     const low = thresholds.length > 1 && thresholds[0] !== thresholds[1] ? true : e.score < Number(thresholds[0] || 3);
     body = `<div><span class="title">${esc(e.title)}</span> · ${esc(filled(e.price)?e.price:'price not listed')}</div><div class="q"><b>${esc(e.conclusion)}</b> — “${esc(e.comment)}”</div><div class="out d">${esc(e.ai_name||'AI')}${url?` · <a href="${esc(url)}" target="_blank" rel="noopener noreferrer">open listing ↗</a>`:''}</div>`;
     trailing = `<span class="score ${low?'lo':''}" aria-label="Rated ${esc(e.score)} out of 5 against your description">${esc(e.score)}/5</span>`;
-  } else if (e.kind === 'search_summary') {body = `Search finished — <b>${esc(e.new_count)} new ${e.new_count===1?'listing':'listings'}</b>`; type='search';}
+  } else if (e.kind === 'search_started') {body = 'Search started'; type='search';}
+  else if (e.kind === 'search_summary') {body = `Search ${e.cancelled ? 'cancelled' : 'finished'} — <b>${esc(e.new_count)} new ${e.new_count===1?'listing':'listings'}</b>`; type='search';}
   else if (e.kind === 'listing_skip') {body = `Skipped <b>${esc(e.title)}</b> — ${e.reason==='below_threshold'?`rated ${esc(e.score)}, below ${esc(e.threshold)}`:'already notified'}`; type='skip';}
   else if (e.kind === 'credentials_wait') {body = e.status==='found'?'Facebook credentials found — launching browser':'Waiting for Facebook credentials'; type='login';}
   else if (e.kind === 'browser_ready') {body = `Launched ${esc(e.engine)} browser`; type='browser';}
@@ -363,8 +407,26 @@ async function snapshot() {
   const reset = state.streamId != null && state.streamId !== data.stream_id;
   state.streamId=data.stream_id;const previousCapacity=state.capacity;state.capacity=data.capacity || 2000;
   if(previousCapacity!==state.capacity&&$('#feed'))renderActivity(routeParts().parts[1]==='item'?decodeName(routeParts().parts[2]):null);
-  if (reset) {state.credentials=null;state.credentialsId=0;state.monitorIssue=null;state.incidentId=0;state.loginId=0;state.loginUntil=0;state.following=true;state.pending=0;state.expanded.clear();}
+  if (reset) {state.searchRequestedAfter=null;state.progress={};state.cancelNotice=null;state.credentials=null;state.credentialsId=0;state.monitorIssue=null;state.incidentId=0;state.loginId=0;state.loginUntil=0;state.following=true;state.pending=0;state.expanded.clear();}
   acceptRecords(data.records,reset); return data;
+}
+function announceSearch(record) {
+  const e = record.extra || {};
+  if (e.kind === 'search_started') $('#search-announcement').textContent = `Searching ${e.item}`;
+  else if (e.kind === 'search_summary') {
+    const found = `${e.new_count} new ${e.new_count === 1 ? 'listing' : 'listings'}`;
+    if (e.cancelled) state.cancelNotice = {item:e.item, found:e.new_count, checked:e.checked};
+    $('#search-announcement').textContent = e.cancelled ? `Cancelled ${e.item}, ${found} saved` : `${e.item} finished, ${found}`;
+    state.progress = {};
+  }
+}
+async function pollSearchProgress() {
+  if (!state.connected || state.pollingProgress) return;
+  if (!searchActivity(state.records, []).running && state.searchRequestedAfter == null) {if (state.progress.item) {state.progress = {}; renderSidebar();} return;}
+  state.pollingProgress = true;
+  try {state.progress = await json('/api/monitor/progress'); renderSidebar();}
+  catch {state.progress = {};}
+  finally {state.pollingProgress = false;}
 }
 function connectStream() {
   clearTimeout(connectStream.timer);
@@ -373,13 +435,14 @@ function connectStream() {
   socket.onmessage = async event => {
     let data; try {data=JSON.parse(event.data);} catch {return;}
     if (data.type==='hello') {
-      if(state.streamId && state.streamId!==data.stream_id){state.records=[];state.lastSearches.clear();state.credentials=null;state.credentialsId=0;state.monitorIssue=null;state.incidentId=0;state.loginId=0;state.loginUntil=0;state.following=true;state.pending=0;state.expanded.clear();renderFeed(true);renderSidebar();}state.streamId=data.stream_id;
+      if(state.streamId && state.streamId!==data.stream_id){state.searchRequestedAfter=null;state.progress={};state.cancelNotice=null;state.records=[];state.lastSearches.clear();state.credentials=null;state.credentialsId=0;state.monitorIssue=null;state.incidentId=0;state.loginId=0;state.loginUntil=0;state.following=true;state.pending=0;state.expanded.clear();renderFeed(true);renderSidebar();}state.streamId=data.stream_id;
       state.connected=true;state.disconnectedAt=null; updateStatus();
       try {await snapshot();} catch(error) {toast(error.message);} return;
     }
     if (data.type==='log') {
       const last = state.records.at(-1)?.id;
       acceptRecords([data.record]);
+      announceSearch(data.record);
       matchesView.onRecord(data.record);
       if (last != null && data.record.id > last+1 && !snapshot.busy) {snapshot.busy=true;try{await snapshot();}finally{snapshot.busy=false;}}
     }
@@ -873,4 +936,4 @@ async function bootstrap() {
 }
 try{await initToml({module_or_path:new URL('./vendor/toml-edit-js/index_bg.wasm',import.meta.url)});await showLogin();}
 catch(error){$('#app').hidden=false;$('#pane').innerHTML=pageHeader('Dashboard could not load')+`<div class="empty"><p class="err">${esc(error.message)}</p><button class="btn" id="retry-load">Reload</button></div>`;$('#retry-load').onclick=()=>location.reload();}
-setInterval(updateStatus,3000);setInterval(pollConfig,5000);
+setInterval(updateStatus,3000);setInterval(pollConfig,5000);setInterval(pollSearchProgress,1500);

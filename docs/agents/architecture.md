@@ -57,6 +57,10 @@ The monitor uses synchronous Playwright. Uvicorn has its own asyncio loop in a d
 thread. `LogBroadcastHandler` schedules delivery with `loop.call_soon_threadsafe`.
 `MarketplaceMonitor.request_search` sets a threading event that the monitor consumes
 at a safe point; the HTTP handler must not perform Playwright work directly.
+During a search, `search_item` sends AI ratings to a single worker thread so they
+overlap the browser opening the next listing. Results are applied on the monitor
+thread in listing order. `cancel_search` sets an event that the marketplace loop
+checks before each listing.
 
 Structured records produced by `aimm_event` are consumed by the console model.
 Changes to event names or fields need review of the producer, log serializer, and

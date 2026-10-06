@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import test from 'node:test';
 import init, {parse, edit} from '../src/ai_marketplace_monitor/webui/static/vendor/toml-edit-js/shims.js';
-import {mergeConfig,itemValue,resolvedUser,userChannels,mergeRecords,matchRecord,safeUrl,renameSection,scheduleLabel} from '../src/ai_marketplace_monitor/webui/static/console-model.js';
+import {mergeConfig,itemValue,resolvedUser,userChannels,mergeRecords,matchRecord,searchActivity,searchStatusLabel,safeUrl,renameSection,scheduleLabel} from '../src/ai_marketplace_monitor/webui/static/console-model.js';
 await init({module_or_path:await readFile(new URL('../src/ai_marketplace_monitor/webui/static/vendor/toml-edit-js/index_bg.wasm',import.meta.url))});
 
 test('real TOML edits preserve comments, hidden keys and explicit empty AI',()=>{
@@ -56,4 +56,26 @@ test('shared settings apply in order including loader defaults',()=>{
   assert.equal(resolvedUser(config,'me').retry_delay,60);
   config.notification_values.second.enabled=false;
   assert.equal(resolvedUser(config,'me').smtp_server,'first');
+});
+
+test('search activity follows the latest search boundary and requested searches',()=>{
+  const event=(id,kind,item)=>({id,extra:{kind,item}});
+  const records=[event(1,'search_started','camera'),event(2,'search_summary','camera'),event(3,'search_started','lens')];
+  assert.deepEqual(searchActivity(records,['camera','lens','tripod']),{running:'lens',queued:[],started:0});
+  assert.deepEqual(searchActivity(records,['camera','lens','tripod'],2),{running:'lens',queued:['camera','tripod'],started:1});
+  assert.equal(searchActivity([...records,event(4,'search_summary','lens')],[]).running,null);
+  assert.equal(searchActivity([...records,event(4,'browser_ready')],[]).running,null);
+});
+
+test('search status label counts the requested run, listings and the rating tail',()=>{
+  const label=options=>searchStatusLabel({running:null,queued:[],started:0,requested:false,...options});
+  assert.deepEqual(label({}),{main:'↻ Search all now',detail:''});
+  assert.deepEqual(label({requested:true,queued:['a','b','c']}),{main:'Starting 3 searches…',detail:''});
+  assert.deepEqual(label({running:'chair',requested:true,started:2,queued:['bike']}),{main:'Searching 2 of 3',detail:'· chair'});
+  assert.deepEqual(label({running:'chair',progress:{item:'chair',done:7,total:24}}),{main:'Searching',detail:'· chair · 7/24'});
+  assert.deepEqual(label({running:'chair',requested:true,started:2,queued:['bike'],progress:{item:'chair',done:24,total:24,rating:2,browsing:false}}),{main:'Searching 2 of 3',detail:'· chair · 24/24 · rating last 2'});
+  assert.equal(label({running:'chair',progress:{item:'chair',done:12,total:12,rating:31,browsing:true}}).detail,'· chair · 12/12');
+  assert.deepEqual(label({running:'chair',requested:true,started:0,queued:['a','b']}),{main:'Searching',detail:'· chair · 2 next'});
+  assert.equal(label({running:'chair',progress:{item:'lens',done:1,total:5}}).detail,'· chair');
+  assert.deepEqual(label({running:'chair',progress:{item:'chair',done:8,total:24,cancelling:true}}),{main:'Cancelling…',detail:'· chair'});
 });
