@@ -83,9 +83,8 @@ wrappers around async operations, follow nearby notification tests to avoid nest
 
 ## Broader completion checks
 
-[tasks.py](../../tasks.py) defines the local commands;
-[noxfile.py](../../noxfile.py) and CI define the matrix. For relevant Python changes,
-the local equivalents are:
+[tasks.py](../../tasks.py) defines the local commands and CI defines the matrix. For
+relevant Python changes, the local equivalents are:
 
 ```powershell
 uv run inv tests
@@ -93,13 +92,16 @@ uv run inv mypy
 uv run pre-commit run --all-files
 ```
 
-The test task includes doctests and coverage collection. It explicitly overrides the
-coverage failure threshold to zero; a passing test run does not imply 100% coverage.
-The separate coverage report uses the threshold from `pyproject.toml`.
+The test task includes doctests and coverage collection. No coverage threshold is
+enforced; `inv coverage` produces the report.
 
-CI runs pre-commit, then Nox tests and typing on Ubuntu/macOS and its Python matrix.
-The Node tests are additional local coverage: they are not currently invoked by that
-workflow or `inv tests`. Do not claim a local run covers the OS/Python matrix.
+CI runs pre-commit and the Node console tests, then `inv mypy` and `inv tests` on
+Ubuntu/macOS and its Python matrix. `inv tests` does not run the Node tests. Do not
+claim a local run covers the OS/Python matrix.
+
+From the Git Bash tool on Windows, `python-magic` (via pushbullet) can load Git's
+`msys-magic-1.dll` and crash or hang pytest. Remove Git's `usr/bin` and `mingw64/bin`
+from `PATH` for that command, or run tests from PowerShell.
 
 Pre-commit can rewrite files and update `uv.lock`; `inv lint` can also apply Ruff fixes.
 Inspect resulting changes. In a shared dirty worktree, use scoped hooks for the files

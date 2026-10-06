@@ -27,7 +27,6 @@ PYTHON_TARGETS = [
     SOURCE_DIR,
     TEST_DIR,
     DOCS_DIR.joinpath("conf.py"),
-    ROOT_DIR.joinpath("noxfile.py"),
     Path(__file__),
 ]
 PYTHON_TARGETS_STR = " ".join([str(p) for p in PYTHON_TARGETS])
@@ -104,11 +103,8 @@ def format_(c: Context, check: bool = False) -> None:
         _run(c, "uv run pre-commit run trailing-whitespace --all-files")
         _run(c, "uv run pre-commit run end-of-file-fixer --all-files")
 
-    # Run isort and black
-    isort_options = ["--check-only", "--diff"] if check else []
-    _run(c, f"uv run isort {' '.join(isort_options)} {PYTHON_TARGETS_STR}")
-    black_options = ["--diff", "--check"] if check else ["--quiet"]
-    _run(c, f"uv run black {' '.join(black_options)} {PYTHON_TARGETS_STR}")
+    format_options = ["--diff"] if check else []
+    _run(c, f"uv run ruff format {' '.join(format_options)} {PYTHON_TARGETS_STR}")
 
 
 @task()
@@ -149,7 +145,7 @@ def mypy(c: Context) -> None:
 @task()
 def tests(c: Context) -> None:
     """Run tests."""
-    pytest_options = ["--xdoctest", "--cov", "--cov-report=", "--cov-fail-under=0"]
+    pytest_options = ["--xdoctest", "--cov", "--cov-report="]
     _run(c, f"uv run pytest {' '.join(pytest_options)} {TEST_DIR} {SOURCE_DIR}")
 
 

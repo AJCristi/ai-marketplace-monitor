@@ -762,8 +762,10 @@ class FacebookSearchResultPage(WebPage):
             if self.logger:
                 msg = self._parent_with_cond(
                     btn.first,
-                    lambda x: len(x) == 3
-                    and self.translator("Browse Marketplace") in (x[-1].text_content() or ""),
+                    lambda x: (
+                        len(x) == 3
+                        and self.translator("Browse Marketplace") in (x[-1].text_content() or "")
+                    ),
                     1,
                 )
                 self.logger.info(f"{hilight('[Retrieve]', 'dim')} {msg}")
@@ -1049,8 +1051,9 @@ class FacebookRegularItemPage(FacebookItemPage):
 
             result = self._parent_with_cond(
                 condition_element,
-                lambda x: len(x) >= 2
-                and self.translator("Condition") in (x[0].text_content() or ""),
+                lambda x: (
+                    len(x) >= 2 and self.translator("Condition") in (x[0].text_content() or "")
+                ),
                 1,
             )
             return result
@@ -1071,8 +1074,10 @@ class FacebookRegularItemPage(FacebookItemPage):
             )
             return self._parent_with_cond(
                 approximate_element,
-                lambda x: len(x) == 2
-                and self.translator("Location is approximate") in (x[1].text_content() or ""),
+                lambda x: (
+                    len(x) == 2
+                    and self.translator("Location is approximate") in (x[1].text_content() or "")
+                ),
                 0,
             )
         except KeyboardInterrupt:
@@ -1257,9 +1262,11 @@ class FacebookAutoItemWithAboutAndDescriptionPage(FacebookRegularItemPage):
                 about_element,
                 # find an array of elements with the first one being "About this vehicle"
                 # and the second child has actual content (not just whitespace)
-                lambda x: len(x) > 1
-                and self.translator("About this vehicle") in (x[0].text_content() or "")
-                and (x[1].text_content() or "").replace("\xa0", "").strip(),
+                lambda x: (
+                    len(x) > 1
+                    and self.translator("About this vehicle") in (x[0].text_content() or "")
+                    and (x[1].text_content() or "").replace("\xa0", "").strip()
+                ),
                 # Extract all texts, using inner_text to preserve line breaks, and add emojis
                 lambda x: _add_vehicle_emojis(
                     "\n".join([child.inner_text() or "" for child in x])
@@ -1283,16 +1290,20 @@ class FacebookAutoItemWithAboutAndDescriptionPage(FacebookRegularItemPage):
                 description_header,
                 # find an array of elements with the first one being "Seller's description"
                 # and the second child has actual content (not just whitespace)
-                lambda x: len(x) > 1
-                and self.translator("Seller's description") in (x[0].text_content() or "")
-                and (x[1].text_content() or "").replace("\xa0", "").strip(),
+                lambda x: (
+                    len(x) > 1
+                    and self.translator("Seller's description") in (x[0].text_content() or "")
+                    and (x[1].text_content() or "").replace("\xa0", "").strip()
+                ),
                 # then, drill down from the second child
                 lambda x: self._children_with_cond(
                     x[1],
                     # find the an array of elements
                     lambda y: len(y) > 1,
                     # and return the texts.
-                    lambda y: f"""\n\n{self.translator("Seller's description")}\n\n{y[0].text_content() or self.translator("**unspecified**")}""",
+                    lambda y: (
+                        f"""\n\n{self.translator("Seller's description")}\n\n{y[0].text_content() or self.translator("**unspecified**")}"""
+                    ),
                 ),
             )
         except KeyboardInterrupt:
@@ -1336,26 +1347,30 @@ class FacebookAutoItemWithDescriptionPage(FacebookAutoItemWithAboutAndDescriptio
                 description_header,
                 # find an array of elements with the first one being "Seller's description"
                 # and the second child has actual content (not just whitespace)
-                lambda x: len(x) > 1
-                and self.translator("Seller's description") in (x[0].text_content() or "")
-                and (x[1].text_content() or "").replace("\xa0", "").strip(),
+                lambda x: (
+                    len(x) > 1
+                    and self.translator("Seller's description") in (x[0].text_content() or "")
+                    and (x[1].text_content() or "").replace("\xa0", "").strip()
+                ),
                 # then, drill down from the second child
                 lambda x: self._children_with_cond(
                     x[1],
                     # find the an array of elements
                     lambda y: len(y) > 2,
                     # and return the texts.
-                    lambda y: "\n\n"
-                    + self.translator("Seller's description")
-                    + "\n\n"
-                    + "\n".join(
-                        element.text_content() or self.translator("**unspecified**")
-                        for element in (
-                            y[1:2]
-                            if y[0].query_selector(
-                                f'span:text-is("{self.translator("Condition")}")'
+                    lambda y: (
+                        "\n\n"
+                        + self.translator("Seller's description")
+                        + "\n\n"
+                        + "\n".join(
+                            element.text_content() or self.translator("**unspecified**")
+                            for element in (
+                                y[1:2]
+                                if y[0].query_selector(
+                                    f'span:text-is("{self.translator("Condition")}")'
+                                )
+                                else y[:2]
                             )
-                            else y[:2]
                         )
                     ),
                 ),
@@ -1378,9 +1393,11 @@ class FacebookAutoItemWithDescriptionPage(FacebookAutoItemWithAboutAndDescriptio
                 description_header,
                 # find an array of elements with the first one being "Seller's description"
                 # and the second child has actual content (not just whitespace)
-                lambda x: len(x) > 1
-                and self.translator("Seller's description") in (x[0].text_content() or "")
-                and (x[1].text_content() or "").replace("\xa0", "").strip(),
+                lambda x: (
+                    len(x) > 1
+                    and self.translator("Seller's description") in (x[0].text_content() or "")
+                    and (x[1].text_content() or "").replace("\xa0", "").strip()
+                ),
                 # then, drill down from the second child
                 lambda x: self._children_with_cond(
                     x[1],

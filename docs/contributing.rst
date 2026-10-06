@@ -91,7 +91,7 @@ Auto-format code:
 
 .. code-block:: console
 
-    $ uv run invoke format      # Format with black and isort
+    $ uv run invoke format      # Format with ruff
 
 Testing
 -------
@@ -102,7 +102,6 @@ Run the test suite:
 
     $ uv run invoke tests       # Run pytest with coverage
     $ uv run pytest tests/     # Run specific tests
-    $ nox                      # Test across Python versions
 
 Add tests for new features:
 - Unit tests in ``tests/test_*.py``
@@ -132,7 +131,7 @@ Style Guidelines
 ---------------
 
 - **Line length**: 99 characters maximum
-- **Formatting**: Use black and isort (automated by pre-commit)
+- **Formatting**: Use ruff format (automated by pre-commit)
 - **Linting**: Follow ruff recommendations
 - **Type hints**: Required for all public functions
 
@@ -142,7 +141,6 @@ Code Organization
 - ``src/ai_marketplace_monitor/`` - Main package
 - ``tests/`` - Test files matching ``test_*.py``
 - ``docs/`` - Sphinx documentation
-- ``noxfile.py`` - Multi-environment testing
 - ``tasks.py`` - Development tasks (invoke)
 
 Architecture Patterns

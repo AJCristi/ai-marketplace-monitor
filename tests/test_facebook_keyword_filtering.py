@@ -99,9 +99,9 @@ def test_keyword_filtering_should_skip_when_description_empty(
     )
 
     # This should pass (and currently does)
-    assert (
-        second_check_result
-    ), "Second check_listing() call should pass when description contains keywords"
+    assert second_check_result, (
+        "Second check_listing() call should pass when description contains keywords"
+    )
 
 
 @pytest.mark.parametrize(
@@ -188,6 +188,6 @@ def test_antikeyword_filtering_with_empty_description(
     result = facebook_marketplace.check_listing(
         listing_with_empty_description, item_config_with_antikeywords, description_available=False
     )
-    assert (
-        not result
-    ), "Should reject listing when antikeywords found in title, even with empty description"
+    assert not result, (
+        "Should reject listing when antikeywords found in title, even with empty description"
+    )
