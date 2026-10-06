@@ -523,10 +523,6 @@ class FacebookMarketplace(Marketplace):
                     self.page, self.translator, self.logger
                 ).get_listings()
                 time.sleep(5)
-                if self.logger:
-                    self.logger.error(
-                        f"""{hilight("[Search]", "fail")} Failed to get search results for {search_phrase} from {city}"""
-                    )
 
                 counter.increment(CounterItem.SEARCH_PERFORMED, item_config.name)
 
