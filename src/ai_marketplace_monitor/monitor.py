@@ -201,6 +201,13 @@ class MarketplaceMonitor:
             item_config.notify or marketplace_config.notify or list(self.config.user.keys())
         )
         run = uuid4().hex
+        if self.logger:
+            self.logger.info(
+                f"""{hilight("[Search]", "info")} Searching for {item_config.name}.""",
+                extra=aimm_event(
+                    "search_started", item=item_config.name, marketplace=marketplace_config.name
+                ),
+            )
 
         def observe(listing: Listing) -> None:
             if record_sighting(cache, listing, item_config.name, run) and self.logger:

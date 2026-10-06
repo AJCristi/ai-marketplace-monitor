@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import test from 'node:test';
 import init, {parse, edit} from '../src/ai_marketplace_monitor/webui/static/vendor/toml-edit-js/shims.js';
-import {mergeConfig,itemValue,resolvedUser,userChannels,mergeRecords,matchRecord,safeUrl,renameSection,scheduleLabel} from '../src/ai_marketplace_monitor/webui/static/console-model.js';
+import {mergeConfig,itemValue,resolvedUser,userChannels,mergeRecords,matchRecord,searchActivity,safeUrl,renameSection,scheduleLabel} from '../src/ai_marketplace_monitor/webui/static/console-model.js';
 await init({module_or_path:await readFile(new URL('../src/ai_marketplace_monitor/webui/static/vendor/toml-edit-js/index_bg.wasm',import.meta.url))});
 
 test('real TOML edits preserve comments, hidden keys and explicit empty AI',()=>{
@@ -56,4 +56,13 @@ test('shared settings apply in order including loader defaults',()=>{
   assert.equal(resolvedUser(config,'me').retry_delay,60);
   config.notification_values.second.enabled=false;
   assert.equal(resolvedUser(config,'me').smtp_server,'first');
+});
+
+test('search activity follows the latest search boundary and requested searches',()=>{
+  const event=(id,kind,item)=>({id,extra:{kind,item}});
+  const records=[event(1,'search_started','camera'),event(2,'search_summary','camera'),event(3,'search_started','lens')];
+  assert.deepEqual(searchActivity(records,['camera','lens','tripod']),{running:'lens',queued:[]});
+  assert.deepEqual(searchActivity(records,['camera','lens','tripod'],2),{running:'lens',queued:['camera','tripod']});
+  assert.equal(searchActivity([...records,event(4,'search_summary','lens')],[]).running,null);
+  assert.equal(searchActivity([...records,event(4,'browser_ready')],[]).running,null);
 });

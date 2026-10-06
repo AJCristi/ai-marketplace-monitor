@@ -14,7 +14,7 @@ function consoleUnderTest() {
   // Clone values across the test VM boundary so WASM receives its own realm's objects.
   const controls=new Map();
   const control=selector=>{
-    if(!controls.has(selector))controls.set(selector,{value:'openai',dataset:{},open:false,setAttribute(){},addEventListener(){},focus(){this.focused=true;},scrollIntoView(){},showModal(){this.open=true;},close(){this.open=false;}});
+    if(!controls.has(selector))controls.set(selector,{value:'openai',dataset:{},open:false,classList:{toggle(){}},setAttribute(){},addEventListener(){},focus(){this.focused=true;},scrollIntoView(){},showModal(){this.open=true;},close(){this.open=false;}});
     return controls.get(selector);
   };
   const document={querySelector:control,querySelectorAll:()=>[],addEventListener(){},cookie:''};

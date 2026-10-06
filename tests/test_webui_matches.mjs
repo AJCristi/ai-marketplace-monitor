@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {groupMatches, mergeMatchRows, applyRecheckResult, priceDropped, matchDate, galleryHtml, createMatchesView} from '../src/ai_marketplace_monitor/webui/static/matches.js';
+import {groupMatches, mergeMatchRows, applyRecheckResult, recheckStatuses, priceDropped, matchDate, galleryHtml, createMatchesView} from '../src/ai_marketplace_monitor/webui/static/matches.js';
 
 const row = (key,item,extra={})=>({key,item,marketplace:key.split(':')[0],listing_id:key.split(':')[1],title:'Listing',state:{filed_under:[],shortlisted:false,contacted:false,dismissed:false},notified_users:[],filed_under:[item],found_at:'2026-10-03T10:00:00',...extra});
 test('manual filing counts once and a real target evaluation wins over a manual label',()=>{
@@ -345,4 +345,14 @@ test('background photo refresh preserves the current list scroll',async t=>{
   const h=viewHarness(t,{matches:[row('fb:1','camera')]});h.view.render();await h.flush();
   h.node('pane').scrollTop=260;h.view.onRecord({extra:{kind:'match_photo_saved'}});await h.tick();await h.flush();
   assert.equal(h.node('pane').scrollTop,260);
+});
+
+test('re-check status marks the next listing of a running job and queues the rest',()=>{
+  const listing=id=>({marketplace:'fb',listing_id:id,original_item:'camera'});
+  const statuses=recheckStatuses([
+    {state:'running',done:1,listings:[listing('1'),listing('2'),listing('3')]},
+    {state:'queued',done:0,listings:[listing('3'),listing('4')]},
+    {state:'done',done:1,listings:[listing('5')]},
+  ]);
+  assert.deepEqual([...statuses],[['fb:2','checking'],['fb:3','queued'],['fb:4','queued']]);
 });

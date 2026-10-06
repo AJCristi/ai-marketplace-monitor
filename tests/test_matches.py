@@ -363,10 +363,15 @@ def test_search_records_before_delivery(
     monitor.search_item(market, Mock(search=Mock(return_value=[listing])), item)
     row = load_matches(match_cache)[0]
     assert row["score"] is None and row["notified_users"] == []
-    assert any(
-        call.kwargs.get("extra", {}).get("aimm", {}).get("kind") == "match_recorded"
+    kinds = [
+        call.kwargs.get("extra", {}).get("aimm", {}).get("kind")
         for call in monitor.logger.info.call_args_list
-    )
+    ]
+    assert "match_recorded" in kinds
+    assert [kind for kind in kinds if kind in ("search_started", "search_summary")] == [
+        "search_started",
+        "search_summary",
+    ]
 
 
 def test_same_text_different_ids_remain_distinct(

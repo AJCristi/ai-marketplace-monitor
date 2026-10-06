@@ -116,7 +116,16 @@ class RecheckQueue:
             return copy.deepcopy(
                 {
                     name: job[name]
-                    for name in ("job_id", "state", "done", "total", "results", "item", "searches")
+                    for name in (
+                        "job_id",
+                        "state",
+                        "done",
+                        "total",
+                        "results",
+                        "listings",
+                        "item",
+                        "searches",
+                    )
                 }
             )
 

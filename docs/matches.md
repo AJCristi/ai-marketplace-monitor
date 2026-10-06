@@ -122,7 +122,9 @@ only if it passes. Ratings remain associated with the search that produced them.
 Re-checks never send notifications or write notification history.
 
 Jobs contain at most 25 listings, run on the monitor thread between searches, and
-wait 5–15 seconds between listing checks. A due scheduled search runs first. Stop
+wait 5–15 seconds between listing checks. A due scheduled search runs first. A
+progress bar tracks each job, and listings in a pending job are tagged
+**re-checking** or **queued for re-check**. Stop
 finishes the current listing before stopping the job. Browser reloads recover
 pending job progress; restarting the monitor process discards pending jobs.
 Match records and saved personal states survive process restarts.

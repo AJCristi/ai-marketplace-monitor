@@ -31,6 +31,17 @@ export function applyRecheckResult(rows, result) {
     return updated;
   });
 }
+export function recheckStatuses(jobs) {
+  const statuses=new Map();
+  for(const job of jobs){
+    if(!['queued','running'].includes(job.state))continue;
+    (job.listings||[]).slice(job.done).forEach((listing,index)=>{
+      const key=listing.marketplace+':'+listing.listing_id, status=index===0&&job.state==='running'?'checking':'queued';
+      if(statuses.get(key)!=='checking')statuses.set(key,status);
+    });
+  }
+  return statuses;
+}
 export function matchDate(value) {
   if (!value) return '—';
   const date=new Date(value); if(Number.isNaN(date.valueOf()))return '—';
@@ -66,7 +77,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   const relatedView=createRelatedView({json,toast});
   let busy=false, refreshTimer=null, filterTimer=null, detailRow=null, photoIndex=0, photoSelection=null, listScroll=0, listWindowScroll=0;
   const dismissedRows=new Map(), pendingStates=new Set();
-  let focusDetail=false, loadedView=null;
+  let focusDetail=false, loadedView=null, recheckState=new Map();
   const storage=(name,key,value)=>{try{const store=globalThis[name];return value===undefined?store.getItem(key):value===null?store.removeItem(key):store.setItem(key,value);}catch{return null;}};
   cutoff=storage('localStorage','aimm-matches-seen')||'';
   try{for(const id of JSON.parse(sessionStorage.getItem('aimm-recheck-jobs')||'[]'))jobs.set(id,{job_id:id,state:'queued',results:[],done:0,total:0});}catch{}
@@ -162,7 +173,8 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   }
   function rowHtml(row,index,group) {
     const check=row.recheck, invalid=row.evaluation_status?['below_threshold','filtered_out'].includes(row.evaluation_status):(check&&check.checked_item===row.item&&['below_threshold','filtered_out'].includes(check.status));
-    const badges=[row.found_at&&(!cutoff||new Date(row.found_at)>new Date(cutoff))?'<span class="tag ok">new</span>':'',(row.seen_count>1||(row.imported&&row.seen_count>0))?'<span class="tag">seen again</span>':'',row.state.shortlisted?'<span class="warn" aria-label="Shortlisted">★</span>':'',row.state.contacted?'<span class="tag">contacted</span>':'',row.filed_by_you?'<span class="tag">filed by you</span>':'',row.source==='manual'?'<span class="tag">Added manually</span>':'',invalid?'<span class="tag warn">no longer passes</span>':'',check?.status==='unavailable'?'<span class="tag">no longer listed</span>':'',check?.status==='error'?`<span class="tag warn" title="${esc(check.reason)}">couldn’t re-check</span>`:''].join(' ');
+    const checking=recheckState.get(row.marketplace+':'+row.listing_id);
+    const badges=[checking==='checking'?'<span class="tag spin">re-checking</span>':checking==='queued'?'<span class="tag">queued for re-check</span>':'',row.found_at&&(!cutoff||new Date(row.found_at)>new Date(cutoff))?'<span class="tag ok">new</span>':'',(row.seen_count>1||(row.imported&&row.seen_count>0))?'<span class="tag">seen again</span>':'',row.state.shortlisted?'<span class="warn" aria-label="Shortlisted">★</span>':'',row.state.contacted?'<span class="tag">contacted</span>':'',row.filed_by_you?'<span class="tag">filed by you</span>':'',row.source==='manual'?'<span class="tag">Added manually</span>':'',invalid?'<span class="tag warn">no longer passes</span>':'',check?.status==='unavailable'?'<span class="tag">no longer listed</span>':'',check?.status==='error'?`<span class="tag warn" title="${esc(check.reason)}">couldn’t re-check</span>`:''].join(' ');
     if(dismissedRows.has(matchId(row)))return `<div class="match-row match-dismissed" role="status">Dismissed ${esc(row.title)} · <button class="btn q" data-undo-row="${esc(matchId(row))}">Undo</button></div>`;
     return `<div class="match-row" data-match-row="${index}" data-group="${esc(group)}"><span class="m d match-date">${esc(matchDate(row.found_at)).replace(' · ','<br>')}</span>${photo(row)}<span class="col gr"><span class="${invalid?'d':'b'}"><a class="match-title" href="${esc(detailRoute(row))}" data-open-match="${index}" data-group="${esc(group)}">${esc(row.title||'Listing details unavailable')}</a> ${badges} ${sellerBadge(row)}${row.related_count?` <span class="tag">${row.related_count} possible connections</span>`:''}</span><span class="m d">${esc(row.current_price||row.price||'—')}${priceDropped(row)?` <span class="ok">↓ from ${esc(row.recheck?.old_price||row.price)}</span>`:''} · ${esc(row.location||'—')}${row.condition?' · '+esc(row.condition):''}</span><span class="sm mu">${row.score==null?unratedText(row):`<strong>${esc(row.conclusion)}</strong> — ${esc(aiText(row.comment))}`}</span><span class="xs d">${row.last_seen?'Last seen '+esc(matchDate(row.last_seen))+' · ':''}${check?esc(lastCheck(row))+' · ':''}${row.notified_users.length?'sent to '+esc(row.notified_users.join(', ')):row.source==='recheck'?'Saved by re-check · no notification sent':'No recorded delivery'}</span></span><span class="match-row-actions"><span class="score ${row.score==null||invalid?'lo':''}">${score(row)}</span><span class="row"><button class="btn sm q" data-row-state="shortlisted" data-match-id="${esc(matchId(row))}" aria-label="${row.state.shortlisted?'Unshortlist':'Shortlist'} ${esc(row.title)}" aria-pressed="${row.state.shortlisted}">${row.state.shortlisted?'★':'☆'}</button><button class="btn sm q" data-row-state="dismissed" data-match-id="${esc(matchId(row))}" aria-label="${row.state.dismissed?'Restore':'Dismiss'} ${esc(row.title)}">${row.state.dismissed?'Restore':'✕'}</button></span></span></div>`;
   }
@@ -188,6 +200,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     if(!rows.length){const filtered=filters();$('#matches-body').innerHTML=`<div class="empty"><h2>${filtered.length?'No matches for these filters':'No matches yet'}</h2><p>${filtered.length?esc(filtered.map(([k,v])=>k+': '+v).join(' · ')):"Listings from searches and links you add manually will collect here."}</p>${filtered.length?'':'<a href="#/monitor/all">View searches</a>'}</div>`;renderProgress();return;}
     const ordered=navigationEntries();
     if(!ordered.some(entry=>matchId(entry.row)===selected))selected=ordered.length?matchId(ordered[0].row):null;
+    recheckState=recheckStatuses(jobs.values());
     const by=query().get('group')||'search', groups=groupMatches(rows,by,query().get('item')||'');
     $('#matches-body').innerHTML=(query().get('sort')==='price'?'<p class="sm d">Uses the amount shown in the listing; shorthand and placeholder prices may be misleading. Confirm the asking price with the seller.</p>':'')+'<div class="matches-layout"><div class="matches-list">'+[...groups].map(([name,entries])=>{
       const count=by==='search'?data.filtered_groups.find(group=>group.item===name)?.count:entries.length;
@@ -299,7 +312,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     try{if(by==='search'&&name){const p=new URLSearchParams(filters());p.set('item',name);p.set('sort','newest');p.set('limit','25');const result=await json('/api/matches?'+p);entries=result.matches;}await start(entries.slice(0,25));}catch(err){toast(err.message);}
   }
   async function start(entries,item) {
-    try{const listings=[...new Map(entries.map(row=>[row.key,{marketplace:row.marketplace,listing_id:row.listing_id,original_item:row.item}])).values()].slice(0,25);const result=await json('/api/matches/recheck',{method:'POST',body:JSON.stringify({listings,item,refresh:true})});jobs.set(result.job_id,{job_id:result.job_id,state:'queued',done:0,total:result.queued,results:[],item,searches:[...new Set(entries.map(row=>row.item))]});rememberJobs();renderProgress();renderBody();}
+    try{const listings=[...new Map(entries.map(row=>[row.key,{marketplace:row.marketplace,listing_id:row.listing_id,original_item:row.item}])).values()].slice(0,25);const result=await json('/api/matches/recheck',{method:'POST',body:JSON.stringify({listings,item,refresh:true})});jobs.set(result.job_id,{job_id:result.job_id,state:'queued',done:0,total:result.queued,results:[],listings,item,searches:[...new Set(entries.map(row=>row.item))]});rememberJobs();renderProgress();renderBody();}
     catch(err){toast(err.message);}
   }
   async function loadHistory(row, cursor=0) {
@@ -331,7 +344,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
       const drops=job.results.filter(row=>numericPrice(row.price)<numericPrice(row.old_price)).length;
       const scope=job.searches?.length===1?job.searches[0]:null;
       const target=(query().get('group')||'search')==='search'&&scope?placeholders.find(node=>node.dataset.groupProgress===scope):null;
-      const html=`<div class="match-job row wr sb sm" role="status"><span>${job.searches?.length===1&&job.searches[0]===''?'AI assessment':'Re-check'} ${esc(scope||job.item||'')} · ${esc(job.state)} · <strong>${job.done} of ${job.total}</strong>${job.searches?.length===1&&job.searches[0]===''?'':` · ${drops} price drops · ${changed} no longer pass`}</span>${['queued','running'].includes(job.state)?`<button class="btn sm q" data-stop-job="${esc(job.job_id)}">Stop</button>`:''}</div>`;
+      const html=`<div class="match-job row wr sb sm" role="status"><span>${job.state==='running'?'<span class="spin" aria-hidden="true"></span> ':''}${job.searches?.length===1&&job.searches[0]===''?'AI assessment':'Re-check'} ${esc(scope||job.item||'')} · ${esc(job.state)} · <strong>${job.done} of ${job.total}</strong>${job.searches?.length===1&&job.searches[0]===''?'':` · ${drops} price drops · ${changed} no longer pass`}</span>${['queued','running'].includes(job.state)?`<progress max="${job.total||1}" value="${job.done}" aria-label="Re-check progress"></progress><button class="btn sm q" data-stop-job="${esc(job.job_id)}">Stop</button>`:''}</div>`;
       (target||$('#matches-progress')).insertAdjacentHTML('beforeend',html);
     }
     document.querySelectorAll('[data-stop-job]').forEach(button=>button.onclick=async()=>{try{jobs.set(button.dataset.stopJob,await json('/api/matches/recheck/'+encodeURIComponent(button.dataset.stopJob),{method:'DELETE'}));rememberJobs();renderBody();renderProgress();}catch(err){toast(err.message);}});

@@ -267,8 +267,10 @@ the schedule. Fixed times do not suppress that initial scan. Multiple fixed time
 schedule multiple later runs for the same search.
 
 **Search all now** requests all enabled searches after the current scan reaches a
-safe point. It does not interrupt that scan. Repeated clicks are unnecessary while
-the request is pending. This console has no per-search Run now or next-run countdown;
+safe point. It does not interrupt that scan. While searches run, the button shows
+the active search and how many are queued, and stays disabled until the requested
+searches finish. The sidebar marks the running search **searching…** and the
+others **queued**. This console has no per-search Run now or next-run countdown;
 check activity or terminal output for the scheduler's next-job details.
 
 Each saved search shows **Last searched at: HH:MM** in the sidebar and its activity

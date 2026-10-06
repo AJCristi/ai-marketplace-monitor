@@ -85,6 +85,14 @@ export function mergeRecords(current, incoming, capacity) {
   for (const record of incoming) byId.set(record.id, record);
   return [...byId.values()].sort((a,b) => a.id - b.id).slice(-capacity);
 }
+export function searchActivity(records, enabledNames, requestedAfter = null) {
+  // The monitor searches one item at a time, so only the latest boundary event matters.
+  const last = records.findLast(record => ['search_started','search_summary','browser_ready'].includes(record.extra?.kind));
+  const running = last?.extra.kind === 'search_started' ? last.extra.item : null;
+  if (requestedAfter == null) return {running, queued:[]};
+  const started = new Set(records.filter(record => record.extra?.kind === 'search_started' && record.id > requestedAfter).map(record => record.extra.item));
+  return {running, queued:enabledNames.filter(name => !started.has(name))};
+}
 export function safeUrl(value) {
   try { const url = new URL(value); return ['https:', 'http:'].includes(url.protocol) ? url.href : null; } catch { return null; }
 }
