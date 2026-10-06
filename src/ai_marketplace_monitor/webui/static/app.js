@@ -172,7 +172,7 @@ function updateSearchButton() {
   const activity = currentSearchActivity(), requested = state.searchRequestedAfter != null, busy = Boolean(activity.running || requested);
   const {main, detail} = searchStatusLabel({...activity, requested, progress:state.progress});
   const button = $('#search-all');
-  button.innerHTML = busy ? `<span class="spin">${esc(main)}</span>${detail ? `<span class="m d">${esc(detail)}</span>` : ''}` : esc(main);
+  button.innerHTML = busy ? `<span class="spin">${esc(main)}</span>${detail ? ` <span class="m d">${esc(detail)}</span>` : ''}` : esc(main);
   button.classList.toggle('busy', busy);
   button.setAttribute('aria-busy', String(busy));
   button.title = requested ? 'All enabled searches are running' : activity.running ? 'A scheduled search is running' : '';
