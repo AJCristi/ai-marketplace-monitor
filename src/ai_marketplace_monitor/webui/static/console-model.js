@@ -97,7 +97,7 @@ export function searchStatusLabel({running, queued, started, requested, progress
   if (!running) return requested ? {main:`Starting ${queued.length} ${queued.length === 1 ? 'search' : 'searches'}…`, detail:''} : {main:'↻ Search all now', detail:''};
   if (progress.cancelling) return {main:'Cancelling…', detail:`· ${running}`};
   const counted = progress.item === running && progress.total != null;
-  const tail = counted && progress.done >= progress.total && progress.rating ? ` · rating last ${progress.rating}` : '';
+  const tail = counted && progress.browsing === false && progress.rating ? ` · rating last ${progress.rating}` : '';
   const counts = counted ? ` · ${progress.done}/${progress.total}${tail}` : '';
   // A scheduled search that began before Search all was clicked is not part of the requested run.
   if (requested && started) return {main:`Searching ${started} of ${started + queued.length}`, detail:`· ${running}${counts}`};

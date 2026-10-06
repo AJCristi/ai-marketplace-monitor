@@ -221,6 +221,7 @@ class MarketplaceMonitor:
             "total": None,
             "rating": 0,
             "checked": 0,
+            "browsing": True,
         }
         self.search_progress = progress
         if self.logger:
@@ -381,6 +382,7 @@ class MarketplaceMonitor:
                         ),
                     )
                 )
+            progress["browsing"] = False
             if self.search_cancelled.is_set():
                 for _, rating in pending:
                     rating.cancel()

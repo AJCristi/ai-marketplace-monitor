@@ -73,7 +73,8 @@ test('search status label counts the requested run, listings and the rating tail
   assert.deepEqual(label({requested:true,queued:['a','b','c']}),{main:'Starting 3 searches…',detail:''});
   assert.deepEqual(label({running:'chair',requested:true,started:2,queued:['bike']}),{main:'Searching 2 of 3',detail:'· chair'});
   assert.deepEqual(label({running:'chair',progress:{item:'chair',done:7,total:24}}),{main:'Searching',detail:'· chair · 7/24'});
-  assert.deepEqual(label({running:'chair',requested:true,started:2,queued:['bike'],progress:{item:'chair',done:24,total:24,rating:2}}),{main:'Searching 2 of 3',detail:'· chair · 24/24 · rating last 2'});
+  assert.deepEqual(label({running:'chair',requested:true,started:2,queued:['bike'],progress:{item:'chair',done:24,total:24,rating:2,browsing:false}}),{main:'Searching 2 of 3',detail:'· chair · 24/24 · rating last 2'});
+  assert.equal(label({running:'chair',progress:{item:'chair',done:12,total:12,rating:31,browsing:true}}).detail,'· chair · 12/12');
   assert.deepEqual(label({running:'chair',requested:true,started:0,queued:['a','b']}),{main:'Searching',detail:'· chair · 2 next'});
   assert.equal(label({running:'chair',progress:{item:'lens',done:1,total:5}}).detail,'· chair');
   assert.deepEqual(label({running:'chair',progress:{item:'chair',done:8,total:24,cancelling:true}}),{main:'Cancelling…',detail:'· chair'});

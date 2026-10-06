@@ -506,7 +506,7 @@ def test_search_progress_counts_opened_listings_per_results_page(
     monitor.search_item(market, Mock(search=search), item)
     assert snapshots[0]["item"] == "test" and snapshots[0]["total"] is None
     assert snapshots[1]["done"] == 1 and snapshots[1]["total"] == 2
-    assert snapshots[1]["checked"] == 1
+    assert snapshots[1]["checked"] == 1 and snapshots[1]["browsing"] is True
     assert snapshots[1]["cancelling"] is False
     assert monitor.progress_snapshot() == {"cancelling": False}
 
