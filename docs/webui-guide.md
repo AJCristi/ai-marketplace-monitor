@@ -268,9 +268,16 @@ schedule multiple later runs for the same search.
 
 **Search all now** requests all enabled searches after the current scan reaches a
 safe point. It does not interrupt that scan. While searches run, the button shows
-the active search and how many are queued, and stays disabled until the requested
-searches finish. The sidebar marks the running search **searching…** and the
-others **queued**. This console has no per-search Run now or next-run countdown;
+the progress, for example **Searching 2 of 3 · office_chair · 7/24**. Here 2 of 3
+counts the requested searches and 7/24 counts the listings checked on the current
+results page. The button stays disabled until the requested searches finish. Each
+AI rating runs while the browser opens the next listing, so a search can end with
+**rating last 2**. The sidebar marks the running search **searching** with a
+progress bar, and marks the other searches **queued**.
+
+**Cancel** stops the running search after its current listing and skips the
+remaining requested searches, which go back to their schedule. Matches found
+before the cancel stay saved. A notice reports what was kept. This console has no per-search Run now or next-run countdown;
 check activity or terminal output for the scheduler's next-job details.
 
 Each saved search shows **Last searched at: HH:MM** in the sidebar and its activity

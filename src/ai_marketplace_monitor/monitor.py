@@ -2,6 +2,8 @@ import random
 import sys
 import threading
 import time
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from logging import Logger
 from pathlib import Path
@@ -80,6 +82,8 @@ class MarketplaceMonitor:
         self.browser: Browser | None = None
         self.logger = logger
         self.search_requested = threading.Event()
+        self.search_cancelled = threading.Event()
+        self.search_progress: dict[str, Any] = {}
         self.rechecks = RecheckQueue()
         self.image_matcher = ImageMatcher(cache)
         self.image_matcher.queue.wake = self.rechecks.wake
@@ -89,6 +93,15 @@ class MarketplaceMonitor:
     def request_search(self: "MarketplaceMonitor") -> None:
         """Ask the monitor thread to run every enabled search at its next safe point."""
         self.search_requested.set()
+
+    def progress_snapshot(self: "MarketplaceMonitor") -> dict[str, Any]:
+        """Listing counts for the running search, read by the web UI thread."""
+        return {**self.search_progress, "cancelling": self.search_cancelled.is_set()}
+
+    def cancel_search(self: "MarketplaceMonitor") -> None:
+        """Stop the running search at its next listing and skip the rest of a requested run."""
+        self.search_requested.clear()
+        self.search_cancelled.set()
 
     def load_config_file(self: "MarketplaceMonitor") -> Config:
         """Load the configuration file."""
@@ -201,6 +214,14 @@ class MarketplaceMonitor:
             item_config.notify or marketplace_config.notify or list(self.config.user.keys())
         )
         run = uuid4().hex
+        self.search_cancelled.clear()
+        progress: dict[str, Any] = {
+            "item": item_config.name,
+            "done": 0,
+            "total": None,
+            "rating": 0,
+        }
+        self.search_progress = progress
         if self.logger:
             self.logger.info(
                 f"""{hilight("[Search]", "info")} Searching for {item_config.name}.""",
@@ -222,39 +243,14 @@ class MarketplaceMonitor:
                     ),
                 )
 
-        for listing in marketplace.search(item_config, on_listing=observe):
+        def results_loaded(count: int) -> None:
+            progress.update(done=0, total=count)
+
+        def opened(listing: Listing) -> None:
+            progress["done"] += 1
             observe(listing)
-            # Exact IDs define identity; similarly worded reposts remain separate listings.
-            if listing.id in [x.id for x in new_listings]:
-                if self.logger:
-                    self.logger.debug(f"Found duplicated result for {listing}")
-                continue
-            # if everyone has been notified
-            if (
-                users_to_notify
-                and has_match(cache, listing.marketplace, listing.id, item_config.name)
-                and all(
-                    User(self.config.user[user], self.logger).notification_status(listing)
-                    == NotificationStatus.NOTIFIED
-                    for user in users_to_notify
-                )
-            ):
-                if self.logger:
-                    self.logger.info(
-                        f"""{hilight("[Skip]", "info")} Already sent notification for item {hilight(listing.title)}, skipping.""",
-                        extra=aimm_event(
-                            "listing_skip",
-                            reason="already_notified",
-                            listing_id=listing.id,
-                            title=listing.title,
-                            item=item_config.name,
-                        ),
-                    )
-                continue
-            # for x in self.find_new_items(found_items)
-            res = self.evaluate_by_ai(
-                listing, item_config=item_config, marketplace_config=marketplace_config
-            )
+
+        def apply_rating(listing: Listing, res: AIResponse) -> None:
             if self.logger:
                 if res.comment == AIResponse.NOT_EVALUATED:
                     if res.name:
@@ -309,7 +305,7 @@ class MarketplaceMonitor:
                         ),
                     )
                 counter.increment(CounterItem.EXCLUDED_LISTING, item_config.name)
-                continue
+                return
             new_listings.append(listing)
             listing_ratings.append(res)
             is_new = record_match(cache, listing, item_config.name, res, run=run)
@@ -328,15 +324,82 @@ class MarketplaceMonitor:
                     ),
                 )
 
+        # AI calls overlap the browser opening the next listing; results are applied here,
+        # in listing order, so match records and notifications stay on the monitor thread.
+        queued_ids: set[str] = set()
+        pending: deque[tuple[Listing, Future[AIResponse]]] = deque()
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="aimm-ai") as ai_worker:
+            for listing in marketplace.search(
+                item_config,
+                on_listing=opened,
+                should_stop=self.search_cancelled.is_set,
+                on_results=results_loaded,
+            ):
+                while pending and pending[0][1].done():
+                    rated_listing, rating = pending.popleft()
+                    apply_rating(rated_listing, rating.result())
+                progress["rating"] = len(pending)
+                observe(listing)
+                # Exact IDs define identity; similarly worded reposts remain separate listings.
+                if listing.id in queued_ids:
+                    if self.logger:
+                        self.logger.debug(f"Found duplicated result for {listing}")
+                    continue
+                # if everyone has been notified
+                if (
+                    users_to_notify
+                    and has_match(cache, listing.marketplace, listing.id, item_config.name)
+                    and all(
+                        User(self.config.user[user], self.logger).notification_status(listing)
+                        == NotificationStatus.NOTIFIED
+                        for user in users_to_notify
+                    )
+                ):
+                    if self.logger:
+                        self.logger.info(
+                            f"""{hilight("[Skip]", "info")} Already sent notification for item {hilight(listing.title)}, skipping.""",
+                            extra=aimm_event(
+                                "listing_skip",
+                                reason="already_notified",
+                                listing_id=listing.id,
+                                title=listing.title,
+                                item=item_config.name,
+                            ),
+                        )
+                    continue
+                queued_ids.add(listing.id)
+                pending.append(
+                    (
+                        listing,
+                        ai_worker.submit(
+                            self.evaluate_by_ai,
+                            listing,
+                            item_config=item_config,
+                            marketplace_config=marketplace_config,
+                        ),
+                    )
+                )
+            if self.search_cancelled.is_set():
+                for _, rating in pending:
+                    rating.cancel()
+            while pending:
+                progress["rating"] = len(pending)
+                rated_listing, rating = pending.popleft()
+                if not rating.cancelled():
+                    apply_rating(rated_listing, rating.result())
+
+        self.search_progress = {}
         p = inflect.engine()
+        cancelled = self.search_cancelled.is_set()
         if self.logger:
             self.logger.info(
-                f"""{hilight("[Search]", "succ" if len(new_listings) > 0 else "fail")} {hilight(str(len(new_listings)))} new {p.plural_noun("listing", len(new_listings))} for {item_config.name} {p.plural_verb("is", len(new_listings))} found.""",
+                f"""{hilight("[Search]", "succ" if len(new_listings) > 0 else "fail")} {hilight(str(len(new_listings)))} new {p.plural_noun("listing", len(new_listings))} for {item_config.name} {p.plural_verb("is", len(new_listings))} found{" before the search was cancelled" if cancelled else ""}.""",
                 extra=aimm_event(
                     "search_summary",
                     item=item_config.name,
                     marketplace=marketplace_config.name,
                     new_count=len(new_listings),
+                    cancelled=cancelled,
                 ),
             )
         if new_listings:
@@ -616,7 +679,7 @@ class MarketplaceMonitor:
                 searched_items.update(job.tags)
                 job.run()
                 self.handle_pause()
-                if self.reload_requested():
+                if self.reload_requested() or self.search_cancelled.is_set():
                     break
             if not schedule.get_jobs():
                 continue

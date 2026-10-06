@@ -112,6 +112,8 @@ class WebUIConfig:
     config_files: List[Path] = field(default_factory=list)
     log_handler: LogBroadcastHandler | None = None
     request_search: Callable[[], None] | None = None
+    cancel_search: Callable[[], None] | None = None
+    search_progress: Callable[[], Dict[str, Any]] | None = None
     rechecks: RecheckQueue | None = None
     image_matcher: ImageMatcher | None = None
 
@@ -408,6 +410,23 @@ def create_app(
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to touch config: {e}") from e
+
+    @app.get("/api/monitor/progress")
+    async def search_progress(_: str = Depends(require_session)) -> Dict[str, Any]:
+        return config.search_progress() if config.search_progress is not None else {}
+
+    @app.post("/api/monitor/search/cancel")
+    async def cancel_search(
+        _: str = Depends(require_session),
+        __: None = Depends(require_csrf),
+    ) -> Dict[str, Any]:
+        if config.cancel_search is None:
+            raise HTTPException(status_code=503, detail="The monitor is not running")
+        config.cancel_search()
+        return {
+            "ok": True,
+            "message": "Cancelling — the current listing finishes first. Remaining searches return to their schedule.",
+        }
 
     @app.get("/api/logs")
     async def get_logs(

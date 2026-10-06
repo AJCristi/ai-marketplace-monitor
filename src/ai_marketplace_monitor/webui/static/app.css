@@ -115,9 +115,11 @@
 .spin{display:inline-flex;align-items:center;gap:6px}
 .spin::before{content:'';flex:none;width:.85em;height:.85em;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-@media(prefers-reduced-motion:reduce){.spin::before{animation:none;border-right-color:currentColor;opacity:.6}}
-.btn.spin{border-color:var(--acc);background:var(--accs);color:var(--acc)!important}
-.btn.spin[disabled]{opacity:1;cursor:progress}
+@media(prefers-reduced-motion:reduce){.spin::before{animation:pulse 2s ease-in-out infinite}}
+@keyframes pulse{50%{opacity:.35}}
+.btn.busy{border-color:var(--acc);background:var(--accs);color:var(--acc)!important}
+.btn.busy[disabled]{opacity:1;cursor:progress}
+.search-progress{display:block;width:100%;height:4px;margin-top:6px;accent-color:var(--acc)}
 .tag.spin{background:var(--accs);color:var(--acc)}
 .pill{display:inline-flex;align-items:center;height:28px;padding:0 10px;border-radius:6px;border:1px solid var(--ln2);background:var(--s1);font-size:13px;font-weight:500;color:var(--fg2);cursor:pointer}
 .pill[aria-pressed="true"]{background:var(--fg);border-color:var(--fg);color:var(--inv)}

@@ -174,6 +174,7 @@ def test_repeated_search_skips_ai_but_keeps_sighting(
 ) -> None:
     record_match(match_cache, listing, "test", AIResponse(4, "good"), run="initial")
     monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.search_cancelled = threading.Event()
     monitor.photo_attempts = set()
     monitor.config = SimpleNamespace(user={"me": SimpleNamespace(enabled=True)})
     monitor.logger = Mock()
@@ -187,7 +188,7 @@ def test_repeated_search_skips_ai_but_keeps_sighting(
     monkeypatch.setattr("ai_marketplace_monitor.monitor.counter", Mock())
     monkeypatch.setattr("ai_marketplace_monitor.monitor.time.sleep", lambda seconds: None)
 
-    def search(_item: Any, on_listing: Any) -> Any:
+    def search(_item: Any, on_listing: Any, should_stop: Any, on_results: Any) -> Any:
         on_listing(listing)
         return [listing, listing]
 
@@ -341,6 +342,7 @@ def test_search_records_before_delivery(
     match_cache: Cache, listing: Listing, monkeypatch: pytest.MonkeyPatch, delivery: str
 ) -> None:
     monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.search_cancelled = threading.Event()
     monitor.photo_attempts = set()
     monitor.config = SimpleNamespace(
         user={} if delivery == "none" else {"me": SimpleNamespace(enabled=delivery != "disabled")}
@@ -380,6 +382,7 @@ def test_same_text_different_ids_remain_distinct(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.search_cancelled = threading.Event()
     monitor.photo_attempts = set()
     monitor.config = SimpleNamespace(user={})
     monitor.logger = None
@@ -392,6 +395,118 @@ def test_same_text_different_ids_remain_distinct(
     repost = dataclasses.replace(listing, id="222", post_url=listing.post_url + "2")
     monitor.search_item(market, Mock(search=Mock(return_value=[listing, repost])), item)
     assert {row["listing_id"] for row in load_matches(match_cache)} == {listing.id, "222"}
+
+
+def test_cancel_stops_search_and_reports_partial_summary(
+    match_cache: Cache,
+    listing: Listing,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.photo_attempts = set()
+    monitor.search_requested = threading.Event()
+    monitor.search_cancelled = threading.Event()
+    monitor.config = SimpleNamespace(user={})
+    monitor.logger = Mock()
+    rating_started = threading.Event()
+
+    def evaluate(*_args: Any, **_kwargs: Any) -> AIResponse:
+        rating_started.set()
+        return AIResponse(4, "good")
+
+    monitor.evaluate_by_ai = evaluate
+    item = SimpleNamespace(name="test", notify=None, rating=[4], searched_count=1)
+    market = SimpleNamespace(name="facebook", notify=None, rating=None)
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.cache", match_cache)
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.counter", Mock())
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.time.sleep", lambda seconds: None)
+    repost = dataclasses.replace(listing, id="222", post_url=listing.post_url + "2")
+
+    def search(_item: Any, on_listing: Any, should_stop: Any, on_results: Any) -> Any:
+        yield listing
+        assert rating_started.wait(timeout=5)
+        monitor.cancel_search()
+        if not should_stop():
+            yield repost
+
+    monitor.search_requested.set()
+    monitor.cancel_search()
+    monitor.search_item(market, Mock(search=search), item)
+    assert {row["listing_id"] for row in load_matches(match_cache)} == {listing.id}
+    assert not monitor.search_requested.is_set()
+    summary = monitor.logger.info.call_args_list[-1].kwargs["extra"]["aimm"]
+    assert summary["kind"] == "search_summary" and summary["cancelled"] is True
+
+
+def test_ai_rating_overlaps_opening_the_next_listing(
+    match_cache: Cache,
+    listing: Listing,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.photo_attempts = set()
+    monitor.search_cancelled = threading.Event()
+    monitor.config = SimpleNamespace(user={})
+    monitor.logger = Mock()
+    browser_moved_on = threading.Event()
+
+    def evaluate(rated: Listing, **_kwargs: Any) -> AIResponse:
+        if rated.id == listing.id:
+            assert browser_moved_on.wait(timeout=5), "browser waited for the AI"
+        return AIResponse(4, "good")
+
+    monitor.evaluate_by_ai = evaluate
+    item = SimpleNamespace(name="test", notify=None, rating=[4], searched_count=1)
+    market = SimpleNamespace(name="facebook", notify=None, rating=None)
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.cache", match_cache)
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.counter", Mock())
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.time.sleep", lambda seconds: None)
+    repost = dataclasses.replace(listing, id="222", post_url=listing.post_url + "2")
+
+    def search(_item: Any, on_listing: Any, should_stop: Any, on_results: Any) -> Any:
+        yield listing
+        browser_moved_on.set()
+        yield repost
+
+    monitor.search_item(market, Mock(search=search), item)
+    recorded = [
+        call.kwargs["extra"]["aimm"]["listing_id"]
+        for call in monitor.logger.info.call_args_list
+        if call.kwargs.get("extra", {}).get("aimm", {}).get("kind") == "match_recorded"
+    ]
+    assert recorded == [listing.id, "222"]
+
+
+def test_search_progress_counts_opened_listings_per_results_page(
+    match_cache: Cache,
+    listing: Listing,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.photo_attempts = set()
+    monitor.search_cancelled = threading.Event()
+    monitor.config = SimpleNamespace(user={})
+    monitor.logger = None
+    monitor.evaluate_by_ai = Mock(return_value=AIResponse(4, "good"))
+    item = SimpleNamespace(name="test", notify=None, rating=[4], searched_count=1)
+    market = SimpleNamespace(name="facebook", notify=None, rating=None)
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.cache", match_cache)
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.counter", Mock())
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.time.sleep", lambda seconds: None)
+    snapshots = []
+
+    def search(_item: Any, on_listing: Any, should_stop: Any, on_results: Any) -> Any:
+        snapshots.append(monitor.progress_snapshot())
+        on_results(2)
+        on_listing(listing)
+        snapshots.append(monitor.progress_snapshot())
+        yield listing
+
+    monitor.search_item(market, Mock(search=search), item)
+    assert snapshots[0]["item"] == "test" and snapshots[0]["total"] is None
+    assert snapshots[1]["done"] == 1 and snapshots[1]["total"] == 2
+    assert snapshots[1]["cancelling"] is False
+    assert monitor.progress_snapshot() == {"cancelling": False}
 
 
 def make_monitor(match_cache: Cache, listing: Listing, monkeypatch: pytest.MonkeyPatch) -> Any:
@@ -936,6 +1051,7 @@ def test_due_search_precedes_background_work(
     monitor: Any = object.__new__(MarketplaceMonitor)
     monitor.photo_attempts = set()
     monitor.search_requested = threading.Event()
+    monitor.search_cancelled = threading.Event()
     monitor.rechecks = RecheckQueue()
     if work_kind == "recheck":
         monitor.rechecks.enqueue([{"marketplace": "facebook", "listing_id": "1"}], None, True)

@@ -382,6 +382,8 @@ class FacebookMarketplace(Marketplace):
         self: "FacebookMarketplace",
         item_config: FacebookItemConfig,
         on_listing: Callable[[Listing], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+        on_results: Callable[[int], None] | None = None,
     ) -> Generator[Listing, None, None]:
         if not self.page:
             self.login()
@@ -508,6 +510,8 @@ class FacebookMarketplace(Marketplace):
                     ]
 
             for search_phrase in item_config.search_phrases:
+                if should_stop is not None and should_stop():
+                    return
                 if self.logger:
                     self.logger.info(
                         f"""{hilight("[Search]", "info")} Searching {item_config.marketplace} for """
@@ -523,6 +527,13 @@ class FacebookMarketplace(Marketplace):
                     self.page, self.translator, self.logger
                 ).get_listings()
                 time.sleep(5)
+                if on_results is not None:
+                    on_results(
+                        sum(
+                            listing.post_url.split("?")[0] not in found
+                            for listing in found_listings
+                        )
+                    )
 
                 counter.increment(CounterItem.SEARCH_PERFORMED, item_config.name)
 
@@ -532,6 +543,8 @@ class FacebookMarketplace(Marketplace):
                     if listing.post_url.split("?")[0] in found:
                         continue
                     if self.keyboard_monitor is not None and self.keyboard_monitor.is_paused():
+                        return
+                    if should_stop is not None and should_stop():
                         return
                     counter.increment(CounterItem.LISTING_EXAMINED, item_config.name)
                     found[listing.post_url.split("?")[0]] = True

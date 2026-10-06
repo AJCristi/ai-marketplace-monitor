@@ -77,6 +77,7 @@ def test_request_runs_again_with_unchanged_config(
     monitor: Any = object.__new__(MarketplaceMonitor)
     monitor.photo_attempts = set()
     monitor.search_requested = threading.Event()
+    monitor.search_cancelled = threading.Event()
     monitor.rechecks = RecheckQueue()
     pending_image: list[bool] = []
     monitor.image_matcher = SimpleNamespace(
@@ -125,13 +126,22 @@ def test_restart_api_signals_monitor_and_context_requires_auth(tmp_path: Path) -
         '[marketplace.facebook]\nsearch_city = "houston"\n[item.camera]\nsearch_phrases = "camera"\n[user.me]\n',
         encoding="utf-8",
     )
-    request_search = Mock()
+    request_search, cancel_search = Mock(), Mock()
     handler = LogBroadcastHandler()
-    config = WebUIConfig(config_files=[path], log_handler=handler, request_search=request_search)
+    config = WebUIConfig(
+        config_files=[path],
+        log_handler=handler,
+        request_search=request_search,
+        cancel_search=cancel_search,
+        search_progress=lambda: {"item": "camera", "done": 3, "total": 9},
+    )
     state = AuthState()
     client = TestClient(create_app(config, state, ConfigFileService([path]), handler))
     assert client.post("/api/monitor/restart").status_code == 200
     request_search.assert_called_once()
+    assert client.post("/api/monitor/search/cancel").status_code == 200
+    cancel_search.assert_called_once()
+    assert client.get("/api/monitor/progress").json()["done"] == 3
     assert "inherited" in client.get("/api/config/context").json()
     handler.emit(logging.LogRecord("demo", logging.INFO, "test", 1, "hello", (), None))
     snapshot = client.get("/api/logs").json()
@@ -141,6 +151,7 @@ def test_restart_api_signals_monitor_and_context_requires_auth(tmp_path: Path) -
     state.exposed = True
     assert client.get("/api/config/context").status_code == 401
     assert client.post("/api/monitor/restart").status_code == 401
+    assert client.get("/api/monitor/progress").status_code == 401
 
 
 def test_authenticated_console_requires_csrf_and_recovers_after_expiry(
@@ -169,6 +180,7 @@ def test_authenticated_console_requires_csrf_and_recovers_after_expiry(
     assert client.post("/api/login", data=login).status_code == 200
     assert client.get("/api/config/context").status_code == 200
     assert client.post("/api/monitor/restart").status_code == 403
+    assert client.post("/api/monitor/search/cancel").status_code == 403
     headers = {CSRF_HEADER: client.cookies["aimm_csrf"]}
     assert client.post("/api/monitor/restart", headers=headers).status_code == 200
     requested.assert_called_once()
@@ -256,6 +268,7 @@ def test_fixed_times_do_not_repeat_initial_search(monkeypatch: pytest.MonkeyPatc
     monitor: Any = object.__new__(MarketplaceMonitor)
     monitor.photo_attempts = set()
     monitor.search_requested = threading.Event()
+    monitor.search_cancelled = threading.Event()
     monitor.rechecks = RecheckQueue()
     monitor.image_matcher = SimpleNamespace(
         automatic=False, queue=SimpleNamespace(pending=lambda: False)
