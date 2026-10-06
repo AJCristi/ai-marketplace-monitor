@@ -34,13 +34,13 @@ def test_search_page(
         assert listing.post_url, f"wrong post_url for listing {idx + 1} with title {listing.title}"
         assert listing.price, f"wrong price for listing {idx + 1} with title {listing.title}"
         if idx == 10:
-            assert (
-                listing.location == ""
-            ), f"listing {idx + 1} with title {listing.title} has empty location"
+            assert listing.location == "", (
+                f"listing {idx + 1} with title {listing.title} has empty location"
+            )
         else:
-            assert (
-                listing.location
-            ), f"wrong location for listing {idx + 1} with title {listing.title}"
+            assert listing.location, (
+                f"wrong location for listing {idx + 1} with title {listing.title}"
+            )
         assert listing.seller == "", "Seller should be empty"
 
     assert len(listings) == 21

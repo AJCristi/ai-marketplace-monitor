@@ -19,8 +19,6 @@ We use `uv` to manage and install dependencies. [uv](https://docs.astral.sh/uv/)
 pip install uv
 ```
 
-We'll also need `nox` for automated testing in multiple Python environments so [install that too](https://nox.thea.codes/en/stable/).
-
 To install the local development requirements inside a virtual environment run:
 
 ```
@@ -94,8 +92,7 @@ work, tests, or other changes before your pull request can be ultimately accepte
 
 ### Python Code Style
 
-All Python code is linted with [Ruff](https://github.com/astral-sh/ruff) and formated with
-[Isort](https://github.com/PyCQA/isort) and [Black](https://github.com/psf/black). You can
+All Python code is linted and formatted with [Ruff](https://github.com/astral-sh/ruff). You can
 execute `inv[oke] lint` and `inv[oke] format`.
 
 ## Additional Notes

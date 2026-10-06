@@ -154,7 +154,3 @@ def restore(content: str, secrets: SecretMap) -> str:
     for start, end, value in reversed(replacements):
         content = content[:start] + value + content[end:]
     return content
-
-
-def has_mask(content: str) -> bool:
-    return f'"{MASK}"' in content or f"'{MASK}'" in content

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import re
@@ -17,9 +16,8 @@ from diskcache import Cache  # type: ignore
 
 from .ai import AIResponse
 from .listing import Listing
-from .match_store import MatchStore, now
+from .match_store import MatchStore, now, photo_urls, source_hash
 from .seller import assess_seller, profile_url
-from .utils import CacheType
 
 
 def default_state() -> dict[str, Any]:
@@ -39,9 +37,7 @@ def library(local_cache: Cache) -> Iterator[MatchStore]:
                         listing_id,
                         {
                             **row,
-                            "price": row.get("snapshot_price")
-                            or row["current_price"]
-                            or row["price"],
+                            "price": row.get("snapshot_price") or row["price"],
                             "tracking_since": now(),
                             "imported": True,
                         },
@@ -108,21 +104,7 @@ def record_match(
 ) -> bool:
     with library(local_cache) as store:
         market, listing_id = listing.marketplace, listing.id
-        fields = asdict(listing) | {"url": listing.post_url}
-        if store.listing(market, listing_id) is None:
-            store.save_listing(
-                market,
-                listing_id,
-                fields
-                | {
-                    "state": default_state(),
-                    "notified_users": [],
-                    "tracking_since": now(),
-                    "imported": False,
-                },
-            )
-        else:
-            store.snapshot(market, listing_id, fields, "collected details (may be cached)")
+        save_details(store, listing, "collected details (may be cached)")
         previous = store.match(market, listing_id, item)
         ratings = rating_fields(rating)
         saved = previous or {
@@ -153,6 +135,25 @@ def record_match(
     return previous is None
 
 
+def save_details(store: MatchStore, listing: Listing, source: str) -> None:
+    """Start tracking a new listing, or snapshot changed details of a tracked one."""
+    fields = asdict(listing) | {"url": listing.post_url}
+    if store.listing(listing.marketplace, listing.id) is None:
+        store.save_listing(
+            listing.marketplace,
+            listing.id,
+            fields
+            | {
+                "state": default_state(),
+                "notified_users": [],
+                "tracking_since": now(),
+                "imported": False,
+            },
+        )
+    else:
+        store.snapshot(listing.marketplace, listing.id, fields, source)
+
+
 def record_delivery(local_cache: Cache, listing: Listing, user: str) -> None:
     with library(local_cache) as store:
         saved = store.listing(listing.marketplace, listing.id)
@@ -171,21 +172,7 @@ def record_manual_listing(
     """An empty search key holds a general assessment, never a search pass or sighting."""
     with library(local_cache) as store:
         market, listing_id = listing.marketplace, listing.id
-        fields = asdict(listing) | {"url": listing.post_url}
-        if store.listing(market, listing_id) is None:
-            store.save_listing(
-                market,
-                listing_id,
-                fields
-                | {
-                    "state": default_state(),
-                    "notified_users": [],
-                    "tracking_since": now(),
-                    "imported": False,
-                },
-            )
-        else:
-            store.snapshot(market, listing_id, fields, "manual listing details")
+        save_details(store, listing, "manual listing details")
         saved = store.match(market, listing_id, "")
         if saved is None:
             saved = {
@@ -317,7 +304,10 @@ def record_recheck(
         store.event(market, listing_id, "recheck", result["item"], result)
 
 
-def load_matches(local_cache: Cache) -> list[dict[str, Any]]:
+def load_matches(
+    local_cache: Cache, only_marketplace: str | None = None, only_listing_id: str | None = None
+) -> list[dict[str, Any]]:
+    """Load every match, or only one listing's matches when its identity is given."""
     with library(local_cache) as store:
         listings = {
             (r[0], r[1]): json.loads(r[2]) for r in store.db.execute("SELECT * FROM listings")
@@ -360,7 +350,10 @@ def load_matches(local_cache: Cache) -> list[dict[str, Any]]:
                 ):
                     profiles[url] = evidence
         rows = []
-        for record in store.db.execute("SELECT * FROM matches"):
+        for record in store.db.execute(
+            "SELECT * FROM matches WHERE ? IS NULL OR (marketplace=? AND listing_id=?)",
+            (only_marketplace, only_marketplace, only_listing_id),
+        ):
             market, listing_id, item, payload = record
             saved = json.loads(payload)
             detail = listings[(market, listing_id)]
@@ -392,10 +385,8 @@ def load_matches(local_cache: Cache) -> list[dict[str, Any]]:
                     "key": f"{market}:{listing_id}",
                     "photos": photos.get((market, listing_id), []),
                     "photo_pending": sum(
-                        (market, listing_id, hashlib.sha256(url.encode()).hexdigest())
-                        not in saved_sources
-                        for url in set(detail.get("image_urls") or [detail.get("image")])
-                        if isinstance(url, str) and url
+                        (market, listing_id, source_hash(url)) not in saved_sources
+                        for url in photo_urls(detail)
                     ),
                     "state": state,
                     "filed_under": list(dict.fromkeys([item, *state["filed_under"]])),
@@ -455,19 +446,10 @@ def update_state(
 
 
 def load_legacy_matches(local_cache: Cache) -> list[dict[str, Any]]:
-    """Retain only the matched/notified subset of details and AI cache entries."""
+    """Import notified listings with their cached details and AI ratings."""
     from .webui.found_export import _collect_needed, _fallback_url, _load_lookups
 
     notified, needed, hashes = _collect_needed(local_cache)
-    stored: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for key in local_cache.iterkeys():
-        if isinstance(key, tuple) and len(key) == 4 and key[0] == CacheType.MATCHED.value:
-            value = local_cache.get(key)
-            if isinstance(value, dict):
-                stored[key[1:]] = value
-                needed.add(key[1:3])
-                if value.get("listing_hash"):
-                    hashes.add(value["listing_hash"])
     details, ratings = _load_lookups(local_cache, needed, hashes)
     deliveries: dict[tuple[str, str], dict[str, Any]] = {}
     for market, listing_id, user, date, listing_hash, price in notified:
@@ -481,39 +463,14 @@ def load_legacy_matches(local_cache: Cache) -> list[dict[str, Any]]:
             entry.update(found_at=date, price=price)
         if listing_hash and not entry["listing_hash"]:
             entry["listing_hash"] = listing_hash
-    # Legacy notification keys have no search name. Use cached details when available;
-    # never assign a made-up search to a listing whose details have gone away.
-    identities = {key[:2] for key in stored}
-    for identity, delivery in deliveries.items():
-        if identity not in identities:
-            detail = details.get(identity, {})
-            rating = ratings.get(delivery["listing_hash"], {})
-            score = rating.get("score")
-            stored[(*identity, detail.get("name") or "")] = {
-                "found_at": delivery["found_at"],
-                "price": delivery["price"],
-                "source": "notified",
-                "score": score,
-                "conclusion": (
-                    AIResponse(score, "").conclusion
-                    if isinstance(score, int) and score in range(1, 6)
-                    else None
-                ),
-                "comment": rating.get("comment"),
-                "ai_name": rating.get("name"),
-            }
     rows = []
-    for (market, listing_id, item), saved in stored.items():
+    for (market, listing_id), delivery in deliveries.items():
         detail = details.get((market, listing_id), {})
-        delivery = deliveries.get((market, listing_id), {})
-        dates = [
-            str(date).replace(" ", "T", 1)
-            for date in (saved.get("found_at"), delivery.get("found_at"))
-            if date
-        ]
-        state = default_state() | (
-            local_cache.get((CacheType.MATCH_STATE.value, market, listing_id)) or {}
-        )
+        rating = ratings.get(delivery["listing_hash"], {})
+        score = rating.get("score")
+        # Legacy notification keys have no search name. Use cached details when available;
+        # never assign a made-up search to a listing whose details have gone away.
+        item = detail.get("name") or ""
         row = {
             name: detail.get(name) or ""
             for name in ("title", "image", "location", "seller", "condition", "description")
@@ -523,38 +480,25 @@ def load_legacy_matches(local_cache: Cache) -> list[dict[str, Any]]:
             marketplace=market,
             listing_id=listing_id,
             item=item,
-            filed_under=list(dict.fromkeys([item, *state["filed_under"]])),
+            filed_under=[item],
             url=detail.get("post_url") or _fallback_url(market, listing_id),
-            price=saved.get("price") or "",
-            current_price=saved.get("current_price"),
+            price=delivery["price"] or "",
             snapshot_price=detail.get("price"),
-            found_at=min(dates) if dates else "",
-            source=saved.get("source", "matched"),
-            notified_users=sorted(delivery.get("users", [])),
-            state=state,
-            **{name: saved.get(name) for name in ("score", "conclusion", "comment", "ai_name")},
-        )
-        evidence = detail.get("seller_profile")
-        if isinstance(evidence, dict):
-            url = profile_url(str(evidence.get("profile_url") or ""))
-            shared = local_cache.get((CacheType.SELLER_PROFILE.value, url)) if url else None
-            if isinstance(shared, dict) and str(shared.get("checked_at", "")) > str(
-                evidence.get("checked_at", "")
-            ):
-                evidence = shared
-        row["seller_profile"] = evidence
-        row["seller_assessment"] = assess_seller(evidence)
-        row["recheck"] = (
-            {
-                "at": saved["rechecked_at"],
-                "status": saved.get("last_status"),
-                **{
-                    name: saved.get(name)
-                    for name in ("old_score", "old_price", "reason", "threshold", "checked_item")
-                },
-            }
-            if saved.get("rechecked_at")
-            else None
+            found_at=str(delivery["found_at"]).replace(" ", "T", 1),
+            source="notified",
+            notified_users=sorted(delivery["users"]),
+            state=default_state(),
+            score=score,
+            conclusion=(
+                AIResponse(score, "").conclusion
+                if isinstance(score, int) and score in range(1, 6)
+                else None
+            ),
+            comment=rating.get("comment"),
+            ai_name=rating.get("name"),
+            seller_profile=detail.get("seller_profile"),
+            seller_assessment=assess_seller(detail.get("seller_profile")),
+            recheck=None,
         )
         rows.append(row)
     return rows

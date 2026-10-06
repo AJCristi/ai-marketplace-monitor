@@ -13,6 +13,7 @@ import requests
 from diskcache import Cache  # type: ignore
 from PIL import Image, ImageOps
 
+from .match_store import photo_urls, source_hash
 from .matches import library
 
 MAX_BYTES = 5 * 1024 * 1024
@@ -65,7 +66,8 @@ def download_image(url: str) -> bytes:
     raise ValueError("The saved photo redirected too many times.")
 
 
-def prepare_webp(raw: bytes) -> bytes:
+def open_photo(raw: bytes, max_side: int) -> Image.Image:
+    """Decode an untrusted photo upright as RGB, bounded in bytes, pixels and size."""
     if len(raw) > MAX_BYTES:
         raise ValueError("The saved photo is too large.")
     try:
@@ -73,29 +75,19 @@ def prepare_webp(raw: bytes) -> bytes:
             if original.width * original.height > 20_000_000:
                 raise ValueError("The saved photo has too many pixels.")
             photo = ImageOps.exif_transpose(original).convert("RGB")
-            photo.thumbnail((1600, 1600))
-            output = io.BytesIO()
-            photo.save(output, "WEBP", quality=80)
-            data = output.getvalue()
-            if len(data) > MAX_STORED_BYTES:
-                raise ValueError("The saved photo exceeds the archive size limit.")
-            return data
     except (OSError, Image.DecompressionBombError):
         raise ValueError("The saved photo is not a readable image.") from None
+    photo.thumbnail((max_side, max_side))
+    return photo
 
 
-def source_hash(url: str) -> str:
-    return hashlib.sha256(url.encode()).hexdigest()
-
-
-def photo_urls(row: dict[str, Any]) -> list[str]:
-    return list(
-        dict.fromkeys(
-            url
-            for url in (row.get("image_urls") or [row.get("image")])
-            if isinstance(url, str) and url
-        )
-    )
+def prepare_webp(raw: bytes) -> bytes:
+    output = io.BytesIO()
+    open_photo(raw, 1600).save(output, "WEBP", quality=80)
+    data = output.getvalue()
+    if len(data) > MAX_STORED_BYTES:
+        raise ValueError("The saved photo exceeds the archive size limit.")
+    return data
 
 
 def archive_next_photo(

@@ -609,16 +609,7 @@ class MarketplaceMonitor:
                 searched_items.update(job.tags)
                 job.run()
                 self.handle_pause()
-                # if configuration file has been changed, clear all scheduled jobs and restart
-                new_file_hash = calculate_file_hash(self.config_files)
-                assert self.config_hash is not None
-                if new_file_hash != self.config_hash or self.search_requested.is_set():
-                    self.search_requested.clear()
-                    if self.logger:
-                        self.logger.info(
-                            f"""{hilight("[Config]", "info")} Reloading configuration and running enabled searches."""
-                        )
-                    schedule.clear()
+                if self.reload_requested():
                     break
             if not schedule.get_jobs():
                 continue
@@ -646,25 +637,13 @@ class MarketplaceMonitor:
                 if idle_seconds <= 0:
                     schedule.run_pending()
                     continue
+                if self.reload_requested():
+                    break
                 if self.rechecks.pending() and time.monotonic() >= self.recheck_after:
                     # A due search always runs first. Execute one listing, then check
                     # the schedule and configuration again before taking another.
-                    if (
-                        calculate_file_hash(self.config_files) != self.config_hash
-                        or self.search_requested.is_set()
-                    ):
-                        self.search_requested.clear()
-                        schedule.clear()
-                        break
                     self.process_recheck()
                     continue
-                if (
-                    calculate_file_hash(self.config_files) != self.config_hash
-                    or self.search_requested.is_set()
-                ):
-                    self.search_requested.clear()
-                    schedule.clear()
-                    break
                 if self.image_matcher.automatic or self.image_matcher.queue.pending():
                     image_rows = load_matches(cache)
                     self.image_matcher.scan(image_rows)
@@ -704,28 +683,31 @@ class MarketplaceMonitor:
                     self.keyboard_monitor,
                     self.rechecks.wake,
                 )
-                if res == SleepStatus.BY_FILE_CHANGE or self.search_requested.is_set():
-                    # if configuration file has been changed, clear all scheduled jobs and restart
-                    new_file_hash = calculate_file_hash(self.config_files)
-                    assert self.config_hash is not None
-                    if new_file_hash != self.config_hash or self.search_requested.is_set():
-                        self.search_requested.clear()
-                        if self.logger:
-                            self.logger.info(
-                                f"""{hilight("[Config]", "info")} Reloading configuration and running enabled searches."""
-                            )
-                        schedule.clear()
-                        break
-                elif res == SleepStatus.BY_KEYBOARD:
+                if self.reload_requested():
+                    break
+                if res == SleepStatus.BY_KEYBOARD:
                     self.keyboard_monitor.set_paused(True)
 
                 self.handle_pause()
                 schedule.run_pending()
 
+    def reload_requested(self: "MarketplaceMonitor") -> bool:
+        """Clear the schedule when the config changed or a search was requested."""
+        if (
+            calculate_file_hash(self.config_files) == self.config_hash
+            and not self.search_requested.is_set()
+        ):
+            return False
+        self.search_requested.clear()
+        if self.logger:
+            self.logger.info(
+                f"""{hilight("[Config]", "info")} Reloading configuration and running enabled searches."""
+            )
+        schedule.clear()
+        return True
+
     def process_photo(self) -> bool:
         """Backfill and capture one photo between searches, without AI or notification I/O."""
-        if not hasattr(self, "photo_attempts"):
-            self.photo_attempts = set()
         result = archive_next_photo(cache, self.photo_attempts)
         if result and self.logger:
             self.logger.info(
@@ -737,18 +719,19 @@ class MarketplaceMonitor:
             )
         return result is not None
 
+    def retry_photos(self, marketplace: str, listing_id: str) -> None:
+        """Allow another archive attempt after fresh listing details arrive."""
+        self.photo_attempts = {
+            key for key in self.photo_attempts if key[:2] != (marketplace, listing_id)
+        }
+
     def process_recheck(self) -> None:
         """Execute at most one queued listing, on the synchronous monitor thread."""
         work = self.rechecks.take()
         if work is None:
             return
         job_id, identity, target, refresh = work
-        originals = [
-            row
-            for row in load_matches(cache)
-            if row["marketplace"] == identity["marketplace"]
-            and row["listing_id"] == identity["listing_id"]
-        ]
+        originals = load_matches(cache, identity["marketplace"], identity["listing_id"])
         original = next(
             (row for row in originals if row["item"] == identity.get("original_item")), None
         )
@@ -823,12 +806,7 @@ class MarketplaceMonitor:
             )
         if original is not None:
             record_recheck(cache, original, result, listing, rating)
-            if hasattr(self, "photo_attempts"):
-                self.photo_attempts = {
-                    key
-                    for key in self.photo_attempts
-                    if key[:2] != (identity["marketplace"], identity["listing_id"])
-                }
+            self.retry_photos(identity["marketplace"], identity["listing_id"])
         if listing is not None and original is not None:
             # The detail cache is shared with legacy CSV joins. A check against
             # another search must not relabel its original search in that cache.
@@ -919,10 +897,7 @@ class MarketplaceMonitor:
                 "Check the monitor activity, browser login and AI settings, then retry."
             )
             record_manual_listing(cache, listing, status="error", reason=result["reason"])
-        if hasattr(self, "photo_attempts"):
-            self.photo_attempts = {
-                key for key in self.photo_attempts if key[:2] != (listing.marketplace, listing.id)
-            }
+        self.retry_photos(listing.marketplace, listing.id)
         self.rechecks.finish(job_id, result)
         self.recheck_after = time.monotonic() + random.uniform(5, 15)
         if self.logger:

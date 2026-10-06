@@ -32,32 +32,6 @@ class ConfigFileInfo:
     size: int
 
 
-@dataclass
-class SectionInfo:
-    """A TOML section header found by a line-by-line scan.
-
-    Line numbers are 0-based. `line_end` is exclusive — it points at
-    the next section header, or at the total line count if this is the
-    last section. ``fields`` is a best-effort ``tomllib``-parsed dict of
-    the section's key→value pairs (empty if the file has a syntax error).
-    """
-
-    name: str  # e.g. "marketplace.facebook"
-    prefix: str  # e.g. "marketplace"
-    suffix: str  # e.g. "facebook" — empty if the section has no dot (e.g. "monitor")
-    line_start: int  # line containing the [header]
-    line_end: int  # exclusive upper bound
-    fields: Dict[str, Any] = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        """Initialize fields to empty dict if not provided."""
-        if self.fields is None:
-            self.fields = {}
-
-
-_SECTION_HEADER_RE = re.compile(r"^\s*\[([^\]\n]+)\]\s*$")
-
-
 def _parse_fields(content: str) -> Dict[str, Dict[str, Any]]:
     """Parse TOML content into a flat mapping of section names to fields.
 
@@ -84,40 +58,6 @@ def _parse_fields(content: str) -> Dict[str, Dict[str, Any]]:
 
     walk("", data)
     return result
-
-
-def scan_sections(content: str) -> List[SectionInfo]:
-    """Find every ``[section.name]`` header in ``content``.
-
-    Returns a list of ``SectionInfo`` in file order. Line-based scan —
-    no TOML parsing, works even on malformed files (e.g. during an
-    in-progress edit). Each section is enriched with parsed ``fields``
-    from a best-effort ``tomllib.loads()`` pass.
-    """
-    lines = content.splitlines()
-    headers: List[tuple[int, str]] = []
-    for i, line in enumerate(lines):
-        m = _SECTION_HEADER_RE.match(line)
-        if m:
-            headers.append((i, m.group(1).strip()))
-
-    parsed = _parse_fields(content)
-
-    sections: List[SectionInfo] = []
-    for idx, (line_start, name) in enumerate(headers):
-        line_end = headers[idx + 1][0] if idx + 1 < len(headers) else len(lines)
-        dot = name.find(".")
-        sections.append(
-            SectionInfo(
-                name=name,
-                prefix=name[:dot] if dot >= 0 else name,
-                suffix=name[dot + 1 :] if dot >= 0 else "",
-                line_start=line_start,
-                line_end=line_end,
-                fields=parsed.get(name, {}),
-            )
-        )
-    return sections
 
 
 class ConfigFileService:

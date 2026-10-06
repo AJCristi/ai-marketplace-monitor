@@ -1,4 +1,5 @@
 // Config and activity contracts shared with the native Node regression checks.
+export const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 export const list = value => value == null ? [] : Array.isArray(value) ? value : [value];
 export const own = (obj, key) => Object.hasOwn(obj || {}, key);
 export const filled = value => value != null && value !== '' && (!Array.isArray(value) || value.length > 0);

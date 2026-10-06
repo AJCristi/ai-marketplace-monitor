@@ -75,6 +75,7 @@ def test_request_runs_again_with_unchanged_config(
     monkeypatch: pytest.MonkeyPatch, image_arrives_during_clear: bool
 ) -> None:
     monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.photo_attempts = set()
     monitor.search_requested = threading.Event()
     monitor.rechecks = RecheckQueue()
     pending_image: list[bool] = []
@@ -197,6 +198,7 @@ def test_all_fixed_start_times_are_registered_with_marketplace_type(
     from ai_marketplace_monitor.facebook import FacebookItemConfig, FacebookMarketplaceConfig
 
     monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.photo_attempts = set()
     market = FacebookMarketplaceConfig(name="my_account", search_city=["houston"])
     item = FacebookItemConfig(
         name="camera",
@@ -232,6 +234,7 @@ def test_all_fixed_start_times_are_registered_with_marketplace_type(
 
 def test_ai_reload_replaces_previous_agents(monkeypatch: pytest.MonkeyPatch) -> None:
     monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.photo_attempts = set()
     provider = SimpleNamespace(name="openai", provider=None, enabled=True)
     monitor.config = SimpleNamespace(ai={"openai": provider})
     monitor.ai_agents = []
@@ -251,6 +254,7 @@ def test_ai_reload_replaces_previous_agents(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_fixed_times_do_not_repeat_initial_search(monkeypatch: pytest.MonkeyPatch) -> None:
     monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.photo_attempts = set()
     monitor.search_requested = threading.Event()
     monitor.rechecks = RecheckQueue()
     monitor.image_matcher = SimpleNamespace(

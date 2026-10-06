@@ -12,7 +12,13 @@ from ai_marketplace_monitor.ai import AIResponse
 from ai_marketplace_monitor.listing import Listing
 from ai_marketplace_monitor.match_store import MatchStore
 from ai_marketplace_monitor.matches import library, load_matches, record_match, record_sighting
-from ai_marketplace_monitor.photos import MAX_BYTES, archive_next_photo, prepare_webp
+from ai_marketplace_monitor.photos import (
+    MAX_BYTES,
+    archive_next_photo,
+    download_image,
+    image_url_allowed,
+    prepare_webp,
+)
 
 
 def image_bytes(color: str = "red", size: tuple[int, int] = (2000, 1000)) -> bytes:
@@ -112,3 +118,31 @@ def test_gallery_schema_upgrade_preserves_listing_and_state(tmp_path: Path) -> N
     with MatchStore(path) as store:
         saved = store.listing("facebook", "1")
         assert saved is not None and saved["title"] == "Existing"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://scontent.fbcdn.net/a",
+        "https://localhost/a",
+        "https://127.0.0.1/a",
+        "https://fbcdn.net.evil.test/a",
+        "https://user:pass@scontent.fbcdn.net/a",
+        "https://scontent.fbcdn.net:8443/a",
+        "file:///a",
+    ],
+)
+def test_download_url_boundary(url: str) -> None:
+    assert not image_url_allowed(url)
+
+
+def test_download_redirect_revalidated(monkeypatch: pytest.MonkeyPatch) -> None:
+    reply = Mock(is_redirect=True, headers={"Location": "http://127.0.0.1/private"})
+    reply.__enter__ = Mock(return_value=reply)
+    reply.__exit__ = Mock(return_value=False)
+    get = Mock(return_value=reply)
+    monkeypatch.setattr("ai_marketplace_monitor.photos.requests.get", get)
+    with pytest.raises(ValueError, match="supported Facebook"):
+        download_image("https://scontent.fbcdn.net/a")
+    assert get.call_count == 1
+    assert get.call_args.kwargs["allow_redirects"] is False

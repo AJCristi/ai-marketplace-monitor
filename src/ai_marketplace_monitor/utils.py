@@ -79,8 +79,6 @@ class CacheType(Enum):
     AI_INQUIRY = "ai-inquiries"
     USER_NOTIFIED = "user-notifications"
     COUNTERS = "counters"
-    MATCHED = "matches"
-    MATCH_STATE = "match-state"
     SELLER_PROFILE = "seller-profiles"
 
 

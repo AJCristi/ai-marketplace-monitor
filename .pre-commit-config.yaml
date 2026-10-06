@@ -18,19 +18,12 @@ repos:
       - id: end-of-file-fixer
       - id: trailing-whitespace
         exclude: .bumpversion.cfg
-  # - repo: https://github.com/timothycrosley/isort
-  #   rev: 5.13.2
-  #   hooks:
-  #     - id: isort
-  - repo: https://github.com/psf/black
-    rev: 24.10.0
-    hooks:
-      - id: black
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.11.12
     hooks:
       - id: ruff
         args: [--fix]
+      - id: ruff-format
   - repo: https://github.com/citation-file-format/cffconvert
     rev: 5295f87c0e261da61a7b919fc754e3a77edd98a7
     hooks:

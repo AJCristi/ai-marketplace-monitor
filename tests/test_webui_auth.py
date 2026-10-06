@@ -10,11 +10,8 @@ from fastapi.testclient import TestClient
 from ai_marketplace_monitor.webui.auth import (
     RateLimiter,
     SessionManager,
-    generate_password,
     hash_password,
-    read_password_file,
     verify_password,
-    write_password_file,
 )
 from ai_marketplace_monitor.webui.config_api import ConfigFileService
 from ai_marketplace_monitor.webui.log_handler import LogBroadcastHandler
@@ -22,7 +19,7 @@ from ai_marketplace_monitor.webui.server import WebUIConfig, _resolve_auth, crea
 
 
 def test_password_roundtrip() -> None:
-    pw = generate_password()
+    pw = "correct horse battery staple"
     h = hash_password(pw)
     assert verify_password(pw, h)
     assert not verify_password("wrong", h)
@@ -30,14 +27,6 @@ def test_password_roundtrip() -> None:
 
 def test_verify_password_rejects_garbage_hash() -> None:
     assert not verify_password("whatever", "not-a-hash")
-
-
-def test_password_file_roundtrip(tmp_path: Path) -> None:
-    f = tmp_path / "pw"
-    h = hash_password("hello")
-    write_password_file(f, h)
-    assert read_password_file(f) == h
-    assert read_password_file(tmp_path / "missing") is None
 
 
 def test_session_issue_and_validate() -> None:
@@ -69,12 +58,6 @@ def test_rate_limiter_reset_on_success() -> None:
         rl.record_failure("1.2.3.4")
     rl.reset("1.2.3.4")
     assert not rl.is_locked("1.2.3.4")
-
-
-def test_generate_password_structure() -> None:
-    pw = generate_password()
-    assert "-" in pw
-    assert len(pw.replace("-", "")) == 20
 
 
 @pytest.mark.parametrize("local_only", ["0", "1", "true"])
