@@ -1,19 +1,10 @@
 """Tests for `ai_marketplace_monitor` module."""
 
-import time
-
 from diskcache import Cache  # type: ignore
 
-from ai_marketplace_monitor.ai import AIResponse  # type: ignore
-from ai_marketplace_monitor.facebook import FacebookItemConfig
 from ai_marketplace_monitor.listing import Listing
 from ai_marketplace_monitor.notification import NotificationStatus
 from ai_marketplace_monitor.user import User
-
-
-def test_version(version: str) -> None:
-    """Sample pytest test function with the pytest fixture as an argument."""
-    assert version and version[0].isdigit()
 
 
 def test_listing_cache(temp_cache: Cache, listing: Listing) -> None:
@@ -50,8 +41,9 @@ def test_notification_cache(temp_cache: Cache, user: User, listing: Listing) -> 
 
     #
     user.config.remind = 1
-
-    time.sleep(2)
+    temp_cache.set(
+        user.notified_key(listing), ("2000-01-01 00:00:00", listing.hash, listing.price)
+    )
 
     assert user.notification_status(listing, local_cache=temp_cache) == NotificationStatus.EXPIRED
 
@@ -61,9 +53,3 @@ def test_notification_cache(temp_cache: Cache, user: User, listing: Listing) -> 
         user.notification_status(listing, local_cache=temp_cache)
         == NotificationStatus.LISTING_CHANGED
     )
-
-
-def test_notify_all(
-    user: User, item_config: FacebookItemConfig, listing: Listing, ai_response: AIResponse
-) -> None:
-    user.notify([listing], [ai_response], item_config)

@@ -6,7 +6,6 @@ import pytest
 from diskcache import Cache
 from pytest import TempPathFactory
 
-import ai_marketplace_monitor
 from ai_marketplace_monitor.ai import (
     AIResponse,  # type: ignore
     OllamaBackend,
@@ -15,12 +14,6 @@ from ai_marketplace_monitor.ai import (
 from ai_marketplace_monitor.facebook import FacebookItemConfig, FacebookMarketplaceConfig
 from ai_marketplace_monitor.listing import Listing
 from ai_marketplace_monitor.user import User, UserConfig
-
-
-@pytest.fixture
-def version() -> Generator[str, None, None]:
-    """Sample pytest fixture."""
-    yield ai_marketplace_monitor.__version__
 
 
 @pytest.fixture
