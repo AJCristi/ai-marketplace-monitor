@@ -53,6 +53,17 @@ This browser remembers your filters, sorting and grouping when you return to
 Matches. A URL with explicit filters takes precedence. **Clear filters** resets
 the search, rating, status, price-drop and text filters while keeping sorting and grouping.
 
+On a wide window a preview pane sits beside the list. Selecting a title, or moving
+with <kbd>j</kbd>/<kbd>k</kbd>, shows that match's photos, price, rating, AI comment,
+key facts and dates with **Shortlist**, **Dismiss** and **Contacted** buttons;
+deciding moves to the next match. **Open full page** (or <kbd>o</kbd>) opens the
+detail page. On narrower windows and phones, selecting a title opens the detail page.
+
+The detail page keeps the price, decisions, **Open on Facebook** and key dates beside
+the photos, then shows the AI rating, the seller's description and listing facts.
+**History**, **Seller credibility**, **Re-check and filing** and **Related listings**
+are folded below; a failed re-check or assessment opens its section.
+
 Select a listing title to open its full detail page. **Previous** and **Next** review
 loaded matches in group order and stop at the first or last loaded match. Use
 **Load more matches** in the list for the next page. **Matches** returns to your

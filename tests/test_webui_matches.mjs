@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {groupMatches, mergeMatchRows, applyRecheckResult, recheckStatuses, priceDropped, priceDropText, matchDate, relativeDate, rowDate, ratingWord, dayGroupLabel, matchShortcut, galleryHtml, createMatchesView} from '../src/ai_marketplace_monitor/webui/static/matches.js';
+import {groupMatches, mergeMatchRows, applyRecheckResult, recheckStatuses, priceDropped, priceDropText, matchDate, relativeDate, rowDate, ratingWord, dayGroupLabel, matchShortcut, keyDates, galleryHtml, createMatchesView} from '../src/ai_marketplace_monitor/webui/static/matches.js';
 
 const row = (key,item,extra={})=>({key,item,marketplace:key.split(':')[0],listing_id:key.split(':')[1],title:'Listing',state:{filed_under:[],shortlisted:false,contacted:false,dismissed:false},notified_users:[],filed_under:[item],found_at:'2026-10-03T10:00:00',...extra});
 test('manual filing counts once and a real target evaluation wins over a manual label',()=>{
@@ -446,4 +446,24 @@ test('keyboard triage moves through rows, decides, advances and undoes',async t=
   assert.deepEqual(puts.at(-1),['/api/matches/fb/2/state',{dismissed:true}]);
   assert.match(h.node('matches-body').innerHTML,/Dismissed Listing 2/);
   h.stored.set('aimm-shortcuts','off');const before=puts.length;await press('s');assert.equal(puts.length,before);
+});
+
+test('key dates list labelled events newest first and skip missing ones',()=>{
+  const html=keyDates({found_at:'2026-10-01T18:40:00',last_seen:'2026-10-03T13:58:00',seen_count:6,notified_users:['me'],recheck:{at:'invalid',status:'passed'}});
+  assert.ok(html.indexOf('Last seen by a search')<html.indexOf('Found'));
+  assert.match(html,/6 sightings/);assert.match(html,/sent to me/);assert.doesNotMatch(html,/Re-checked/);
+  assert.match(keyDates({source:'manual',found_at:'2026-10-02T20:15:00',notified_users:[]}),/Added by you[\s\S]*no notification sent/);
+  assert.match(keyDates({notified_users:[]}),/No dates recorded/);
+});
+
+test('detail page leads with price, decisions and the seller description, folding rare sections',async t=>{
+  const listing=row('fb:1','camera',{score:4,price:'$360',current_price:'$320',description:'Light wear\non the seat',url:'https://www.facebook.com/marketplace/item/1/',state:{filed_under:[],shortlisted:false,contacted:false,dismissed:false},notified_users:['me'],seller_assessment:{status:'established',reasons:['Joined 2014']}});
+  const h=viewHarness(t,{matches:[listing]});h.view.render();await h.flush();await h.open();
+  const detail=h.node('match-detail').innerHTML, top=h.node('match-page-top').innerHTML;
+  assert.match(top,/−\$40 \(−11%\)/);assert.match(top,/Found /);
+  assert.ok(detail.indexOf('data-state="shortlisted"')<detail.indexOf('Seller’s description'));
+  assert.match(detail,/Light wear\non the seat/);
+  assert.match(detail,/<details id="match-history" data-section="history">/);
+  assert.match(detail,/data-section="recheck">/);assert.doesNotMatch(detail,/data-section="recheck" open/);
+  assert.match(detail,/Seller: Established/);assert.match(detail,/aria-keyshortcuts="v"/);
 });
