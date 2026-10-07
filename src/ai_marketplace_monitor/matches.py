@@ -21,7 +21,13 @@ from .seller import assess_seller, profile_url
 
 
 def default_state() -> dict[str, Any]:
-    return {"shortlisted": False, "contacted": False, "dismissed": False, "filed_under": []}
+    return {
+        "shortlisted": False,
+        "contacted": False,
+        "dismissed": False,
+        "filed_under": [],
+        "note": "",
+    }
 
 
 @contextmanager
@@ -418,9 +424,9 @@ def rating_fields(rating: AIResponse) -> dict[str, Any]:
 def update_state(
     local_cache: Cache, marketplace: str, listing_id: str, patch: dict[str, Any]
 ) -> dict[str, Any]:
-    allowed = {"shortlisted", "contacted", "dismissed", "filed_under"}
+    allowed = {"shortlisted", "contacted", "dismissed", "filed_under", "note"}
     if not patch or patch.keys() - allowed:
-        raise ValueError("Supply shortlisted, contacted, dismissed or filed_under")
+        raise ValueError("Supply shortlisted, contacted, dismissed, filed_under or note")
     for name, value in patch.items():
         if name == "filed_under":
             if (
@@ -433,6 +439,10 @@ def update_state(
             ):
                 raise ValueError("filed_under must contain at most 100 search names")
             patch[name] = list(dict.fromkeys(value))
+        elif name == "note":
+            if not isinstance(value, str) or len(value.strip()) > 2000:
+                raise ValueError("note must be text of at most 2000 characters")
+            patch[name] = value.strip()
         elif type(value) is not bool:
             raise ValueError(f"{name} must be a boolean")
     with library(local_cache) as store:
@@ -522,6 +532,21 @@ def price_dropped(row: dict[str, Any]) -> bool:
     return math.isfinite(previous) and math.isfinite(current) and current < previous
 
 
+def is_undecided_since(row: dict[str, Any], since: datetime | None) -> bool:
+    state = row["state"]
+    if not row["found_at"] or any(
+        state.get(name) for name in ("shortlisted", "contacted", "dismissed")
+    ):
+        return False
+    try:
+        return (
+            since is None
+            or datetime.fromisoformat(row["found_at"]).timestamp() > since.timestamp()
+        )
+    except ValueError:
+        return False
+
+
 def query_matches(
     local_cache: Cache,
     *,
@@ -545,20 +570,14 @@ def query_matches(
         for name in ("shortlisted", "contacted", "dismissed")
     }
     counts["all"] = sum(not row["state"]["dismissed"] for row in rows)
+    new_keys = {row["key"] for row in rows if is_undecided_since(row, since)}
+    counts["new"] = len(new_keys)
     groups: dict[str, int] = {}
     new_groups: dict[str, int] = {}
-    new_count = 0
     memberships: set[tuple[str, str]] = set()
     for row in rows:
         if not row["state"]["dismissed"]:
-            try:
-                is_new = bool(row["found_at"]) and (
-                    since is None
-                    or datetime.fromisoformat(row["found_at"]).timestamp() > since.timestamp()
-                )
-            except ValueError:
-                is_new = False
-            new_count += int(is_new)
+            is_new = row["key"] in new_keys
             for name in row["filed_under"]:
                 membership = (row["key"], name)
                 if membership not in memberships:
@@ -571,7 +590,11 @@ def query_matches(
         if (not item or item in row["filed_under"])
         and (not price_drop or price_dropped(row))
         and (min_score is None or (row["score"] is not None and row["score"] >= min_score))
-        and (status == "all" or row["state"].get(status))
+        and (
+            status == "all"
+            or (status == "new" and row["key"] in new_keys)
+            or (status != "new" and row["state"].get(status))
+        )
         and (
             not row["state"]["dismissed"]
             or status == "dismissed"
@@ -602,7 +625,7 @@ def query_matches(
         "matches": rows[cursor : cursor + limit if limit is not None else None],
         "total": len(rows),
         "library_total": counts["all"],
-        "new_count": new_count,
+        "new_count": counts["new"],
         "counts": counts,
         "filtered_groups": [
             {"item": name, "count": len(keys)} for name, keys in sorted(filtered_groups.items())

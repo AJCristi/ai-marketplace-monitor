@@ -122,11 +122,12 @@ class WebUIConfig:
 class MatchFilters:
     item: str | None = None
     min_score: int | None = Query(default=None, ge=1, le=5)
-    status: str = Query(default="all", pattern="^(all|shortlisted|contacted|dismissed)$")
+    status: str = Query(default="all", pattern="^(all|new|shortlisted|contacted|dismissed)$")
     include_dismissed: bool = False
     price_drop: bool = False
     q: str = Query(default="", max_length=500)
     sort: str = Query(default="newest", pattern="^(newest|last_seen|price|score)$")
+    since: datetime | None = None
 
 
 @dataclass
@@ -548,10 +549,9 @@ def create_app(
         filters: Annotated[MatchFilters, Depends()],
         limit: int = Query(default=200, ge=1, le=1000),
         cursor: int = Query(default=0, ge=0),
-        since: datetime | None = None,
         _: str = Depends(require_session),
     ) -> Dict[str, Any]:
-        result = query_matches(cache, **vars(filters), limit=limit, cursor=cursor, since=since)
+        result = query_matches(cache, **vars(filters), limit=limit, cursor=cursor)
         if config.image_matcher:
             for row in result["matches"]:
                 row["related_count"] = sum(

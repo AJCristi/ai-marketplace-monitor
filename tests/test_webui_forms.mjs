@@ -287,7 +287,7 @@ test('live search completions update sidebar and activity labels while the feed 
 test('View matches scopes results to the saved search with a safely encoded name',()=>{
   const app=consoleUnderTest(),name='camera & lens/#?';app.state.config={item:{[name]:{search_phrases:['camera']}}};
   app.run('renderFeed=()=>{};');app.renderActivity(name);
-  assert.ok(app.control('#pane').innerHTML.includes(`href="#/monitor/matches?item=${encodeURIComponent(name)}">View matches</a>`));
+  assert.ok(app.control('#pane').innerHTML.includes(`href="#/monitor/matches?item=${encodeURIComponent(name)}&status=all">View matches</a>`));
 });
 
 test('CSV downloads use the requested collection and preserve the default notified export',async()=>{
