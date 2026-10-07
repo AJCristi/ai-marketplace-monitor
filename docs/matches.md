@@ -33,11 +33,19 @@ can leave an entry awaiting assessment; use **Assess again** to resume it. Exist
 shortlist, contacted, dismissal, filing and **Check against another search** actions
 also apply to manually added listings. Search evaluations keep their own ratings.
 
-Filter by search, rating, status, price drops or text, and group by search or date found.
+Each saved search is a category. Use the **Category** buttons to show one search,
+filter by rating, status, price drops or text, and group by category or day found.
+Category groups show every match and collapse from their heading, which summarises
+new matches, the best rating and price drops.
+Ratings read as words with a five-step bar: Poor, Unclear, Fair, Good and Great deal
+for 1–5; unrated listings say **Not rated**. Each row names its date, such as
+“Found 16 min ago” or, when sorted by **Last seen**, “Seen yesterday 11:20”;
+hover it for the full timestamp. A row shows at most two badges, for exceptions
+such as a price drop, a rating that fell on re-check or **Seller: Caution**.
 **Price dropped** shows known current prices below the previous re-check price
 (or the price when first found if there is no previous re-check price).
 Filters stay in the URL, for example `#/monitor/matches?item=office_chair`.
-Group counts and group re-checks respect the active filters. **Listed price ↑**
+Group counts and group re-checks respect the active filters. **Price: low to high**
 uses the amount written in the listing, without guessing missing thousands or
 substituting AI estimates. Confirm shorthand or placeholder prices with the seller;
 compound and unrecognized price formats sort last and cannot indicate a price drop.
@@ -48,8 +56,22 @@ the search, rating, status, price-drop and text filters while keeping sorting an
 Select a listing title to open its full detail page. **Previous** and **Next** review
 loaded matches in group order and stop at the first or last loaded match. Use
 **Load more matches** in the list for the next page. **Matches** returns to your
-filters, grouping, expanded groups and scroll position. Shortlist or dismiss from
+filters, grouping, collapsed groups and scroll position. Shortlist or dismiss from
 any row; a dismissed row offers **Undo** until you leave or change filters.
+
+Matches opens on **New**: listings found since you last chose **Mark all seen**
+that you have not shortlisted, contacted or dismissed. Deciding on a listing
+removes it from **New**; **Mark all seen** clears the rest. **All** shows the
+whole library. Each shortlist, contacted or dismiss change shows an **Undo**
+notice. **Export CSV** on **New** exports the same new listings.
+
+Keyboard shortcuts work on the list and the detail page: <kbd>j</kbd>/<kbd>k</kbd>
+move between matches, <kbd>o</kbd> or Enter opens one, <kbd>u</kbd> or Esc returns
+to the list, <kbd>s</kbd> shortlists, <kbd>e</kbd> dismisses, <kbd>c</kbd> marks
+contacted, <kbd>v</kbd> opens the listing on Facebook, <kbd>z</kbd> undoes the last
+change, <kbd>/</kbd> searches and <kbd>?</kbd> lists them. After a decision on the
+list the selection moves to the next match. Shortcuts never fire while typing in a
+field; turn them off in **Keyboard shortcuts**. That setting is stored in this browser.
 
 ## Photo gallery
 
@@ -89,7 +111,8 @@ under their searches.
 
 ## Seller credibility
 
-Each match shows a separate **Seller: Established / Caution / Unknown** label.
+Each match has a separate **Seller: Established / Caution / Unknown** label. The
+list shows it only for **Caution**; the detail page always shows it.
 Open the match for the supporting reasons, the time evidence was collected, and
 a link to the seller's Marketplace profile when it is available.
 
@@ -259,8 +282,9 @@ backup while the monitor runs, use SQLite's backup API rather than copying an op
 WAL database. Storage grows with matches and meaningful history; there is no automatic
 retention cleanup or permanent-delete action in this version.
 
-“New” is measured against the last time this browser opened Matches and stored
-locally when browser storage is available. It is not shared between devices.
+“New” is measured against the last time you chose **Mark all seen** in this browser,
+stored locally when browser storage is available. It is not shared between devices.
+Until you first choose it, every undecided match counts as new.
 Legacy notification records do not identify the originating search; those use the
 available cached listing name, or show an unknown search if details are missing.
 Historical AI joins for these legacy records retain the CSV export's hash-based

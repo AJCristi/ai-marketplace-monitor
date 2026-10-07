@@ -522,6 +522,21 @@ def price_dropped(row: dict[str, Any]) -> bool:
     return math.isfinite(previous) and math.isfinite(current) and current < previous
 
 
+def is_undecided_since(row: dict[str, Any], since: datetime | None) -> bool:
+    state = row["state"]
+    if not row["found_at"] or any(
+        state.get(name) for name in ("shortlisted", "contacted", "dismissed")
+    ):
+        return False
+    try:
+        return (
+            since is None
+            or datetime.fromisoformat(row["found_at"]).timestamp() > since.timestamp()
+        )
+    except ValueError:
+        return False
+
+
 def query_matches(
     local_cache: Cache,
     *,
@@ -545,20 +560,14 @@ def query_matches(
         for name in ("shortlisted", "contacted", "dismissed")
     }
     counts["all"] = sum(not row["state"]["dismissed"] for row in rows)
+    new_keys = {row["key"] for row in rows if is_undecided_since(row, since)}
+    counts["new"] = len(new_keys)
     groups: dict[str, int] = {}
     new_groups: dict[str, int] = {}
-    new_count = 0
     memberships: set[tuple[str, str]] = set()
     for row in rows:
         if not row["state"]["dismissed"]:
-            try:
-                is_new = bool(row["found_at"]) and (
-                    since is None
-                    or datetime.fromisoformat(row["found_at"]).timestamp() > since.timestamp()
-                )
-            except ValueError:
-                is_new = False
-            new_count += int(is_new)
+            is_new = row["key"] in new_keys
             for name in row["filed_under"]:
                 membership = (row["key"], name)
                 if membership not in memberships:
@@ -571,7 +580,11 @@ def query_matches(
         if (not item or item in row["filed_under"])
         and (not price_drop or price_dropped(row))
         and (min_score is None or (row["score"] is not None and row["score"] >= min_score))
-        and (status == "all" or row["state"].get(status))
+        and (
+            status == "all"
+            or (status == "new" and row["key"] in new_keys)
+            or (status != "new" and row["state"].get(status))
+        )
         and (
             not row["state"]["dismissed"]
             or status == "dismissed"
@@ -602,7 +615,7 @@ def query_matches(
         "matches": rows[cursor : cursor + limit if limit is not None else None],
         "total": len(rows),
         "library_total": counts["all"],
-        "new_count": new_count,
+        "new_count": counts["new"],
         "counts": counts,
         "filtered_groups": [
             {"item": name, "count": len(keys)} for name, keys in sorted(filtered_groups.items())

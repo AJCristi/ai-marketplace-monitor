@@ -1016,6 +1016,28 @@ def test_new_badges_and_manual_groups(match_cache: Cache, listing: Listing) -> N
     )
 
 
+def test_new_status_lists_undecided_matches_found_since_last_seen(
+    match_cache: Cache, listing: Listing
+) -> None:
+    record_match(match_cache, listing, "test", AIResponse(4, "good"))
+    second = dataclasses.replace(listing, id="222", title="Another listing")
+    record_match(match_cache, second, "test", AIResponse(3, "fair"))
+    since = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    result = query_matches(match_cache, status="new", since=since)
+    assert result["total"] == 2
+    assert result["counts"]["new"] == result["new_count"] == 2
+    update_state(match_cache, "facebook", listing.id, {"shortlisted": True})
+    update_state(match_cache, "facebook", second.id, {"dismissed": True})
+    result = query_matches(match_cache, status="new", since=since)
+    assert result["total"] == result["counts"]["new"] == 0
+    update_state(match_cache, "facebook", second.id, {"dismissed": False})
+    assert [row["listing_id"] for row in query_matches(match_cache, status="new")["matches"]] == [
+        "222"
+    ]
+    later = datetime(2100, 1, 1, tzinfo=timezone.utc)
+    assert query_matches(match_cache, status="new", since=later)["total"] == 0
+
+
 def test_filtered_group_counts_cover_all_pages_and_deduplicate(
     match_cache: Cache, listing: Listing
 ) -> None:
