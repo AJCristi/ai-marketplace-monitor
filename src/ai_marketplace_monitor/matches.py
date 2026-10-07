@@ -21,7 +21,13 @@ from .seller import assess_seller, profile_url
 
 
 def default_state() -> dict[str, Any]:
-    return {"shortlisted": False, "contacted": False, "dismissed": False, "filed_under": []}
+    return {
+        "shortlisted": False,
+        "contacted": False,
+        "dismissed": False,
+        "filed_under": [],
+        "note": "",
+    }
 
 
 @contextmanager
@@ -418,9 +424,9 @@ def rating_fields(rating: AIResponse) -> dict[str, Any]:
 def update_state(
     local_cache: Cache, marketplace: str, listing_id: str, patch: dict[str, Any]
 ) -> dict[str, Any]:
-    allowed = {"shortlisted", "contacted", "dismissed", "filed_under"}
+    allowed = {"shortlisted", "contacted", "dismissed", "filed_under", "note"}
     if not patch or patch.keys() - allowed:
-        raise ValueError("Supply shortlisted, contacted, dismissed or filed_under")
+        raise ValueError("Supply shortlisted, contacted, dismissed, filed_under or note")
     for name, value in patch.items():
         if name == "filed_under":
             if (
@@ -433,6 +439,10 @@ def update_state(
             ):
                 raise ValueError("filed_under must contain at most 100 search names")
             patch[name] = list(dict.fromkeys(value))
+        elif name == "note":
+            if not isinstance(value, str) or len(value.strip()) > 2000:
+                raise ValueError("note must be text of at most 2000 characters")
+            patch[name] = value.strip()
         elif type(value) is not bool:
             raise ValueError(f"{name} must be a boolean")
     with library(local_cache) as store:

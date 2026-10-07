@@ -52,6 +52,19 @@ compound and unrecognized price formats sort last and cannot indicate a price dr
 This browser remembers your filters, sorting and grouping when you return to
 Matches. A URL with explicit filters takes precedence. **Clear filters** resets
 the search, rating, status, price-drop and text filters while keeping sorting and grouping.
+Active filters also appear as chips under the filter bar; select a chip's ✕ to remove
+just that filter. On a phone, **Filters** shows or hides the filter controls and counts
+the active ones. **Density** switches between comfortable rows and compact rows with
+smaller photos and no AI summary; this browser remembers the choice.
+
+Tick a row's checkbox to select it, or press <kbd>x</kbd> on the selected row;
+Shift-select another row to select the range between them. The bulk bar shortlists,
+marks contacted or dismisses every selected listing at once (**Restore** on the
+**Dismissed** tab), and **Undo** reverses the whole change. **Select all** selects the
+loaded matches.
+
+When a search finds new matches while the list is open, they wait behind
+**N new matches · Show** instead of shifting the rows you are reading.
 
 On a wide window a preview pane sits beside the list. Selecting a title, or moving
 with <kbd>j</kbd>/<kbd>k</kbd>, shows that match's photos, price, rating, AI comment,
@@ -83,6 +96,10 @@ contacted, <kbd>v</kbd> opens the listing on Facebook, <kbd>z</kbd> undoes the l
 change, <kbd>/</kbd> searches and <kbd>?</kbd> lists them. After a decision on the
 list the selection moves to the next match. Shortcuts never fire while typing in a
 field; turn them off in **Keyboard shortcuts**. That setting is stored in this browser.
+
+The detail page has a private **Your note** box for details such as when you messaged
+the seller. Notes save as you type, are shared across devices like other personal
+states, show in the preview pane, and hold up to 2,000 characters.
 
 ## Photo gallery
 

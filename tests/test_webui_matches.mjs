@@ -59,7 +59,7 @@ function viewHarness(t,{route='#/monitor/matches',saved='',matches=[],groups,fil
       get innerHTML(){return this.html||'';},set innerHTML(html){this.html=html;if(id==='pane'){nodes.clear();nodes.set('pane',this);controls.length=0;}
         for(const old of this.children){const position=controls.indexOf(old);if(position>=0)controls.splice(position,1);if(old.id&&nodes.get(old.id)===old)nodes.delete(old.id);}
         this.children=[];
-        for(const match of html.matchAll(/<(form|p|button|input|select|a|h1|div|span|article|section|aside|details)\b([^>]*)>/g)){
+        for(const match of html.matchAll(/<(form|p|button|input|select|textarea|a|h1|div|span|article|section|aside|details)\b([^>]*)>/g)){
           const attributes=match[2],childId=attributes.match(/\bid="([^"]+)"/)?.[1];
           if(!childId&&!/data-/.test(attributes))continue;
           const child=element(childId,attributes,match[1]);
@@ -407,7 +407,7 @@ test('single-key shortcuts ignore typing, modifiers and dialogs',()=>{
   assert.deepEqual(['j','k','o','u','Escape','s','e','c','v','z','?','/'].map(name=>key(name)),['next','previous','open','back','back','shortlisted','dismissed','contacted','facebook','undo','help','search']);
   assert.equal(key('s',{inField:true}),null);
   assert.equal(key('s',{ctrlKey:true}),null);assert.equal(key('j',{metaKey:true}),null);
-  assert.equal(key('x'),null);assert.equal(key('J'),null);
+  assert.equal(key('x'),'select');assert.equal(key('q'),null);assert.equal(key('J'),null);
 });
 
 test('Matches opens on New, offers Show all when caught up and Mark all seen can be undone',async t=>{
@@ -466,4 +466,52 @@ test('detail page leads with price, decisions and the seller description, foldin
   assert.match(detail,/<details id="match-history" data-section="history">/);
   assert.match(detail,/data-section="recheck">/);assert.doesNotMatch(detail,/data-section="recheck" open/);
   assert.match(detail,/Seller: Established/);assert.match(detail,/aria-keyshortcuts="v"/);
+});
+
+test('applied filters appear as removable chips and price drop is a checkbox',async t=>{
+  const h=viewHarness(t,{route:'#/monitor/matches?item=camera&min_score=4&price_drop=true&q=lens'});h.view.render();await h.flush();
+  const chips=h.node('match-chips').innerHTML;
+  assert.match(chips,/Category: camera/);assert.match(chips,/Good or better/);assert.match(chips,/Price dropped/);assert.match(chips,/Contains “lens”/);
+  assert.equal(h.node('match-chips-row').hidden,false);
+  h.control('[data-remove-filter="min_score"]').onclick();await h.flush();
+  const params=new URL(h.requests.at(-1),'http://localhost').searchParams;
+  assert.equal(params.has('min_score'),false);assert.equal(params.get('item'),'camera');
+  assert.doesNotMatch(h.node('match-chips').innerHTML,/Good or better/);
+});
+
+test('bulk selection supports ranges, updates each listing once and can be undone',async t=>{
+  const listings=[1,2,3,4].map(id=>row('fb:'+id,'camera',{title:'Listing '+id,state:{filed_under:[],shortlisted:false,contacted:false,dismissed:false},notified_users:[]}));
+  const puts=[];
+  const h=viewHarness(t,{matches:listings,respond:(url,options)=>{if(url.endsWith('/state')){puts.push([url,JSON.parse(options.body)]);return JSON.parse(options.body);}}});
+  h.view.render();await h.flush();
+  const box=id=>document.querySelectorAll('[data-select-match]').find(el=>el.dataset.selectMatch===JSON.stringify(['fb:'+id,'camera']));
+  const click=(id,shiftKey)=>{const el=box(id);el.checked=true;el.onclick({shiftKey});};
+  click(1,false);await h.flush();
+  click(3,true);await h.flush();
+  assert.match(h.node('matches-body').innerHTML,/3 selected/);
+  await h.control('[data-bulk="dismissed"]').onclick();await h.flush();
+  assert.deepEqual(puts.map(([url,body])=>[url.split('/')[4],body]),[['1',{dismissed:true}],['2',{dismissed:true}],['3',{dismissed:true}]]);
+  assert.doesNotMatch(h.node('matches-body').innerHTML,/selected</);
+  await h.view.onKey({key:'z',target:null,preventDefault(){}});await h.flush();
+  assert.deepEqual(puts.slice(3).map(([,body])=>body),[{dismissed:false},{dismissed:false},{dismissed:false}]);
+});
+
+test('new matches arriving mid-triage wait behind a Show button',async t=>{
+  const h=viewHarness(t,{matches:[row('fb:1','camera')]});h.view.render();await h.flush();
+  const before=h.requests.filter(url=>url.includes('status=new')).length;
+  h.view.onRecord({extra:{kind:'match_recorded'}});h.view.onRecord({extra:{kind:'match_recorded'}});await h.tick();
+  assert.match(h.node('matches-arrivals').innerHTML,/2 new matches · Show/);
+  assert.equal(h.requests.filter(url=>url.includes('status=new')).length,before);
+  h.node('matches-arrivals-show').onclick();await h.flush();
+  assert.equal(h.node('matches-arrivals').innerHTML,'');
+});
+
+test('private notes save after typing and report the result',async t=>{
+  const listing=row('fb:1','camera',{state:{filed_under:[],shortlisted:false,contacted:false,dismissed:false,note:'Old'},notified_users:[]});
+  const puts=[];
+  const h=viewHarness(t,{matches:[listing],respond:(url,options)=>{if(url.endsWith('/state')){puts.push(JSON.parse(options.body));return {...listing.state,...JSON.parse(options.body)};}}});
+  h.view.render();await h.flush();await h.open();
+  const note=h.node('match-note');note.value='Messaged Sat';note.oninput();await h.tick();await h.flush();
+  assert.deepEqual(puts,[{note:'Messaged Sat'}]);
+  assert.equal(h.node('match-note-status').textContent,'Saved.');
 });

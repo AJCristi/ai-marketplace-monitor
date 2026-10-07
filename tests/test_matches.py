@@ -1038,6 +1038,18 @@ def test_new_status_lists_undecided_matches_found_since_last_seen(
     assert query_matches(match_cache, status="new", since=later)["total"] == 0
 
 
+def test_private_notes_are_trimmed_bounded_and_kept_with_state(
+    match_cache: Cache, listing: Listing
+) -> None:
+    record_match(match_cache, listing, "test", AIResponse(4, "good"))
+    state = update_state(match_cache, "facebook", listing.id, {"note": "  Messaged Sat  "})
+    assert state["note"] == "Messaged Sat"
+    assert query_matches(match_cache)["matches"][0]["state"]["note"] == "Messaged Sat"
+    for bad in ("x" * 2001, 5):
+        with pytest.raises(ValueError, match="note"):
+            update_state(match_cache, "facebook", listing.id, {"note": bad})
+
+
 def test_filtered_group_counts_cover_all_pages_and_deduplicate(
     match_cache: Cache, listing: Listing
 ) -> None:

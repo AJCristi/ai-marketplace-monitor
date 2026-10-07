@@ -124,7 +124,7 @@ export function keyDates(row) {
 }
 const lastCheck = row => row.recheck ? `Re-checked ${matchDate(row.recheck.at)} · ${row.recheck.checked_item || row.item}: ${row.recheck.status.replaceAll('_',' ')}${row.recheck.old_score!=null?` · was ${ratingWord(row.recheck.old_score)}`:''}${row.score!=null?` → now ${ratingWord(row.score)}`:''}${row.recheck.threshold?` · minimum ${ratingWord(Number(row.recheck.threshold))}`:''}` : 'Not re-checked yet';
 
-const SHORTCUTS = {j:'next',k:'previous',o:'open',u:'back',Escape:'back',s:'shortlisted',e:'dismissed',c:'contacted',v:'facebook',z:'undo','?':'help','/':'search'};
+const SHORTCUTS = {x:'select',j:'next',k:'previous',o:'open',u:'back',Escape:'back',s:'shortlisted',e:'dismissed',c:'contacted',v:'facebook',z:'undo','?':'help','/':'search'};
 export function matchShortcut(event) {
   if(event.defaultPrevented||event.ctrlKey||event.metaKey||event.altKey||event.isComposing)return null;
   if(event.target?.closest?.('input,textarea,select,[contenteditable="true"],dialog'))return null;
@@ -137,8 +137,9 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   let data=null, rows=[], selected=null, request=0, cutoff='', error='', loading=false, cursorKey=null, lastUndo=null, previewKey=null, previewPhoto=0;
   const collapsed=new Set(), jobs=new Map();
   const relatedView=createRelatedView({json,toast});
-  let busy=false, refreshTimer=null, filterTimer=null, detailRow=null, photoIndex=0, photoSelection=null, listScroll=0, listWindowScroll=0;
-  const dismissedRows=new Map(), pendingStates=new Set();
+  let busy=false, refreshTimer=null, filterTimer=null, noteTimer=null, detailRow=null, photoIndex=0, photoSelection=null, listScroll=0, listWindowScroll=0;
+  const dismissedRows=new Map(), pendingStates=new Set(), selectedKeys=new Set();
+  let selectionAnchor=null, arrivals=0;
   let focusDetail=false, loadedView=null, recheckState=new Map(), openSections=new Set();
   const storage=(name,key,value)=>{try{const store=globalThis[name];return value===undefined?store.getItem(key):value===null?store.removeItem(key):store.setItem(key,value);}catch{return null;}};
   cutoff=storage('localStorage','aimm-matches-seen')||'';
@@ -152,11 +153,26 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   const shortcutsOn=()=>storage('localStorage','aimm-shortcuts')!=='off';
   const filters=()=>[...query()].filter(([key,value])=>viewKeys.includes(key)&&!['group','sort'].includes(key)&&value&&!(key==='status'&&['all','new'].includes(value))&&!(['include_dismissed','price_drop'].includes(key)&&value!=='true'));
   function rememberView(p){storage('localStorage','aimm-matches-view',new URLSearchParams([...p].filter(([key])=>viewKeys.includes(key))).toString());}
-  function updateQuery(p){state.route='#/monitor/matches'+(p.size?'?'+p:'');history.replaceState(null,'',state.route);rememberView(p);const clear=$('#matches-clear');if(clear)clear.hidden=!filters().length;}
+  function updateQuery(p){state.route='#/monitor/matches'+(p.size?'?'+p:'');history.replaceState(null,'',state.route);rememberView(p);const clear=$('#matches-clear');if(clear)clear.hidden=!filters().length;renderChips();}
+  const density=()=>storage('localStorage','aimm-matches-density')==='compact'?'compact':'comfortable';
+  function chipLabel(key,value){
+    if(key==='item')return 'Category: '+value;
+    if(key==='min_score')return ({4:'Good or better',5:'Great deal only'})[value]||`${ratingWord(Number(value))} or better`;
+    if(key==='q')return `Contains “${value}”`;
+    return ({price_drop:'Price dropped',include_dismissed:'Including dismissed'})[key]||'';
+  }
+  function renderChips(){
+    const target=$('#match-chips'), row=$('#match-chips-row');if(!target)return;
+    const chips=filters().filter(([key])=>key!=='status');
+    if(row)row.hidden=!filters().length;
+    const toggle=$('#matches-filters-toggle');if(toggle)toggle.textContent=chips.length?`Filters (${chips.length})`:'Filters';
+    target.innerHTML=chips.map(([key,value])=>`<span class="match-chip">${esc(chipLabel(key,value))}<button type="button" data-remove-filter="${esc(key)}" aria-label="Remove filter: ${esc(chipLabel(key,value))}">✕</button></span>`).join('');
+    document.querySelectorAll('[data-remove-filter]').forEach(button=>button.onclick=()=>{clearTimeout(filterTimer);const p=query();p.delete(button.dataset.removeFilter);p.delete('cursor');updateQuery(p);render(false);});
+  }
   const running=()=>[...jobs.values()].some(job=>['queued','running'].includes(job.state));
   const rememberJobs=()=>{storage('sessionStorage','aimm-recheck-jobs',JSON.stringify([...jobs.values()].filter(job=>['queued','running'].includes(job.state)).map(job=>job.job_id)));};
   const params=()=>{const p=query();p.delete('group');p.delete('match_item');p.set('limit','200');if(!p.get('status'))p.set('status','new');if(cutoff)p.set('since',cutoff);return p;};
-  function setFilter(name,value){if(!active())return;const p=query();if(value)p.set(name,value);else p.delete(name);p.delete('cursor');updateQuery(p);dismissedRows.clear();listScroll=0;load();}
+  function setFilter(name,value){if(!active())return;const p=query();if(value)p.set(name,value);else p.delete(name);p.delete('cursor');updateQuery(p);dismissedRows.clear();selectedKeys.clear();listScroll=0;load();}
   function notify(message, action) {
     toast(message);
     const host=$('#toast');if(action&&host){const button=document.createElement('button');button.className='btn';button.textContent='Undo';button.onclick=action;host.append(' ',button);}
@@ -189,6 +205,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
         detailRow=found;selected=matchId(found);
       }
       loading=false;
+      if(!more){arrivals=0;renderArrivals();}
       renderCategories(result);
       renderSidebar();renderCounts();renderBody();
       if(!detail()&&reuse){const pane=$('#pane');pane.scrollTop=listScroll;if(typeof window!=='undefined')window.scrollTo?.(0,listWindowScroll);if(cursorKey)focusCursor();}
@@ -232,11 +249,12 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     $('#pane').innerHTML=pageHeader('Matches',"Listings from your saved searches and links you add manually.",'<button class="btn p" id="add-listing">Add listing</button><button class="btn" id="export-csv">Export CSV</button><button class="btn q" id="matches-shortcuts" aria-keyshortcuts="Shift+?">Keyboard shortcuts</button>')+
       `<form id="add-listing-form" class="sect" hidden><label class="sm" for="add-listing-url">Facebook Marketplace listing URL</label><div class="row wr"><input class="in gr" id="add-listing-url" type="url" required maxlength="4096" placeholder="https://www.facebook.com/marketplace/item/…" aria-describedby="add-listing-error"><button class="btn p" id="add-listing-submit" type="submit">Save and assess</button></div><p class="err sm" id="add-listing-error" role="alert"></p></form><div class="bar matches-filters"><div class="row wr" role="group" aria-label="Match status">${['new','shortlisted','contacted','dismissed','all'].map(name=>`<button class="pill" data-match-status="${name}" aria-pressed="${currentStatus()===name}">${name}</button>`).join('')}</div>`+
       '<div class="row wr match-categories" role="group" aria-label="Category" id="match-categories"></div>'+
+      `<button class="btn sm match-filters-toggle" id="matches-filters-toggle" aria-expanded="false" aria-controls="match-filter-row">Filters</button><div class="match-filter-row" id="match-filter-row">`+
       selectHtml('min_score','AI rating',[['','Any rating'],['4','Good or better'],['5','Great deal only']])+
-      selectHtml('price_drop','Price',[['','Any'],['true','Price dropped']])+
-      selectHtml('group','Group by',[['','Category'],['date','Day found'],['none','None']])+
+      `<label class="opt sm match-price-drop"><input type="checkbox" data-match-filter="price_drop" value="true" ${p.get('price_drop')==='true'?'checked':''}>Price dropped</label><label class="sm">Contains<input class="in" type="search" id="matches-query" value="${esc(p.get('q')||'')}" placeholder="Title, seller…"></label><div class="match-view-controls" role="group" aria-label="View">`+
       selectHtml('sort','Sort',[['','Newest found'],['last_seen','Last seen'],['price','Price: low to high'],['score','Best rating']])+
-      `<label class="sm">Contains<input class="in" type="search" id="matches-query" value="${esc(p.get('q')||'')}" placeholder="Title, seller…"></label><button class="btn" id="matches-clear" ${filters().length?'':'hidden'}>Clear filters</button></div><div id="matches-progress"></div><span class="vh" id="matches-announcement" aria-live="polite" aria-atomic="true"></span><div id="matches-body"></div>`+shortcutsDialog();
+      selectHtml('group','Group by',[['','Category'],['date','Day found'],['none','None']])+
+      `<div class="sm match-density"><span>Density</span><div class="seg" role="group" aria-label="Density">${['comfortable','compact'].map(name=>`<button type="button" data-density="${name}" aria-pressed="${density()===name}">${name[0].toUpperCase()+name.slice(1)}</button>`).join('')}</div></div></div></div><div class="match-chips" id="match-chips-row" ${filters().length?'':'hidden'}><span class="row wr" id="match-chips"></span><button class="btn sm q" id="matches-clear" ${filters().length?'':'hidden'}>Clear filters</button></div></div><div id="matches-arrivals"></div><div id="matches-progress"></div><span class="vh" id="matches-announcement" aria-live="polite" aria-atomic="true"></span><div id="matches-body"></div>`+shortcutsDialog();
     bindShortcutsDialog();$('#matches-shortcuts').onclick=openShortcuts;
     $('#matches-body').addEventListener?.('focusin',event=>{const target=event.target.closest?.('[data-match-key]');if(target)setCursor(target.dataset.matchKey,false);});
     $('#add-listing').onclick=()=>{const form=$('#add-listing-form');form.hidden=!form.hidden;if(!form.hidden)$('#add-listing-url').focus();};
@@ -244,7 +262,10 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     $('#export-csv').onclick=()=>{clearTimeout(filterTimer);const p=query(), text=$('#matches-query').value;if(text!==(p.get('q')||'')){if(text)p.set('q',text);else p.delete('q');p.delete('cursor');updateQuery(p);load();}const exportParams=new URLSearchParams([...p].filter(([key])=>viewKeys.includes(key)&&key!=='group'));if(currentStatus()==='new'){exportParams.set('status','new');if(cutoff)exportParams.set('since',cutoff);}return exportCsv({url:'/api/matches.csv'+(exportParams.size?'?'+exportParams:''),emptyMessage:'No matches for these filters to export.',filename:'matches.csv'});};
     $('#matches-clear').onclick=()=>{clearTimeout(filterTimer);const p=query();for(const key of [...viewKeys,'cursor'])if(!['sort','group'].includes(key))p.delete(key);updateQuery(p);render(false);$('#matches-query').focus();};
     document.querySelectorAll('[data-match-status]').forEach(button=>button.onclick=()=>{setFilter('status',button.dataset.matchStatus);document.querySelectorAll('[data-match-status]').forEach(b=>b.setAttribute('aria-pressed',b===button));});
-    document.querySelectorAll('[data-match-filter]').forEach(select=>select.onchange=()=>{if(select.dataset.matchFilter==='group'){const p=query();if(select.value)p.set('group',select.value);else p.delete('group');updateQuery(p);renderBody();}else setFilter(select.dataset.matchFilter,select.value);});
+    document.querySelectorAll('[data-match-filter]').forEach(select=>select.onchange=()=>{const value=select.type==='checkbox'?(select.checked?'true':''):select.value;if(select.dataset.matchFilter==='group'){const p=query();if(value)p.set('group',value);else p.delete('group');updateQuery(p);renderBody();}else setFilter(select.dataset.matchFilter,value);});
+    document.querySelectorAll('[data-density]').forEach(button=>button.onclick=()=>{storage('localStorage','aimm-matches-density',button.dataset.density==='compact'?'compact':null);document.querySelectorAll('[data-density]').forEach(other=>other.setAttribute('aria-pressed',other===button));renderBody();});
+    $('#matches-filters-toggle').onclick=()=>{const bar=$('.matches-filters'), open=!bar.classList.contains('open');bar.classList.toggle('open',open);$('#matches-filters-toggle').setAttribute('aria-expanded',open);};
+    renderChips();
     $('#matches-query').oninput=event=>{clearTimeout(filterTimer);const input=event.target,value=input.value;filterTimer=setTimeout(()=>{if(active()&&$('#matches-query')===input)setFilter('q',value);},250);};
     renderCounts();renderProgress();load(false,false,returning);pollJobs();
   }
@@ -264,21 +285,22 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   function rowHtml(row,index,group) {
     if(dismissedRows.has(matchId(row)))return `<div class="match-row match-dismissed" role="status">Dismissed ${esc(row.title)} · <button class="btn q" data-undo-row="${esc(matchId(row))}">Undo</button></div>`;
     const isNew=isNewRow(row), summary=row.score==null?unratedText(row):aiText(row.comment)||row.conclusion||'';
-    return `<div class="match-row${isInvalid(row)?' match-muted':''}${matchId(row)===cursorKey?' on':''}" data-match-row="${index}" data-group="${esc(group)}" data-match-key="${esc(matchId(row))}"><span class="match-dot${isNew?' on':''}" aria-hidden="true"></span>${photo(row)}<span class="match-main"><span class="match-line1"><a class="match-title" href="${esc(detailRoute(row))}" data-open-match="${index}" data-group="${esc(group)}">${isNew?'<span class="vh">New: </span>':''}${esc(row.title||'Listing details unavailable')}</a>${badgesHtml(row)}</span><span class="match-attrs">${attrsHtml(row,query().get('sort'))}</span><span class="match-summary">${esc(summary)}</span></span><span class="match-row-actions"><span class="match-rating">${ratingWord(row.score)}</span>${ratingMeter(row.score)}<span class="row"><button class="btn sm q" data-row-state="shortlisted" data-match-id="${esc(matchId(row))}" aria-label="${row.state.shortlisted?'Unshortlist':'Shortlist'} ${esc(row.title)}" aria-pressed="${row.state.shortlisted}">${row.state.shortlisted?'★':'☆'}</button><button class="btn sm q" data-row-state="dismissed" data-match-id="${esc(matchId(row))}" aria-label="${row.state.dismissed?'Restore':'Dismiss'} ${esc(row.title)}">${row.state.dismissed?'Restore':'✕'}</button></span></span></div>`;
+    return `<div class="match-row${isInvalid(row)?' match-muted':''}${matchId(row)===cursorKey?' on':''}" data-match-row="${index}" data-group="${esc(group)}" data-match-key="${esc(matchId(row))}"><input type="checkbox" class="match-select" data-select-match="${esc(matchId(row))}" aria-label="Select ${esc(row.title||'listing')}" ${selectedKeys.has(matchId(row))?'checked':''}><span class="match-dot${isNew?' on':''}" aria-hidden="true"></span>${photo(row)}<span class="match-main"><span class="match-line1"><a class="match-title" href="${esc(detailRoute(row))}" data-open-match="${index}" data-group="${esc(group)}">${isNew?'<span class="vh">New: </span>':''}${esc(row.title||'Listing details unavailable')}</a>${badgesHtml(row)}</span><span class="match-attrs">${attrsHtml(row,query().get('sort'))}</span><span class="match-summary">${esc(summary)}</span></span><span class="match-row-actions"><span class="match-rating">${ratingWord(row.score)}</span>${ratingMeter(row.score)}<span class="row"><button class="btn sm q" data-row-state="shortlisted" data-match-id="${esc(matchId(row))}" aria-label="${row.state.shortlisted?'Unshortlist':'Shortlist'} ${esc(row.title)}" aria-pressed="${row.state.shortlisted}">${row.state.shortlisted?'★':'☆'}</button><button class="btn sm q" data-row-state="dismissed" data-match-id="${esc(matchId(row))}" aria-label="${row.state.dismissed?'Restore':'Dismiss'} ${esc(row.title)}">${row.state.dismissed?'Restore':'✕'}</button></span></span></div>`;
   }
   function renderBody() {
     if(!active()||!$('#matches-body'))return;
     const focused=document.activeElement;
     if($('#match-detail'))openSections=new Set([...document.querySelectorAll('#match-detail details[open]')].map(el=>el.dataset.section));
-    const focusAttribute=['data-state','data-file-under','data-photo-index','data-photo-step','data-collapse','data-match-category','data-recheck-group'].find(name=>focused?.hasAttribute(name));
+    const focusAttribute=['data-state','data-file-under','data-photo-index','data-photo-step','data-collapse','data-match-category','data-recheck-group','data-select-match','data-bulk','data-density'].find(name=>focused?.hasAttribute(name));
     const focusValue=focusAttribute?focused.getAttribute(focusAttribute):null, focusId=focused?.id;
     if(loading){$('#matches-body').innerHTML='<div class="match-skeleton" role="status">Loading matches…</div>'.repeat(3);renderProgress();return;}
     if(error){$('#matches-body').innerHTML=`<div class="empty"><p class="err">${esc(error)}</p><button class="btn" id="matches-retry">Retry</button></div>`;$('#matches-retry').onclick=()=>load();renderProgress();return;}
     if(detail()){
-      const otherSearch=$('#check-other')?.value;
+      const otherSearch=$('#check-other')?.value, noteDraft=$('#match-note')?.value;
       $('#matches-body').innerHTML='<article class="match-detail" id="match-detail" aria-label="Match details"></article>';
       renderDetail();
       if(otherSearch&&$('#check-other'))$('#check-other').value=otherSearch;
+      if(noteDraft!=null&&noteDraft!==(detailRow?.state.note||'')&&$('#match-note'))$('#match-note').value=noteDraft;
       if(focusDetail){$('#match-title')?.focus({preventScroll:true});focusDetail=false;}
       else if(focusId)document.getElementById(focusId)?.focus({preventScroll:true});
       else if(focusAttribute)[...document.querySelectorAll('['+focusAttribute+']')].find(el=>el.getAttribute(focusAttribute)===focusValue)?.focus({preventScroll:true});
@@ -291,7 +313,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     if(!ordered.some(entry=>matchId(entry.row)===selected))selected=ordered.length?matchId(ordered[0].row):null;
     recheckState=recheckStatuses(jobs.values());
     const by=query().get('group')||'search', groups=groupMatches(rows,by,query().get('item')||'');
-    $('#matches-body').innerHTML=(query().get('sort')==='price'?'<p class="sm d">Uses the amount shown in the listing; shorthand and placeholder prices may be misleading. Confirm the asking price with the seller.</p>':'')+(currentStatus()==='new'?`<div class="match-queue" role="status"><span><strong>${data.total??rows.length} new</strong> ${esc(sinceText==='yet'?'— shortlist, contact or dismiss each one':sinceText)}</span><button class="btn sm" id="matches-mark-seen">Mark all seen</button></div>`:'')+'<div class="matches-layout"><div class="matches-list">'+[...groups].map(([name,entries])=>{
+    $('#matches-body').innerHTML=(query().get('sort')==='price'?'<p class="sm d">Uses the amount shown in the listing; shorthand and placeholder prices may be misleading. Confirm the asking price with the seller.</p>':'')+(currentStatus()==='new'?`<div class="match-queue" role="status"><span><strong>${data.total??rows.length} new</strong> ${esc(sinceText==='yet'?'— shortlist, contact or dismiss each one':sinceText)}</span><button class="btn sm" id="matches-mark-seen">Mark all seen</button></div>`:'')+`<div class="matches-layout${density()==='compact'?' compact':''}"><div class="matches-list">${batchBar()}`+[...groups].map(([name,entries])=>{
       const count=(by==='search'?data.filtered_groups.find(group=>group.item===name)?.count:null)??entries.length;
       const last=state.records.findLast(record=>record.extra?.kind==='search_summary'&&record.extra.item===name);
       const open=!collapsed.has(name), label=by==='date'?dayGroupLabel(name):name||'Manually added';
@@ -299,6 +321,10 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
       return `<section class="match-group">${by!=='none'?`<header><div class="match-group-head"><h2 class="match-group-title"><button class="btn q" data-collapse="${esc(name)}" aria-expanded="${open}"><span class="match-caret" aria-hidden="true">${open?'▾':'▸'}</span>${by==='search'?`<span class="m">${esc(label)}</span>`:esc(label)}</button></h2><span class="sm match-group-summary">${esc(groupSummary(entries))}</span><span class="m d match-group-count">${count} ${count===1?'match':'matches'}</span><button class="btn sm" data-recheck-group="${esc(name)}" ${running()||(by==='search'&&name&&(!state.config.item?.[name]||state.config.item[name].enabled===false))?'disabled':''} title="At most 25 listings per job">${[...jobs.values()].some(job=>['queued','running'].includes(job.state)&&job.searches?.length===1&&job.searches[0]===name)?'Re-checking…':count>25?'Re-check newest 25':'↻ Re-check '+Math.min(count,25)}</button></div>${description&&open?`<p class="xs d match-group-description">${esc(description)}</p>`:''}</header><div data-group-progress="${esc(name)}"></div>`:''}${open?entries.map((row,index)=>rowHtml(row,index,name)).join(''):''}</section>`;
     }).join('')+`${data.next_cursor?'<button class="btn match-more" id="matches-more">Load more matches</button>':''}<p class="section-note">${by==='search'?Object.keys(state.config.item||{}).filter(name=>!data.groups.some(group=>group.item===name)).map(name=>esc(name)+' has no matches').join(' · '):''}${query().get('status')!=='dismissed'?' · dismissed matches are hidden':''}</p>${shortcutsOn()?'<p class="match-keys xs d"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>s</kbd> shortlist</span><span><kbd>e</kbd> dismiss</span><span><kbd>c</kbd> contacted</span><span><kbd>v</kbd> open on Facebook</span><span><kbd>z</kbd> undo</span><span><kbd>?</kbd> all shortcuts</span></p>':''}</div><aside class="match-preview" id="match-preview" aria-label="Match preview"></aside></div>`;
     $('#matches-mark-seen')?.addEventListener('click',markAllSeen);
+    document.querySelectorAll('[data-select-match]').forEach(input=>input.onclick=event=>toggleSelection(input.dataset.selectMatch,input.checked,event.shiftKey));
+    document.querySelectorAll('[data-bulk]').forEach(button=>button.onclick=()=>bulkUpdate(button.dataset.bulk));
+    $('#matches-select-all')?.addEventListener('click',()=>{for(const entry of cursorEntries())selectedKeys.add(matchId(entry.row));renderBody();});
+    $('#matches-select-none')?.addEventListener('click',()=>{selectedKeys.clear();selectionAnchor=null;renderBody();});
     if(previewVisible()&&!cursorEntries().some(entry=>matchId(entry.row)===cursorKey))cursorKey=cursorEntries()[0]?matchId(cursorEntries()[0].row):null;
     if(previewVisible())setCursor(cursorKey,false);
     document.querySelectorAll('[data-open-match]').forEach(link=>link.onclick=event=>{if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;event.preventDefault();if(previewVisible()){setCursor(matchId(groups.get(link.dataset.group)[Number(link.dataset.openMatch)]),false);return;}openMatch(groups.get(link.dataset.group)[Number(link.dataset.openMatch)]);});
@@ -345,7 +371,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     const facts=[['Condition',row.condition||'Not stated'],['Location',row.location],['Seller',row.seller],['Search',manual?'Added manually · general assessment':row.item+(searchState?'':' (removed search)')],['Search sightings',row.seen_count?`${row.seen_count}${row.imported?' since tracking began':''}`:'Not tracked yet'],['Filed by you',row.state.filed_under.join(', ')],['Sent to',row.notified_users.join(', ')]];
     $('#match-detail').innerHTML=`<nav class="match-detail-nav" aria-label="Match navigation"><button class="btn sm" id="match-previous" aria-keyshortcuts="k" ${index<=0?'disabled':''}>‹ Previous</button><span class="sm d">${index<0?'Outside the loaded matches':`${index+1} of ${entries.length} loaded`}</span><button class="btn sm" id="match-next" aria-keyshortcuts="j" ${index<0||index>=entries.length-1?'disabled':''}>Next ›</button></nav>`+
       `<div class="match-detail-grid"><div class="match-detail-gallery" id="match-gallery"></div>`+
-      `<aside class="match-detail-rail" aria-label="Price and actions"><section class="match-card">${priceHtml(row)}<p class="match-rating-line"><strong>${ratingWord(row.score)}</strong>${ratingMeter(row.score)}</p>${decisionButtons(row,'data-state')}${listingUrl?`<div class="match-links"><a class="btn p" href="${esc(listingUrl)}" target="_blank" rel="noopener noreferrer" aria-keyshortcuts="v">Open on Facebook ↗ <kbd>v</kbd></a><button class="btn" id="copy-listing-link">Copy link</button></div><div id="copy-link-fallback" hidden><label class="sm" for="listing-link">Listing link — select and copy</label><input class="in" id="listing-link" type="text" readonly value="${esc(listingUrl)}"></div>`:''}</section><section class="match-card" aria-label="Key dates"><h2 class="match-h">Key dates</h2><ol class="match-dates">${keyDates(row)}</ol></section></aside>`+
+      `<aside class="match-detail-rail" aria-label="Price and actions"><section class="match-card">${priceHtml(row)}<p class="match-rating-line"><strong>${ratingWord(row.score)}</strong>${ratingMeter(row.score)}</p>${decisionButtons(row,'data-state')}${listingUrl?`<div class="match-links"><a class="btn p" href="${esc(listingUrl)}" target="_blank" rel="noopener noreferrer" aria-keyshortcuts="v">Open on Facebook ↗ <kbd>v</kbd></a><button class="btn" id="copy-listing-link">Copy link</button></div><div id="copy-link-fallback" hidden><label class="sm" for="listing-link">Listing link — select and copy</label><input class="in" id="listing-link" type="text" readonly value="${esc(listingUrl)}"></div>`:''}</section><section class="match-card" aria-label="Your note"><label class="match-h" for="match-note">Your note</label><textarea class="ta" id="match-note" maxlength="2000" placeholder="e.g. Messaged Sat, asked about battery health">${esc(row.state.note||'')}</textarea><p class="xs d" id="match-note-status" role="status">Private to you.</p></section><section class="match-card" aria-label="Key dates"><h2 class="match-h">Key dates</h2><ol class="match-dates">${keyDates(row)}</ol></section></aside>`+
       `<div class="match-detail-main" id="match-detail-main"><section class="match-card" aria-label="AI rating"><h2 class="match-h">AI rating</h2><p class="match-rating-line"><strong>${ratingWord(row.score)}</strong>${ratingMeter(row.score)}<span class="m d">${score(row)}</span><span class="sm d">${manual?'general buying assessment':'for '+esc(row.item)}</span></p>${row.comment?`<p class="match-comment">${esc(aiText(row.comment))}</p>`:`<p class="sm d">${esc(unratedText(row))}</p>`}</section>`+
       `<section class="match-section" aria-label="Seller’s description"><h2 class="match-h">Seller’s description</h2><p class="match-description">${esc(row.description||'No description saved.')}</p></section>`+
       `<section class="match-section" aria-label="Listing"><h2 class="match-h">Listing</h2><dl class="match-facts">${facts.map(([label,value])=>`<dt>${label}</dt><dd>${esc(value||'—')}${label==='Seller'&&['established','caution'].includes(sellerStatus)?' '+sellerBadge(row):''}</dd>`).join('')}</dl>${row.imported?`<p class="xs d">Imported record. Repeat tracking began ${esc(matchDate(row.tracking_since))}; earlier sightings are unknown.</p>`:''}</section>`+
@@ -378,6 +404,8 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     };
     document.querySelectorAll('[data-state]').forEach(button=>button.onclick=()=>saveState(row,{[button.dataset.state]:!row.state[button.dataset.state]}));
     document.querySelectorAll('[data-file-under]').forEach(input=>input.onchange=()=>saveState(row,{filed_under:[...document.querySelectorAll('[data-file-under]:checked')].map(el=>el.dataset.fileUnder)}));
+    const note=$('#match-note');
+    if(note)note.oninput=()=>{clearTimeout(noteTimer);$('#match-note-status').textContent='Saving…';noteTimer=setTimeout(()=>saveNote(row,note),600);};
     $('#recheck-one').onclick=()=>start([row]);$('#recheck-other').onclick=()=>{const item=$('#check-other').value;if(item)start([row],item);else toast('Choose a search first.');};bindPhotos();
   }
   function setCursor(key,focus=true){
@@ -393,7 +421,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     if(!row){target.innerHTML='<p class="match-preview-empty">Select a match to preview it.</p>';return;}
     if(previewKey!==cursorKey){previewKey=cursorKey;previewPhoto=0;}
     const listingUrl=safeUrl(row.url), sellerStatus=row.seller_assessment?.status;
-    target.innerHTML=`<div class="match-preview-top"><span class="m d sm">${esc(row.source==='manual'?'Manually added':row.item)}</span><a href="${esc(detailRoute(row))}" id="match-preview-open">Open full page →</a></div><div id="match-preview-gallery">${galleryHtml(row,previewPhoto)}</div><h2 class="match-preview-title">${esc(row.title||'Listing details unavailable')}</h2>${priceHtml(row)}<p class="match-rating-line"><strong>${ratingWord(row.score)}</strong>${ratingMeter(row.score)}<span class="sm d">${row.source==='manual'?'general buying assessment':'for '+esc(row.item)}</span></p><p class="match-comment">${esc(row.score==null?unratedText(row):aiText(row.comment)||row.conclusion||'')}</p><dl class="match-facts"><dt>Condition</dt><dd>${esc(row.condition||'Not stated')}</dd><dt>Location</dt><dd>${esc(row.location||'—')}</dd><dt>Seller</dt><dd>${esc(row.seller||'—')}${['established','caution'].includes(sellerStatus)?' '+sellerBadge(row):''}</dd></dl>${decisionButtons(row,'data-preview-state')}${listingUrl?`<a class="btn p match-preview-facebook" href="${esc(listingUrl)}" target="_blank" rel="noopener noreferrer" aria-keyshortcuts="v">Open on Facebook ↗ <kbd>v</kbd></a>`:''}<section aria-label="Key dates"><h3 class="match-h">Key dates</h3><ol class="match-dates">${keyDates(row)}</ol></section>`;
+    target.innerHTML=`<div class="match-preview-top"><span class="m d sm">${esc(row.source==='manual'?'Manually added':row.item)}</span><a href="${esc(detailRoute(row))}" id="match-preview-open">Open full page →</a></div><div id="match-preview-gallery">${galleryHtml(row,previewPhoto)}</div><h2 class="match-preview-title">${esc(row.title||'Listing details unavailable')}</h2>${priceHtml(row)}<p class="match-rating-line"><strong>${ratingWord(row.score)}</strong>${ratingMeter(row.score)}<span class="sm d">${row.source==='manual'?'general buying assessment':'for '+esc(row.item)}</span></p><p class="match-comment">${esc(row.score==null?unratedText(row):aiText(row.comment)||row.conclusion||'')}</p><dl class="match-facts"><dt>Condition</dt><dd>${esc(row.condition||'Not stated')}</dd><dt>Location</dt><dd>${esc(row.location||'—')}</dd><dt>Seller</dt><dd>${esc(row.seller||'—')}${['established','caution'].includes(sellerStatus)?' '+sellerBadge(row):''}</dd></dl>${row.state.note?`<p class="match-preview-note"><span class="match-h">Your note</span> ${esc(row.state.note)}</p>`:''}${decisionButtons(row,'data-preview-state')}${listingUrl?`<a class="btn p match-preview-facebook" href="${esc(listingUrl)}" target="_blank" rel="noopener noreferrer" aria-keyshortcuts="v">Open on Facebook ↗ <kbd>v</kbd></a>`:''}<section aria-label="Key dates"><h3 class="match-h">Key dates</h3><ol class="match-dates">${keyDates(row)}</ol></section>`;
     $('#match-preview-open').onclick=event=>{if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;event.preventDefault();openMatch(row);};
     target.querySelectorAll('[data-preview-state]').forEach(button=>button.onclick=()=>decide(row,button.dataset.previewState));
     target.querySelectorAll('[data-photo-step]').forEach(button=>button.onclick=()=>{previewPhoto+=Number(button.dataset.photoStep);renderPreview();});
@@ -419,7 +447,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     lastUndo=undo;notify('Marked all matches as seen',undo);return load(false,true);
   }
   function shortcutsDialog(){
-    const keys=[['j / k','Next / previous match'],['o or Enter','Open match'],['u or Esc','Back to Matches'],['s','Shortlist'],['e','Dismiss'],['c','Mark contacted'],['v','Open on Facebook'],['z','Undo'],['/','Search'],['?','This list']];
+    const keys=[['j / k','Next / previous match'],['o or Enter','Open match'],['u or Esc','Back to Matches'],['s','Shortlist'],['e','Dismiss'],['c','Mark contacted'],['v','Open on Facebook'],['z','Undo'],['x','Select for bulk actions'],['/','Search'],['?','This list']];
     return `<dialog class="dlg" id="match-shortcuts" aria-labelledby="match-shortcuts-title"><h2 id="match-shortcuts-title">Keyboard shortcuts</h2><dl class="match-shortcut-list">${keys.map(([key,action])=>`<dt><kbd>${key}</kbd></dt><dd>${action}</dd>`).join('')}</dl><label class="row sm"><input type="checkbox" id="match-shortcuts-enabled" ${shortcutsOn()?'checked':''}>Use single-key shortcuts in Matches</label><p class="xs d">Shortcuts never fire while you type in a field. This setting is saved in this browser.</p><div class="row" style="justify-content:flex-end"><button class="btn" type="button" id="match-shortcuts-close">Close</button></div></dialog>`;
   }
   function bindShortcutsDialog(){
@@ -445,10 +473,46 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     if(index<0)return;
     const row=entries[index].row;
     if(action==='open'){event.preventDefault();openMatch(row);return;}
+    if(action==='select'){event.preventDefault();toggleSelection(cursorKey,!selectedKeys.has(cursorKey),event.shiftKey);focusCursor();return;}
     if(action==='facebook'){event.preventDefault();openListing(row);return;}
     if(STATE_MESSAGES[action]){event.preventDefault();decide(row,action);}
   }
   globalThis.document?.addEventListener?.('keydown',onKey);
+  function batchBar(){
+    if(!selectedKeys.size)return '';
+    const dismissedView=currentStatus()==='dismissed';
+    return `<div class="match-batch" role="region" aria-label="Bulk actions"><strong>${selectedKeys.size} selected</strong>${dismissedView?'<button class="btn sm" data-bulk="restore">Restore</button>':'<button class="btn sm" data-bulk="shortlisted">Shortlist</button><button class="btn sm" data-bulk="contacted">Mark contacted</button><button class="btn sm" data-bulk="dismissed">Dismiss</button>'}<button class="btn sm q" id="matches-select-all">Select all ${cursorEntries().length} loaded</button><button class="btn sm q" id="matches-select-none">Clear selection</button></div>`;
+  }
+  function toggleSelection(key,checked,range){
+    const keys=cursorEntries().map(entry=>matchId(entry.row)), from=keys.indexOf(selectionAnchor), to=keys.indexOf(key);
+    const targets=range&&from>=0&&to>=0?keys.slice(Math.min(from,to),Math.max(from,to)+1):[key];
+    for(const target of targets)checked?selectedKeys.add(target):selectedKeys.delete(target);
+    selectionAnchor=key;renderBody();
+  }
+  async function bulkUpdate(action){
+    const field=action==='restore'?'dismissed':action, value=action!=='restore';
+    const targets=[...new Map(rows.filter(row=>selectedKeys.has(matchId(row))).map(row=>[row.key,row])).values()];
+    if(!targets.length)return;
+    const previous=targets.map(row=>[row,row.state[field]]);
+    const put=(row,patch)=>json(`/api/matches/${encodeURIComponent(row.marketplace)}/${encodeURIComponent(row.listing_id)}/state`,{method:'PUT',body:JSON.stringify(patch)}).then(updated=>Object.assign(row.state,updated));
+    try{
+      await Promise.all(targets.map(row=>put(row,{[field]:value})));
+      selectedKeys.clear();selectionAnchor=null;
+      const undo=async()=>{if(lastUndo===undo)lastUndo=null;toast('Change undone.');await Promise.all(previous.map(([row,old])=>put(row,{[field]:old})));return load(false,true);};
+      lastUndo=undo;notify(`${({shortlisted:'Shortlisted',contacted:'Marked contacted',dismissed:'Dismissed',restore:'Restored'})[action]} ${targets.length} ${targets.length===1?'match':'matches'}`,undo);
+    }catch(err){toast(err.message);}
+    await load(false,true);
+  }
+  async function saveNote(row,input){
+    const value=input.value;
+    try{const updated=await json(`/api/matches/${encodeURIComponent(row.marketplace)}/${encodeURIComponent(row.listing_id)}/state`,{method:'PUT',body:JSON.stringify({note:value})});Object.assign(row.state,updated);for(const other of rows)if(other.key===row.key)other.state.note=updated.note;if($('#match-note-status'))$('#match-note-status').textContent='Saved.';}
+    catch(err){if($('#match-note-status'))$('#match-note-status').textContent='Not saved: '+err.message;}
+  }
+  function renderArrivals(){
+    const target=$('#matches-arrivals');if(!target)return;
+    target.innerHTML=arrivals?`<div class="match-arrivals" role="status"><button class="btn sm" id="matches-arrivals-show">${arrivals} new ${arrivals===1?'match':'matches'} · Show</button></div>`:'';
+    $('#matches-arrivals-show')?.addEventListener('click',()=>{arrivals=0;renderArrivals();load(false,true);});
+  }
   async function saveState(row,patch,{fromRow=false,silent=false,viaKey=false}={}) {
     if(pendingStates.has(row.key))return;
     pendingStates.add(row.key);
@@ -527,7 +591,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
       rememberJobs();if(announce&&$('#matches-announcement'))$('#matches-announcement').textContent=[...jobs.values()].map(job=>`Re-check ${job.state}, ${job.done} of ${job.total}`).join('. ');if(changed){await load(false,true);renderProgress();}
     }finally{busy=false;}
   }
-  function onRecord(record){if(['match_recorded','match_seen','manual_listing_result','recheck_result','recheck_done','image_matching_done','match_photo_saved'].includes(record.extra?.kind)){if(record.extra.kind==='recheck_result'&&active()){rows=applyRecheckResult(rows,record.extra);renderBody();}clearTimeout(refreshTimer);refreshTimer=setTimeout(()=>{if(active())load(false,true);else summary();pollJobs();},350);}}
+  function onRecord(record){if(['match_recorded','match_seen','manual_listing_result','recheck_result','recheck_done','image_matching_done','match_photo_saved'].includes(record.extra?.kind)){if(record.extra.kind==='recheck_result'&&active()){rows=applyRecheckResult(rows,record.extra);renderBody();}if(record.extra.kind==='match_recorded'&&active()&&!detail()&&rows.length){arrivals++;renderArrivals();clearTimeout(refreshTimer);refreshTimer=setTimeout(summary,350);return;}clearTimeout(refreshTimer);refreshTimer=setTimeout(()=>{if(active())load(false,true);else summary();pollJobs();},350);}}
   setInterval(()=>{pollJobs();if(active())relatedView.refresh();else relatedView.unmount();},3000);
   return {render,onRecord,summary,onKey};
 }
