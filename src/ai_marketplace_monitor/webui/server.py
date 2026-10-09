@@ -19,8 +19,9 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Any, Callable, Dict, List
+from typing import Annotated, Any, Callable, Dict, List, Literal
 
 import uvicorn
 from fastapi import (
@@ -42,7 +43,15 @@ from .. import __version__
 from ..image_matching import ImageMatcher
 from ..listing import Listing
 from ..match_store import source_hash
-from ..matches import library, load_matches, query_matches, record_manual_listing, update_state
+from ..matches import (
+    library,
+    load_matches,
+    query_matches,
+    reading_library,
+    record_manual_listing,
+    update_state,
+)
+from ..photos import THUMBNAIL_CACHE_SIZE, thumbnail_webp
 from ..recheck import RecheckQueue, facebook_listing_id
 from ..utils import cache
 from .auth import (
@@ -600,31 +609,53 @@ def create_app(
             raise HTTPException(status_code=404, detail="Match not found for this search")
         return row
 
-    @app.get("/api/matches/{marketplace}/{listing_id}/photos/{digest}.webp")
-    def match_photo(
-        marketplace: str,
-        listing_id: str,
-        digest: str,
-        request: Request,
-        _: str = Depends(require_session),
-    ) -> Response:
-        if not re.fullmatch(r"[0-9a-f]{64}", digest):
-            raise HTTPException(status_code=404, detail="Photo not found")
-        with library(cache) as store:
+    def read_photo(marketplace: str, listing_id: str, digest: str) -> bytes:
+        with reading_library(cache) as store:
             photo = store.db.execute(
                 "SELECT data FROM photos WHERE marketplace=? AND listing_id=? AND digest=?",
                 (marketplace, listing_id, digest),
             ).fetchone()
         if photo is None:
             raise HTTPException(status_code=404, detail="Photo not found")
+        return photo[0]
+
+    # Saved photos are never deleted or changed, so a thumbnail stays valid for its digest.
+    # A missing photo raises, and lru_cache does not cache exceptions.
+    @lru_cache(maxsize=THUMBNAIL_CACHE_SIZE)
+    def photo_thumbnail(marketplace: str, listing_id: str, digest: str) -> bytes:
+        photo = read_photo(marketplace, listing_id, digest)
+        try:
+            return thumbnail_webp(photo)
+        except ValueError:
+            return photo
+
+    @app.get("/api/matches/{marketplace}/{listing_id}/photos/{digest}.webp")
+    def match_photo(
+        marketplace: str,
+        listing_id: str,
+        digest: str,
+        request: Request,
+        size: Literal["full", "thumb"] = "full",
+        _: str = Depends(require_session),
+    ) -> Response:
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise HTTPException(status_code=404, detail="Photo not found")
+        photo = (
+            photo_thumbnail(marketplace, listing_id, digest)
+            if size == "thumb"
+            else read_photo(marketplace, listing_id, digest)
+        )
         headers = {
-            "ETag": f'"{digest}"',
-            "Cache-Control": "private, no-cache",
+            "ETag": f'"{digest}-thumb"' if size == "thumb" else f'"{digest}"',
+            # Exposed consoles revalidate so photos are not readable from the cache after logout.
+            "Cache-Control": (
+                "private, no-cache" if state.exposed else "private, max-age=31536000, immutable"
+            ),
             "X-Content-Type-Options": "nosniff",
         }
         if request.headers.get("if-none-match") == headers["ETag"]:
             return Response(status_code=304, headers=headers)
-        return Response(content=photo[0], media_type="image/webp", headers=headers)
+        return Response(content=photo, media_type="image/webp", headers=headers)
 
     @app.get("/api/matches/{marketplace}/{listing_id}/history")
     def match_history(

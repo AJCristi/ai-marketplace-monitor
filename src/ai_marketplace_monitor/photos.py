@@ -18,6 +18,9 @@ from .matches import library
 
 MAX_BYTES = 5 * 1024 * 1024
 MAX_STORED_BYTES = 512 * 1024
+THUMBNAIL_SIDE = 320
+THUMBNAIL_QUALITY = 75
+THUMBNAIL_CACHE_SIZE = 512
 
 
 def image_url_allowed(url: str) -> bool:
@@ -88,6 +91,13 @@ def prepare_webp(raw: bytes) -> bytes:
     if len(data) > MAX_STORED_BYTES:
         raise ValueError("The saved photo exceeds the archive size limit.")
     return data
+
+
+def thumbnail_webp(data: bytes) -> bytes:
+    """Lists show photos at about 96 px, so send a small copy of the 1600 px archive."""
+    output = io.BytesIO()
+    open_photo(data, THUMBNAIL_SIDE).save(output, "WEBP", quality=THUMBNAIL_QUALITY)
+    return output.getvalue()
 
 
 def archive_next_photo(

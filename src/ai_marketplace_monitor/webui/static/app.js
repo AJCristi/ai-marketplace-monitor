@@ -209,18 +209,13 @@ function searchSummary(name) {
   const rating = list(itemValue(state.config,name,'rating')).join('/');
   return [phrases.length > 1 ? `${phrases[0]} +${phrases.length-1}` : phrases[0],price?price+inheritedMark('max_price'):price,scheduleLabel(state.config,name)+inheritedMark('search_interval'),ai.length ? `AI ≥${rating}${inheritedMark('rating')}` : 'no AI'].filter(Boolean).join(' · ');
 }
-function manualMatchesActive() {
-  const {parts, query} = routeParts();
-  return parts[1] === 'matches' && (query.get('source') === 'manual' || query.get('match_item') === '');
-}
 function manualMatchesSidebarHtml() {
   const count = state.matchSummary?.groups?.find(group => group.item === '')?.count ?? 0;
   if (!count) return '';
   const {awaiting = 0, failed = 0, last_added: lastAdded = null} = state.matchSummary.manual || {};
-  const active = manualMatchesActive();
   const badge = failed ? `<span class="m xs warn">${failed} failed</span>` : awaiting ? `<span class="m xs d">${awaiting} awaiting</span>` : '';
   const status = failed ? 'AI assessment failed · open it to retry' : awaiting ? 'Awaiting AI assessment' : `Last added ${relativeDate(lastAdded) || '—'} · all assessed`;
-  return `<div class="sh">Added by you</div><a class="it ${active ? 'on' : ''}" id="manual-matches-nav" href="#/monitor/matches?source=manual&status=all" ${active ? 'aria-current="page"' : ''}><div class="row sb"><span class="t">Manually added</span>${badge}</div><div class="s">${count} ${count === 1 ? 'match' : 'matches'} · general AI assessment · not searched</div><div class="s">${esc(status)}</div></a>`;
+  return `<div class="sh">Added by you</div><a class="it" id="manual-matches-nav" href="#/monitor/matches?source=manual&status=all"><div class="row sb"><span class="t">Manually added</span>${badge}</div><div class="s">${count} ${count === 1 ? 'match' : 'matches'} · general AI assessment · not searched</div><div class="s">${esc(status)}</div></a>`;
 }
 function lastSearchedLabel(name) {
   const record = state.lastSearches.get(name);
@@ -235,25 +230,23 @@ function renderSidebar() {
     link.classList.toggle('on',active);
     if(active)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');
   }
-  $('#sidebar').setAttribute('aria-label', settings ? 'Settings sections' : 'Saved searches');
-  const signature = JSON.stringify([state.route,state.config,state.form?.name,state.capacity,state.matchSummary?.groups,state.matchSummary?.manual,state.matchSummary?.library_total]);
+  $('#sidebar').setAttribute('aria-label', settings ? 'Settings sections' : matches ? 'Match views' : 'Saved searches');
+  const signature = JSON.stringify([state.route,state.config,state.form?.name,state.capacity,state.matchSummary?.groups,state.matchSummary?.manual,state.matchSummary?.library_total,...(matches?[state.matchSummary?.counts,state.matchSummary?.view_groups,state.matchSummary?.view_total]:[])]);
   if ($('#sidebar').dataset.signature !== signature) {
     $('#sidebar').dataset.signature = signature;
-    if (settings) {
+    if (matches) $('#sidebar').innerHTML = matchesView.sidebarHtml();
+    else if (settings) {
       const rows = [['marketplace','Marketplace',Object.keys(state.config.marketplace || {}).join(' · ')],['ai','AI providers',Object.keys(state.config.ai || {}).join(' · ') || 'None'],['notifications','Notifications',Object.keys(state.config.user || {}).join(' · ')],['more','Image matching and more','Image matching, network and locale options'],['config','config.toml','Edit the file directly']];
       $('#sidebar').innerHTML = '<div class="sh">Settings</div>' + rows.map(([key,title,summary]) => `<a class="it ${parts[1]===key?'on':''}" href="#/settings/${key}" ${parts[1]===key?'aria-current="page"':''}><div class="t">${title}</div><div class="s">${esc(summary)}</div></a>`).join('');
     } else {
       $('#sidebar').innerHTML = `<a class="it ${parts[1]==='all'?'on':''}" href="#/monitor/all"><span class="b">All activity</span><span class="m d" style="float:right">last ${state.capacity.toLocaleString()} events</span></a><div class="sh">Saved searches · ${Object.keys(state.config.item || {}).length}</div>` + Object.entries(state.config.item || {}).map(([name,item]) => `<a class="it ${parts[2]===name || decodeName(parts[2]||'')===name ? 'on':''}" href="${itemRoute(name)}"><div class="row sb"><span class="t m ${item.enabled===false?'d':''}">${esc(name)}</span><span data-item-badge="${esc(name)}" class="m xs d">${item.enabled===false?'disabled':state.form?.name===name?'editing':''}</span></div><div class="s">${esc(searchSummary(name))}</div><div class="s" data-item-last-searched="${esc(name)}">${esc(lastSearchedLabel(name))}</div></a>`).join('') + manualMatchesSidebarHtml() + '<p class="sidebar-note">* marks a Marketplace or built-in default. Earlier files also contribute values. “New” counts come from recent activity.</p>';
     }
   }
-  if (!settings) {
+  if (!settings && !matches) {
     if (!$('#matches-nav')) {
       const link=document.createElement('a');link.id='matches-nav';link.href='#/monitor/matches';link.className='it';
       $('#sidebar').firstElementChild.after(link);
     }
-    const matchesNavActive=parts[1]==='matches'&&!manualMatchesActive();
-    $('#matches-nav').classList.toggle('on',matchesNavActive);
-    if(matchesNavActive)$('#matches-nav').setAttribute('aria-current','page');else $('#matches-nav').removeAttribute('aria-current');
     $('#matches-nav').innerHTML=`<div class="row sb"><span class="b">Matches</span><span class="m">${state.matchSummary?.library_total??'—'}${state.matchSummary?.new_count?' · '+state.matchSummary.new_count+' new':''}</span></div><div class="s">saved library · remembers returning listings</div>`;
     for(const link of document.querySelectorAll('#sidebar a.it:not(#matches-nav)')){
       const name=link.querySelector('[data-item-badge]')?.dataset.itemBadge;
@@ -947,6 +940,7 @@ function render() {
 }
 async function bootstrap() {
   matchesView ||= createMatchesView({state,json,pageHeader,exportCsv,toast,renderSidebar,searchSummary});
+  $('#sidebar').onclick=event=>matchesView.sidebarClick(event);
   state.status=await json('/api/status');state.open=state.status.open;$('#app').hidden=false;
   const build=state.status.build;
   $('#build-version').textContent=build?.sha?build.sha.slice(0,7)+(build.dirty?' · modified':''):'Build unknown';

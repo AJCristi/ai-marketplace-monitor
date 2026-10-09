@@ -1,4 +1,4 @@
-import {safeUrl, matchPhotoUrl, esc} from './console-model.js';
+import {safeUrl, matchPhotoUrl, matchThumbnailUrl, esc} from './console-model.js';
 import {createRelatedView} from './related.js';
 
 export const matchId = row => JSON.stringify([row.key, row.item]);
@@ -97,12 +97,12 @@ function sellerDetail(row) {
   const reasons=assessment?.reasons?.length?assessment.reasons:['Seller evidence is not available. Re-check this listing to collect it.'];
   return `<section class="match-more-body" aria-label="Seller credibility"><p>${sellerBadge(row)}</p><ul class="sm">${reasons.map(reason=>`<li>${esc(reason)}</li>`).join('')}</ul>${url?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">View seller profile ↗</a>`:''}${assessment?.checked_at?`<p class="xs d">Checked ${esc(matchDate(assessment.checked_at))}</p>`:''}<p class="xs d">Based on the listing’s seller panel. This does not verify identity or guarantee a safe transaction.</p></section>`;
 }
-const photo = row => `<span class="match-photo"><span>no photo</span>${matchPhotoUrl(row)?`<img src="${esc(matchPhotoUrl(row))}" alt="" loading="lazy" referrerpolicy="no-referrer">`:''}</span>`;
+const photo = row => {const url=matchThumbnailUrl(row);return `<span class="match-photo"><span>no photo</span>${url?`<img src="${esc(url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`:''}</span>`;};
 export function galleryHtml(row, selected = 0) {
   const photos=(row.photos||[]).filter(photo=>matchPhotoUrl(row,photo));
   if(!photos.length)return '<section class="match-gallery" aria-label="Photos"><div class="gallery-main">No photos saved</div><p class="xs d">Photos are saved by the monitor. Re-check to collect a listing’s gallery.</p></section>';
   selected=((selected%photos.length)+photos.length)%photos.length;
-  return `<section class="match-gallery" aria-label="Photos"><div class="gallery-main"><img src="${esc(matchPhotoUrl(row,photos[selected]))}" alt="Photo ${selected+1} of ${photos.length} — ${esc(row.title)}">${photos.length>1?'<div class="gallery-controls row"><button class="btn sm" data-photo-step="-1" aria-label="Previous photo">‹</button><button class="btn sm" data-photo-step="1" aria-label="Next photo">›</button></div>':''}</div>${photos.length>1?`<div class="gallery-thumbs" role="group" aria-label="Choose a photo">${photos.map((photo,index)=>`<button type="button" data-photo-index="${index}" aria-label="Photo ${index+1} of ${photos.length}" aria-pressed="${index===selected}"><img src="${esc(matchPhotoUrl(row,photo))}" alt="" loading="lazy"></button>`).join('')}</div>`:''}<p class="xs d">${photos.length} saved ${photos.length===1?'photo':'photos'}${row.photo_pending?` · ${row.photo_pending} awaiting capture or unavailable`:''} · archived on the monitor, available after the listing is removed.</p></section>`;
+  return `<section class="match-gallery" aria-label="Photos"><div class="gallery-main"><img src="${esc(matchPhotoUrl(row,photos[selected]))}" alt="Photo ${selected+1} of ${photos.length} — ${esc(row.title)}">${photos.length>1?'<div class="gallery-controls row"><button class="btn sm" data-photo-step="-1" aria-label="Previous photo">‹</button><button class="btn sm" data-photo-step="1" aria-label="Next photo">›</button></div>':''}</div>${photos.length>1?`<div class="gallery-thumbs" role="group" aria-label="Choose a photo">${photos.map((photo,index)=>`<button type="button" data-photo-index="${index}" aria-label="Photo ${index+1} of ${photos.length}" aria-pressed="${index===selected}"><img src="${esc(matchThumbnailUrl(row,photo))}" alt="" loading="lazy" decoding="async"></button>`).join('')}</div>`:''}<p class="xs d">${photos.length} saved ${photos.length===1?'photo':'photos'}${row.photo_pending?` · ${row.photo_pending} awaiting capture or unavailable`:''} · archived on the monitor, available after the listing is removed.</p></section>`;
 }
 const unratedText = row => row.source==='manual' ? row.evaluation_status==='error' ? row.assessment_reason||'AI assessment failed. Open the listing to retry.' : 'Awaiting AI assessment. Open the listing to retry if the monitor restarted.' : 'no AI rating — sends every listing that passes the filters';
 function attrsHtml(row, sort) {
@@ -131,6 +131,11 @@ export function matchShortcut(event) {
   return SHORTCUTS[event.key]||null;
 }
 const STATE_MESSAGES = {shortlisted:['Shortlisted','Removed from shortlist'],dismissed:['Dismissed','Restored'],contacted:['Marked contacted','Unmarked contacted']};
+const MATCH_VIEWS = [['new','New'],['shortlisted','★ Shortlist'],['contacted','Contacted'],['dismissed','Dismissed'],['all','All']];
+const SIDEBAR_KEYS = ['status','item','source'];
+const BAR_FILTER_KEYS = ['min_score','price_drop','q','include_dismissed'];
+const TRIAGE_RELOAD_DELAY_MS = 400;
+const joinNames = names => names.length>1 ? `${names.slice(0,-1).join(', ')} and ${names.at(-1)}` : names[0] || '';
 
 export function createMatchesView({state, json, pageHeader, exportCsv, toast, renderSidebar, searchSummary}) {
   const $ = selector=>document.querySelector(selector);
@@ -139,7 +144,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   const relatedView=createRelatedView({json,toast});
   let busy=false, refreshTimer=null, filterTimer=null, noteTimer=null, detailRow=null, photoIndex=0, photoSelection=null, listScroll=0, listWindowScroll=0;
   const dismissedRows=new Map(), pendingStates=new Set(), selectedKeys=new Set();
-  let selectionAnchor=null, arrivals=0;
+  let selectionAnchor=null, arrivals=0, keepList=false, reloadTimer=null, reloadWaiters=[];
   let focusDetail=false, loadedView=null, recheckState=new Map(), openSections=new Set();
   const storage=(name,key,value)=>{try{const store=globalThis[name];return value===undefined?store.getItem(key):value===null?store.removeItem(key):store.setItem(key,value);}catch{return null;}};
   cutoff=storage('localStorage','aimm-matches-seen')||'';
@@ -152,20 +157,19 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   const currentStatus=()=>query().get('status')||'new';
   const shortcutsOn=()=>storage('localStorage','aimm-shortcuts')!=='off';
   const filters=()=>[...query()].filter(([key,value])=>viewKeys.includes(key)&&!['group','sort'].includes(key)&&value&&!(key==='status'&&['all','new'].includes(value))&&!(['include_dismissed','price_drop'].includes(key)&&value!=='true'));
+  const barFilters=()=>filters().filter(([key])=>!SIDEBAR_KEYS.includes(key));
   function rememberView(p){storage('localStorage','aimm-matches-view',new URLSearchParams([...p].filter(([key])=>viewKeys.includes(key))).toString());}
-  function updateQuery(p){state.route='#/monitor/matches'+(p.size?'?'+p:'');history.replaceState(null,'',state.route);rememberView(p);const clear=$('#matches-clear');if(clear)clear.hidden=!filters().length;renderChips();}
+  function updateQuery(p){state.route='#/monitor/matches'+(p.size?'?'+p:'');history.replaceState(null,'',state.route);rememberView(p);const clear=$('#matches-clear');if(clear)clear.hidden=!barFilters().length;renderChips();renderSidebar();}
   const density=()=>storage('localStorage','aimm-matches-density')==='compact'?'compact':'comfortable';
   function chipLabel(key,value){
-    if(key==='item')return 'Category: '+value;
-    if(key==='source')return 'Category: Manually added';
     if(key==='min_score')return ({4:'Good or better',5:'Great deal only'})[value]||`${ratingWord(Number(value))} or better`;
     if(key==='q')return `Contains “${value}”`;
     return ({price_drop:'Price dropped',include_dismissed:'Including dismissed'})[key]||'';
   }
   function renderChips(){
     const target=$('#match-chips'), row=$('#match-chips-row');if(!target)return;
-    const chips=filters().filter(([key])=>key!=='status');
-    if(row)row.hidden=!filters().length;
+    const chips=barFilters();
+    if(row)row.hidden=!chips.length;
     const toggle=$('#matches-filters-toggle');if(toggle)toggle.textContent=chips.length?`Filters (${chips.length})`:'Filters';
     target.innerHTML=chips.map(([key,value])=>`<span class="match-chip">${esc(chipLabel(key,value))}<button type="button" data-remove-filter="${esc(key)}" aria-label="Remove filter: ${esc(chipLabel(key,value))}">✕</button></span>`).join('');
     document.querySelectorAll('[data-remove-filter]').forEach(button=>button.onclick=()=>{clearTimeout(filterTimer);const p=query();p.delete(button.dataset.removeFilter);p.delete('cursor');updateQuery(p);render(false);});
@@ -174,18 +178,21 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   const rememberJobs=()=>{storage('sessionStorage','aimm-recheck-jobs',JSON.stringify([...jobs.values()].filter(job=>['queued','running'].includes(job.state)).map(job=>job.job_id)));};
   const params=()=>{const p=query();p.delete('group');p.delete('match_item');p.set('limit','200');if(!p.get('status'))p.set('status','new');if(cutoff)p.set('since',cutoff);return p;};
   const setFilter=(name,value)=>setFilters({[name]:value});
-  function setFilters(values){if(!active())return;const p=query();for(const [name,value] of Object.entries(values))if(value)p.set(name,value);else p.delete(name);p.delete('cursor');updateQuery(p);dismissedRows.clear();selectedKeys.clear();listScroll=0;load();}
+  function setFilters(values){if(!active())return;const p=query();for(const [name,value] of Object.entries(values))if(value)p.set(name,value);else p.delete(name);applyListQuery(p);}
+  function applyListQuery(p){p.delete('cursor');updateQuery(p);dismissedRows.clear();selectedKeys.clear();listScroll=0;keepList=true;load();}
   function notify(message, action) {
     toast(message);
     const host=$('#toast');if(action&&host){const button=document.createElement('button');button.className='btn';button.textContent='Undo';button.onclick=action;host.append(' ',button);}
   }
   async function summary(){
-    try{const seen=storage('localStorage','aimm-matches-seen')||cutoff;const p=new URLSearchParams({limit:'1'});if(seen)p.set('since',seen);const result=await json('/api/matches?'+p);state.matchSummary=result;renderSidebar();}catch{}
+    try{const seen=storage('localStorage','aimm-matches-seen')||cutoff;const p=active()?params():new URLSearchParams();p.set('limit','1');p.delete('cursor');if(seen)p.set('since',seen);const result=await json('/api/matches?'+p);state.matchSummary=result;renderSidebar();}catch{}
   }
   async function load(more=false, quiet=false, reuse=false) {
-    if(!active())return;
-    const token=++request;error='';loading=!quiet&&!more;
+    clearTimeout(reloadTimer);const waiters=reloadWaiters;reloadWaiters=[];
+    if(!active()){waiters.forEach(done=>done());return;}
+    const token=++request, showStale=keepList&&rows.length>0&&!detail();error='';loading=!quiet&&!more&&!showStale;keepList=false;
     if(loading)renderBody();
+    if(showStale)$('#matches-body')?.setAttribute('aria-busy','true');
     const p=params();if(more&&data?.next_cursor)p.set('cursor',data.next_cursor);
     try{
       const result=reuse?data:await json('/api/matches?'+p);
@@ -208,25 +215,41 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
       }
       loading=false;
       if(!more){arrivals=0;renderArrivals();}
-      renderCategories(result);
-      renderSidebar();renderCounts();renderBody();
+      renderSidebar();renderBody();
       if(!detail()&&reuse){const pane=$('#pane');pane.scrollTop=listScroll;if(typeof window!=='undefined')window.scrollTo?.(0,listWindowScroll);if(cursorKey)focusCursor();}
     }catch(err){if(token!==request)return;loading=false;error=err.message;renderBody();}
+    finally{if(token===request)$('#matches-body')?.setAttribute?.('aria-busy','false');waiters.forEach(done=>done());}
   }
-  function renderCounts(){for(const button of document.querySelectorAll('[data-match-status]')){const name=button.dataset.matchStatus;button.textContent=({new:'New',all:'All',shortlisted:'★ Shortlist',contacted:'Contacted',dismissed:'Dismissed'})[name]+' '+(data?.counts[name]??'—');}}
   const isNewRow=row=>Boolean(row.found_at)&&!row.state.shortlisted&&!row.state.contacted&&!row.state.dismissed&&(!cutoff||new Date(row.found_at)>new Date(cutoff));
   function groupSummary(entries){
     const fresh=entries.filter(isNewRow).length, drops=entries.filter(priceDropped).length, best=Math.max(0,...entries.map(row=>row.score??0));
     return [fresh?`${fresh} new`:'',best?`best: ${ratingWord(best)}`:'',drops?`${drops} price ${drops===1?'drop':'drops'}`:''].filter(Boolean).join(' · ');
   }
-  function renderCategories(result){
-    const target=$('#match-categories');if(!target)return;
-    const counts=new Map(result.groups.map(group=>[group.item,group.count])), currentItem=query().get('item')||'', currentSource=query().get('source')||'';
-    const names=[...new Set([...Object.keys(state.config.item||{}),...result.groups.map(group=>group.item)])].filter(Boolean);
-    const manualCount=counts.get('')||0;
-    const options=[['','','All',result.counts?.all??0],...names.map(name=>[name,'',Object.hasOwn(state.config.item||{},name)?name:name+' (removed)',counts.get(name)||0]),...(manualCount||currentSource==='manual'?[['','manual','Manually added',manualCount]]:[])];
-    target.innerHTML='<span class="sm d">Category</span>'+options.map(([item,source,label,count])=>`<button type="button" class="match-category" data-match-category="${esc(item)}" data-match-source="${source}" aria-pressed="${item===currentItem&&source===currentSource}">${esc(label)} <span class="match-category-count">${count}</span></button>`).join('');
-    document.querySelectorAll('[data-match-category]').forEach(button=>button.onclick=()=>setFilters({item:button.dataset.matchCategory,source:button.dataset.matchSource}));
+  function sidebarHtml(){
+    const summary=state.matchSummary||{}, p=query(), searches=state.config.item||{}, status=currentStatus();
+    const selectedItem=detail()?p.get('match_item')||'':p.get('item')||'';
+    const manualSelected=detail()?p.get('match_item')==='':p.get('source')==='manual';
+    const listHref=changes=>{const next=query();for(const key of ['match_item','cursor'])next.delete(key);for(const [key,value] of Object.entries(changes))if(value)next.set(key,value);else next.delete(key);return '#/monitor/matches'+(next.size?'?'+next:'');};
+    const entry=({kind,href,on,label,labelClass='b',badge,badgeClass='d',lines=[]})=>`<a class="it${on?' on':''}" href="${esc(href)}" data-match-nav="${kind}"${on?' aria-current="true"':''}><div class="row sb"><span class="${labelClass}">${esc(label)}</span><span class="m xs ${badgeClass}">${esc(String(badge??'—'))}</span></div>${lines.map(line=>`<div class="s">${esc(line)}</div>`).join('')}</a>`;
+    const viewCounts=new Map((summary.view_groups||[]).map(group=>[group.item,group.count]));
+    const withMatches=new Set([...(summary.groups||[]),...(summary.view_groups||[])].map(group=>group.item));
+    const names=[...new Set([...Object.keys(searches).filter(name=>withMatches.has(name)),...withMatches,selectedItem])].filter(Boolean);
+    const {awaiting=0,failed=0}=summary.manual||{};
+    const showManual=withMatches.has('')||manualSelected;
+    const noMatches=summary.groups?Object.keys(searches).filter(name=>!withMatches.has(name)):[];
+    return '<div class="sh">Views</div>'+MATCH_VIEWS.map(([key,label])=>entry({kind:'status',href:listHref({status:key}),on:status===key,label,badge:summary.counts?.[key]})).join('')+
+      '<div class="sh">Found by</div>'+entry({kind:'source',href:listHref({item:'',source:''}),on:!selectedItem&&!manualSelected,label:'All sources',badge:summary.view_total})+
+      names.map(name=>{const known=Object.hasOwn(searches,name);return entry({kind:'source',href:listHref({item:name,source:''}),on:name===selectedItem&&!manualSelected,label:known?name:name+' (removed)',labelClass:'t m',badge:viewCounts.get(name)??0,lines:[known?searchSummary(name):'Removed search']});}).join('')+
+      (showManual?entry({kind:'source',href:listHref({item:'',source:'manual'}),on:manualSelected,label:'Manually added',badge:failed?`${failed} failed`:awaiting?`${awaiting} awaiting`:viewCounts.get('')??0,badgeClass:failed?'warn':'d',lines:['Links you add · general AI assessment',...(failed?['AI assessment failed · open it to retry']:awaiting?['Awaiting AI assessment']:[])]}):'')+
+      `<p class="sidebar-note">Source counts follow the selected view and filters.${noMatches.length?` ${esc(joinNames(noMatches))} ${noMatches.length===1?'has':'have'} no matches yet.`:''} <a href="#/monitor/all">Manage searches in Monitor →</a></p>`;
+  }
+  function sidebarClick(event){
+    const link=event.target?.closest?.('[data-match-nav]');
+    if(!link||!active()||event.defaultPrevented||event.button>0||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;
+    event.preventDefault();
+    const href=link.getAttribute('href');
+    if(detail()){openList(href);return;}
+    applyListQuery(new URLSearchParams(href.split('?')[1]||''));
   }
   function selectHtml(name,label,options){const value=query().get(name)||'';return `<label class="sm">${label}<select class="in" data-match-filter="${name}">${options.map(([id,text])=>`<option value="${esc(id)}" ${id===value?'selected':''}>${esc(text)}</option>`).join('')}</select></label>`;}
   function render(restore=true) {
@@ -250,27 +273,25 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     cutoff=storage('localStorage','aimm-matches-seen')||'';
     const p=query();
     $('#pane').innerHTML=pageHeader('Matches',"Listings from your saved searches and links you add manually.",'<button class="btn p" id="add-listing">Add listing</button><button class="btn" id="export-csv">Export CSV</button><button class="btn q" id="matches-shortcuts" aria-keyshortcuts="Shift+?">Keyboard shortcuts</button>')+
-      `<form id="add-listing-form" class="sect" hidden><label class="sm" for="add-listing-url">Facebook Marketplace listing URL</label><div class="row wr"><input class="in gr" id="add-listing-url" type="url" required maxlength="4096" placeholder="https://www.facebook.com/marketplace/item/…" aria-describedby="add-listing-error"><button class="btn p" id="add-listing-submit" type="submit">Save and assess</button></div><p class="err sm" id="add-listing-error" role="alert"></p></form><div class="bar matches-filters"><div class="row wr" role="group" aria-label="Match status">${['new','shortlisted','contacted','dismissed','all'].map(name=>`<button class="pill" data-match-status="${name}" aria-pressed="${currentStatus()===name}">${name}</button>`).join('')}</div>`+
-      '<div class="row wr match-categories" role="group" aria-label="Category" id="match-categories"></div>'+
+      `<form id="add-listing-form" class="sect" hidden><label class="sm" for="add-listing-url">Facebook Marketplace listing URL</label><div class="row wr"><input class="in gr" id="add-listing-url" type="url" required maxlength="4096" placeholder="https://www.facebook.com/marketplace/item/…" aria-describedby="add-listing-error"><button class="btn p" id="add-listing-submit" type="submit">Save and assess</button></div><p class="err sm" id="add-listing-error" role="alert"></p></form><div class="bar matches-filters">`+
       `<button class="btn sm match-filters-toggle" id="matches-filters-toggle" aria-expanded="false" aria-controls="match-filter-row">Filters</button><div class="match-filter-row" id="match-filter-row">`+
       selectHtml('min_score','AI rating',[['','Any rating'],['4','Good or better'],['5','Great deal only']])+
       `<label class="opt sm match-price-drop"><input type="checkbox" data-match-filter="price_drop" value="true" ${p.get('price_drop')==='true'?'checked':''}>Price dropped</label><label class="sm">Contains<input class="in" type="search" id="matches-query" value="${esc(p.get('q')||'')}" placeholder="Title, seller…"></label><div class="match-view-controls" role="group" aria-label="View">`+
       selectHtml('sort','Sort',[['','Newest found'],['last_seen','Last seen'],['price','Price: low to high'],['score','Best rating']])+
       selectHtml('group','Group by',[['','Category'],['date','Day found'],['none','None']])+
-      `<div class="sm match-density"><span>Density</span><div class="seg" role="group" aria-label="Density">${['comfortable','compact'].map(name=>`<button type="button" data-density="${name}" aria-pressed="${density()===name}">${name[0].toUpperCase()+name.slice(1)}</button>`).join('')}</div></div></div></div><div class="match-chips" id="match-chips-row" ${filters().length?'':'hidden'}><span class="row wr" id="match-chips"></span><button class="btn sm q" id="matches-clear" ${filters().length?'':'hidden'}>Clear filters</button></div></div><div id="matches-arrivals"></div><div id="matches-progress"></div><span class="vh" id="matches-announcement" aria-live="polite" aria-atomic="true"></span><div id="matches-body"></div>`+shortcutsDialog();
+      `<div class="sm match-density"><span>Density</span><div class="seg" role="group" aria-label="Density">${['comfortable','compact'].map(name=>`<button type="button" data-density="${name}" aria-pressed="${density()===name}">${name[0].toUpperCase()+name.slice(1)}</button>`).join('')}</div></div></div></div><div class="match-chips" id="match-chips-row" ${barFilters().length?'':'hidden'}><span class="row wr" id="match-chips"></span><button class="btn sm q" id="matches-clear" ${barFilters().length?'':'hidden'}>Clear filters</button></div></div><div id="matches-arrivals"></div><div id="matches-progress"></div><span class="vh" id="matches-announcement" aria-live="polite" aria-atomic="true"></span><div id="matches-body"></div>`+shortcutsDialog();
     bindShortcutsDialog();$('#matches-shortcuts').onclick=openShortcuts;
     $('#matches-body').addEventListener?.('focusin',event=>{const target=event.target.closest?.('[data-match-key]');if(target)setCursor(target.dataset.matchKey,false);});
     $('#add-listing').onclick=()=>{const form=$('#add-listing-form');form.hidden=!form.hidden;if(!form.hidden)$('#add-listing-url').focus();};
     $('#add-listing-form').onsubmit=addListing;
     $('#export-csv').onclick=()=>{clearTimeout(filterTimer);const p=query(), text=$('#matches-query').value;if(text!==(p.get('q')||'')){if(text)p.set('q',text);else p.delete('q');p.delete('cursor');updateQuery(p);load();}const exportParams=new URLSearchParams([...p].filter(([key])=>viewKeys.includes(key)&&key!=='group'));if(currentStatus()==='new'){exportParams.set('status','new');if(cutoff)exportParams.set('since',cutoff);}return exportCsv({url:'/api/matches.csv'+(exportParams.size?'?'+exportParams:''),emptyMessage:'No matches for these filters to export.',filename:'matches.csv'});};
-    $('#matches-clear').onclick=()=>{clearTimeout(filterTimer);const p=query();for(const key of [...viewKeys,'cursor'])if(!['sort','group'].includes(key))p.delete(key);updateQuery(p);render(false);$('#matches-query').focus();};
-    document.querySelectorAll('[data-match-status]').forEach(button=>button.onclick=()=>{setFilter('status',button.dataset.matchStatus);document.querySelectorAll('[data-match-status]').forEach(b=>b.setAttribute('aria-pressed',b===button));});
+    $('#matches-clear').onclick=()=>{clearTimeout(filterTimer);const p=query();for(const key of [...BAR_FILTER_KEYS,'cursor'])p.delete(key);updateQuery(p);render(false);$('#matches-query').focus();};
     document.querySelectorAll('[data-match-filter]').forEach(select=>select.onchange=()=>{const value=select.type==='checkbox'?(select.checked?'true':''):select.value;if(select.dataset.matchFilter==='group'){const p=query();if(value)p.set('group',value);else p.delete('group');updateQuery(p);renderBody();}else setFilter(select.dataset.matchFilter,value);});
     document.querySelectorAll('[data-density]').forEach(button=>button.onclick=()=>{storage('localStorage','aimm-matches-density',button.dataset.density==='compact'?'compact':null);document.querySelectorAll('[data-density]').forEach(other=>other.setAttribute('aria-pressed',other===button));renderBody();});
     $('#matches-filters-toggle').onclick=()=>{const bar=$('.matches-filters'), open=!bar.classList.contains('open');bar.classList.toggle('open',open);$('#matches-filters-toggle').setAttribute('aria-expanded',open);};
     renderChips();
     $('#matches-query').oninput=event=>{clearTimeout(filterTimer);const input=event.target,value=input.value;filterTimer=setTimeout(()=>{if(active()&&$('#matches-query')===input)setFilter('q',value);},250);};
-    renderCounts();renderProgress();load(false,false,returning);pollJobs();
+    renderProgress();load(false,false,returning);pollJobs();
   }
   const isInvalid=row=>row.evaluation_status?['below_threshold','filtered_out'].includes(row.evaluation_status):Boolean(row.recheck&&row.recheck.checked_item===row.item&&['below_threshold','filtered_out'].includes(row.recheck.status));
   function badgesHtml(row){
@@ -294,7 +315,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     if(!active()||!$('#matches-body'))return;
     const focused=document.activeElement;
     if($('#match-detail'))openSections=new Set([...document.querySelectorAll('#match-detail details[open]')].map(el=>el.dataset.section));
-    const focusAttribute=['data-state','data-file-under','data-photo-index','data-photo-step','data-collapse','data-match-category','data-recheck-group','data-select-match','data-bulk','data-density'].find(name=>focused?.hasAttribute(name));
+    const focusAttribute=['data-state','data-file-under','data-photo-index','data-photo-step','data-collapse','data-recheck-group','data-select-match','data-bulk','data-density'].find(name=>focused?.hasAttribute(name));
     const focusValue=focusAttribute?focused.getAttribute(focusAttribute):null, focusId=focused?.id;
     if(loading){$('#matches-body').innerHTML='<div class="match-skeleton" role="status">Loading matches…</div>'.repeat(3);renderProgress();return;}
     if(error){$('#matches-body').innerHTML=`<div class="empty"><p class="err">${esc(error)}</p><button class="btn" id="matches-retry">Retry</button></div>`;$('#matches-retry').onclick=()=>load();renderProgress();return;}
@@ -310,7 +331,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
       renderProgress();return;
     }
     const sinceText=cutoff?`since ${relativeDate(cutoff)}`:'yet';
-    if(!rows.length&&currentStatus()==='new'&&!filters().length){$('#matches-body').innerHTML=`<div class="empty" role="status"><h2>You’re all caught up</h2><p>No new matches ${cutoff?`since you marked them seen ${esc(relativeDate(cutoff))}`:'yet'}. New listings from your searches appear here until you shortlist, contact or dismiss them.</p><button class="btn" id="matches-show-all">Show all matches</button></div>`;$('#matches-show-all').onclick=()=>{setFilter('status','all');document.querySelectorAll('[data-match-status]').forEach(button=>button.setAttribute('aria-pressed',button.dataset.matchStatus==='all'));};renderProgress();return;}
+    if(!rows.length&&currentStatus()==='new'&&!filters().length){$('#matches-body').innerHTML=`<div class="empty" role="status"><h2>You’re all caught up</h2><p>No new matches ${cutoff?`since you marked them seen ${esc(relativeDate(cutoff))}`:'yet'}. New listings from your searches appear here until you shortlist, contact or dismiss them.</p><button class="btn" id="matches-show-all">Show all matches</button></div>`;$('#matches-show-all').onclick=()=>setFilter('status','all');renderProgress();return;}
     if(!rows.length){const filtered=filters();$('#matches-body').innerHTML=`<div class="empty"><h2>${filtered.length?'No matches for these filters':'No matches yet'}</h2><p>${filtered.length?esc(filtered.map(([k,v])=>k+': '+v).join(' · ')):"Listings from searches and links you add manually will collect here."}</p>${filtered.length?'':'<a href="#/monitor/all">View searches</a>'}</div>`;renderProgress();return;}
     const ordered=navigationEntries();
     if(!ordered.some(entry=>matchId(entry.row)===selected))selected=ordered.length?matchId(ordered[0].row):null;
@@ -322,7 +343,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
       const open=!collapsed.has(name), label=by==='date'?dayGroupLabel(name):name||'Manually added';
       const description=by==='search'?[name?Object.hasOwn(state.config.item||{},name)?searchSummary(name):'Removed search':'Links you add · general AI assessment',name?'last searched '+(last?relativeDate(new Date(last.time*1000).toISOString()):'—'):''].filter(Boolean).join(' · '):'';
       return `<section class="match-group">${by!=='none'?`<header><div class="match-group-head"><h2 class="match-group-title"><button class="btn q" data-collapse="${esc(name)}" aria-expanded="${open}"><span class="match-caret" aria-hidden="true">${open?'▾':'▸'}</span>${by==='search'?`<span class="m">${esc(label)}</span>`:esc(label)}</button></h2><span class="sm match-group-summary">${esc(groupSummary(entries))}</span><span class="m d match-group-count">${count} ${count===1?'match':'matches'}</span><button class="btn sm" data-recheck-group="${esc(name)}" ${running()||(by==='search'&&name&&(!state.config.item?.[name]||state.config.item[name].enabled===false))?'disabled':''} title="At most 25 listings per job">${[...jobs.values()].some(job=>['queued','running'].includes(job.state)&&job.searches?.length===1&&job.searches[0]===name)?'Re-checking…':count>25?'Re-check newest 25':'↻ Re-check '+Math.min(count,25)}</button></div>${description&&open?`<p class="xs d match-group-description">${esc(description)}</p>`:''}</header><div data-group-progress="${esc(name)}"></div>`:''}${open?entries.map((row,index)=>rowHtml(row,index,name)).join(''):''}</section>`;
-    }).join('')+`${data.next_cursor?'<button class="btn match-more" id="matches-more">Load more matches</button>':''}<p class="section-note">${by==='search'?Object.keys(state.config.item||{}).filter(name=>!data.groups.some(group=>group.item===name)).map(name=>esc(name)+' has no matches').join(' · '):''}${query().get('status')!=='dismissed'?' · dismissed matches are hidden':''}</p>${shortcutsOn()?'<p class="match-keys xs d"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>s</kbd> shortlist</span><span><kbd>e</kbd> dismiss</span><span><kbd>c</kbd> contacted</span><span><kbd>v</kbd> open on Facebook</span><span><kbd>z</kbd> undo</span><span><kbd>?</kbd> all shortcuts</span></p>':''}</div><aside class="match-preview" id="match-preview" aria-label="Match preview"></aside></div>`;
+    }).join('')+`${data.next_cursor?'<button class="btn match-more" id="matches-more">Load more matches</button>':''}${query().get('status')!=='dismissed'?'<p class="section-note">Dismissed matches are hidden</p>':''}${shortcutsOn()?'<p class="match-keys xs d"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>s</kbd> shortlist</span><span><kbd>e</kbd> dismiss</span><span><kbd>c</kbd> contacted</span><span><kbd>v</kbd> open on Facebook</span><span><kbd>z</kbd> undo</span><span><kbd>?</kbd> all shortcuts</span></p>':''}</div><aside class="match-preview" id="match-preview" aria-label="Match preview"></aside></div>`;
     $('#matches-mark-seen')?.addEventListener('click',markAllSeen);
     document.querySelectorAll('[data-select-match]').forEach(input=>input.onclick=event=>toggleSelection(input.dataset.selectMatch,input.checked,event.shiftKey));
     document.querySelectorAll('[data-bulk]').forEach(button=>button.onclick=()=>bulkUpdate(button.dataset.bulk));
@@ -382,7 +403,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     if($('#related-listings'))relatedView.mount($('#related-listings'),row);
     const back=query();back.delete('match_item');
     $('#match-page-top').innerHTML=`<div class="ph"><div><a id="match-back" href="#/monitor/matches${back.size?'?'+back:''}">← Matches</a><p class="m d sm">${esc(row.source==='manual'?'Manually added':row.item)}${row.source==='manual'||state.config.item?.[row.item]?'':' (removed search)'}</p><h1 id="match-title" tabindex="-1">${esc(row.title||'Listing details unavailable')}</h1><p class="match-attrs">${attrsHtml(row,'')}</p>${badgesHtml(row)?`<p class="match-line1">${badgesHtml(row)}</p>`:''}</div></div>${row.state.dismissed?'<div class="nt" role="status">Dismissed. Hidden from Matches. <button class="btn q" id="detail-undo">Undo</button></div>':''}`;
-    $('#match-back').onclick=event=>{if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;event.preventDefault();state.route='#/monitor/matches'+(back.size?'?'+back:'');history.pushState(null,'',state.route);render(false);};
+    $('#match-back').onclick=event=>{if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;event.preventDefault();openList('#/monitor/matches'+(back.size?'?'+back:''));};
     $('#detail-undo')?.addEventListener('click',()=>saveState(row,{dismissed:false},{silent:true}));
     function drawGallery(){
       const target=$('#match-gallery');if(!target)return;
@@ -516,6 +537,12 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     target.innerHTML=arrivals?`<div class="match-arrivals" role="status"><button class="btn sm" id="matches-arrivals-show">${arrivals} new ${arrivals===1?'match':'matches'} · Show</button></div>`:'';
     $('#matches-arrivals-show')?.addEventListener('click',()=>{arrivals=0;renderArrivals();load(false,true);});
   }
+  function openList(route){state.route=route;history.pushState(null,'',route);render(false);renderSidebar();}
+  function reloadSoon(){
+    clearTimeout(reloadTimer);
+    reloadTimer=setTimeout(()=>load(false,true),TRIAGE_RELOAD_DELAY_MS);
+    return new Promise(resolve=>reloadWaiters.push(resolve));
+  }
   async function saveState(row,patch,{fromRow=false,silent=false,viaKey=false}={}) {
     if(pendingStates.has(row.key))return;
     pendingStates.add(row.key);
@@ -527,10 +554,10 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     renderBody();
     try{
       const updated=await json(`/api/matches/${encodeURIComponent(row.marketplace)}/${encodeURIComponent(row.listing_id)}/state`,{method:'PUT',body:JSON.stringify(patch)});
-      Object.assign(row.state,updated);
+      Object.assign(row.state,updated);pendingStates.delete(row.key);
       const changed=Object.keys(patch).find(name=>STATE_MESSAGES[name]);
       if(changed&&!silent){const undo=()=>{if(lastUndo===undo)lastUndo=null;toast('Change undone.');return saveState(row,previous,{fromRow,silent:true});};lastUndo=undo;notify(`${STATE_MESSAGES[changed][patch[changed]?0:1]}: ${row.title||'listing'}`,undo);}
-      if(state.route===route){await load(false,true);if(viaKey)focusCursor();else if(fromRow&&patch.dismissed===true)document.querySelector('[data-undo-row]')?.focus();}
+      if(state.route===route){await reloadSoon();if(state.route!==route)return;if(viaKey)focusCursor();else if(fromRow&&patch.dismissed===true)document.querySelector('[data-undo-row]')?.focus();}
     }catch(err){Object.assign(row.state,previous);dismissedRows.delete(matchId(row));if(state.route===route)renderBody();toast(err.message);}
     finally{pendingStates.delete(row.key);}
   }
@@ -596,5 +623,5 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   }
   function onRecord(record){if(['match_recorded','match_seen','manual_listing_result','recheck_result','recheck_done','image_matching_done','match_photo_saved'].includes(record.extra?.kind)){if(record.extra.kind==='recheck_result'&&active()){rows=applyRecheckResult(rows,record.extra);renderBody();}if(record.extra.kind==='match_recorded'&&active()&&!detail()&&rows.length){arrivals++;renderArrivals();clearTimeout(refreshTimer);refreshTimer=setTimeout(summary,350);return;}clearTimeout(refreshTimer);refreshTimer=setTimeout(()=>{if(active())load(false,true);else summary();pollJobs();},350);}}
   setInterval(()=>{pollJobs();if(active())relatedView.refresh();else relatedView.unmount();},3000);
-  return {render,onRecord,summary,onKey};
+  return {render,onRecord,summary,onKey,sidebarHtml,sidebarClick};
 }

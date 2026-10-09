@@ -41,7 +41,9 @@ test('live below-threshold results update even when the active rating filter hid
   assert.equal(applyRecheckResult(rows,{marketplace:'fb',listing_id:'1',original_item:'camera',item:'other',status:'passed',score:3})[0].score,5);
 });
 
-function viewHarness(t,{route='#/monitor/matches',saved='',matches=[],groups,filteredGroups,respond,storageFails=false,storageReadOnly=false}={}) {
+const decodeHtml=value=>value.replaceAll('&amp;','&').replaceAll('&quot;','"').replaceAll('&#39;',"'").replaceAll('&lt;','<').replaceAll('&gt;','>');
+const sidebarLinks=view=>[...view.sidebarHtml().matchAll(/<a class="it( on)?" href="([^"]*)" data-match-nav="(\w+)"[^>]*><div class="row sb"><span class="[^"]*">([^<]*)<\/span><span class="m xs ([^"]*)">([^<]*)<\/span><\/div>((?:<div class="s">[^<]*<\/div>)*)/g)].map(([,on,href,kind,label,badgeClass,badge,lines])=>({on:Boolean(on),href:decodeHtml(href),kind,label:decodeHtml(label),badge:decodeHtml(badge),badgeClass,lines:[...lines.matchAll(/<div class="s">([^<]*)<\/div>/g)].map(match=>decodeHtml(match[1]))}));
+function viewHarness(t,{route='#/monitor/matches',saved='',matches=[],groups,filteredGroups,viewGroups,respond,storageFails=false,storageReadOnly=false}={}) {
   const nodes=new Map(), controls=[], timers=new Map(), stored=new Map([['aimm-matches-view',saved]]), requests=[], exports=[];
   let timerId=0;
   const decode=value=>value.replaceAll('&amp;','&').replaceAll('&quot;','"').replaceAll('&#39;',"'").replaceAll('&lt;','<').replaceAll('&gt;','>');
@@ -75,8 +77,8 @@ function viewHarness(t,{route='#/monitor/matches',saved='',matches=[],groups,fil
   const globals={document:{activeElement:null,querySelector:selector=>selector.startsWith('#')?nodes.get(selector.slice(1))||null:selects(controls,selector)[0]||null,querySelectorAll:selector=>selects(controls,selector),getElementById:id=>nodes.get(id)},localStorage:storage,sessionStorage:{...storage,getItem:()=>null},history:{replaceState(){},pushState(){}},setInterval:()=>0,setTimeout:fn=>{timers.set(++timerId,fn);return timerId;},clearTimeout:id=>timers.delete(id)};
   for(const [key,value] of Object.entries(globals)){const original=Object.getOwnPropertyDescriptor(globalThis,key);Object.defineProperty(globalThis,key,{value,configurable:true,writable:true});t.after(()=>{if(original)Object.defineProperty(globalThis,key,original);else delete globalThis[key];});}
   const state={route,config:{item:{camera:{},gear:{}}},records:[],status:{}};
-  const view=createMatchesView({state,json:async (url,options)=>{requests.push(url);return respond?.(url,options)??(url.includes('/detail?')?matches.find(row=>url.includes('/'+row.listing_id+'/')&&new URL(url,'http://localhost').searchParams.get('item')===row.item):url.includes('/related')?{}:url.endsWith('/state')?JSON.parse(options.body):{matches,counts:{all:matches.length},groups:groups??[{item:'camera',count:matches.length}],filtered_groups:filteredGroups??[{item:'camera',count:matches.length}]});},pageHeader:(_title,_description,actions)=>actions,exportCsv:options=>exports.push(options),toast(){},renderSidebar(){},searchSummary:()=>''});
-  return {state,view,stored,requests,exports,open:async(index=0)=>{selects(controls,'[data-open-match]')[index].onclick({preventDefault(){}});for(let i=0;i<6;i++)await Promise.resolve();},control:(selector)=>selects(controls,selector)[0],node:id=>nodes.get(id),filter:(name,value)=>{const control=controls.find(el=>el.dataset.matchFilter===name);control.value=value;control.onchange();},status:name=>controls.find(el=>el.dataset.matchStatus===name).onclick(),flush:async()=>{for(let i=0;i<6;i++)await Promise.resolve();},tick:async()=>{const pending=[...timers.values()];timers.clear();pending.forEach(fn=>fn());await Promise.resolve();}};
+  const view=createMatchesView({state,json:async (url,options)=>{requests.push(url);return respond?.(url,options)??(url.includes('/detail?')?matches.find(row=>url.includes('/'+row.listing_id+'/')&&new URL(url,'http://localhost').searchParams.get('item')===row.item):url.includes('/related')?{}:url.endsWith('/state')?JSON.parse(options.body):{matches,counts:{all:matches.length},groups:groups??[{item:'camera',count:matches.length}],filtered_groups:filteredGroups??[{item:'camera',count:matches.length}],view_total:matches.length,view_groups:viewGroups??filteredGroups??[{item:'camera',count:matches.length}]});},pageHeader:(_title,_description,actions)=>actions,exportCsv:options=>exports.push(options),toast(){},renderSidebar(){},searchSummary:()=>''});
+  return {state,view,stored,requests,exports,open:async(index=0)=>{selects(controls,'[data-open-match]')[index].onclick({preventDefault(){}});for(let i=0;i<6;i++)await Promise.resolve();},control:(selector)=>selects(controls,selector)[0],node:id=>nodes.get(id),filter:(name,value)=>{const control=controls.find(el=>el.dataset.matchFilter===name);control.value=value;control.onchange();},sidebar:()=>sidebarLinks(view),nav:label=>{const link=sidebarLinks(view).find(entry=>entry.label===label);view.sidebarClick({target:{closest:()=>({getAttribute:()=>link.href})},preventDefault(){}});},status:name=>{const link=sidebarLinks(view).find(entry=>entry.kind==='status'&&new URLSearchParams(entry.href.split('?')[1]).get('status')===name);view.sidebarClick({target:{closest:()=>({getAttribute:()=>link.href})},preventDefault(){}});},flush:async()=>{for(let i=0;i<6;i++)await Promise.resolve();},tick:async()=>{const pending=[...timers.values()];timers.clear();pending.forEach(fn=>fn());await Promise.resolve();}};
 }
 
 test('Matches restores saved filters and layout on return; explicit URLs replace saved preferences',async t=>{
@@ -156,7 +158,7 @@ test('a successful re-check clears a previous failed evaluation only for its sea
 test('saved removed searches are discarded and unavailable storage does not block Matches',async t=>{
   await t.test('removed search and invalid values',async t=>{const h=viewHarness(t,{saved:'item=deleted&sort=price&group=date&cursor=old&status=invalid&min_score=0&include_dismissed=invalid'});h.view.render();await h.flush();assert.equal(h.state.route,'#/monitor/matches?sort=price&group=date');assert.equal(h.stored.get('aimm-matches-view'),'sort=price&group=date');});
   await t.test('storage unavailable',async t=>{const h=viewHarness(t,{storageFails:true});h.view.render();await h.flush();h.filter('min_score','5');await h.flush();assert.match(h.requests.at(-1),/min_score=5/);});
-  await t.test('readable storage cannot restore filters while clearing',async t=>{const h=viewHarness(t,{saved:'status=shortlisted&q=camera',storageReadOnly:true});h.view.render();await h.flush();h.node('matches-clear').onclick();await h.flush();assert.equal(h.state.route,'#/monitor/matches');assert.equal(h.node('matches-query').value,'');assert.equal(h.node('matches-clear').hidden,true);assert.equal(new URL(h.requests.at(-1),'http://localhost').searchParams.get('status'),'new');});
+  await t.test('readable storage cannot restore filters while clearing',async t=>{const h=viewHarness(t,{saved:'status=shortlisted&q=camera',storageReadOnly:true});h.view.render();await h.flush();h.node('matches-clear').onclick();await h.flush();assert.equal(h.state.route,'#/monitor/matches?status=shortlisted');assert.equal(h.node('matches-query').value,'');assert.equal(h.node('matches-clear').hidden,true);assert.equal(new URL(h.requests.at(-1),'http://localhost').searchParams.get('status'),'shortlisted');});
 });
 
 test('Clear filters remains visible with results and preserves layout without reviving pending text',async t=>{
@@ -165,9 +167,9 @@ test('Clear filters remains visible with results and preserves layout without re
   h.view.render();await h.flush();
   assert.match(h.node('matches-body').innerHTML,/matches-layout/);assert.equal(h.node('matches-clear').hidden,false);
   const input=h.node('matches-query');input.value='pending';input.oninput({target:input});h.node('matches-clear').onclick();await h.tick();
-  assert.equal(h.state.route,'#/monitor/matches?sort=price&group=none');assert.equal(h.node('matches-query').value,'');assert.equal(h.node('matches-clear').hidden,true);
+  assert.equal(h.state.route,'#/monitor/matches?status=shortlisted&item=camera&sort=price&group=none');assert.equal(h.node('matches-query').value,'');assert.equal(h.node('matches-clear').hidden,true);
   assert.equal(h.node('matches-query').focused,true);
-  assert.equal(h.stored.get('aimm-matches-view'),'sort=price&group=none');
+  assert.equal(h.stored.get('aimm-matches-view'),'status=shortlisted&item=camera&sort=price&group=none');
 });
 
 test('text filters survive live-event debounce and cannot navigate back after leaving Matches',async t=>{
@@ -224,7 +226,8 @@ test('gallery uses only local photo routes, wraps selection and omits controls f
   listing.photos.push({digest:'b'.repeat(64)});
   assert.match(galleryHtml(listing,-1),/Photo 2 of 2 —/);
   assert.match(galleryHtml(listing,2),/Photo 1 of 2 —/);
-  assert.match(galleryHtml(listing),/src="\/api\/matches\/fb\/1\/photos\/a{64}\.webp"/);
+  assert.match(galleryHtml(listing),/src="\/api\/matches\/fb\/1\/photos\/a{64}\.webp" alt="Photo 1/);
+  assert.match(galleryHtml(listing),/data-photo-index="1"[^>]*><img src="\/api\/matches\/fb\/1\/photos\/b{64}\.webp\?size=thumb"/);
   assert.doesNotMatch(galleryHtml({...listing,photos:[{digest:'../bad'}]}),/<img/);
 });
 
@@ -284,19 +287,21 @@ test('group counts and re-check scope honor all filters without changing sidebar
   await h.flush();
 });
 
-test('manually added listings get their own category that filters by source',async t=>{
+test('manually added listings are a sidebar source that filters by source',async t=>{
   const manual=row('fb:2','',{source:'manual'});
-  const h=viewHarness(t,{route:'#/monitor/matches?item=camera&status=all',matches:[manual],groups:[{item:'camera',count:3},{item:'',count:1}]});
+  const h=viewHarness(t,{route:'#/monitor/matches?item=camera&status=all',matches:[manual],groups:[{item:'camera',count:3},{item:'',count:1}],viewGroups:[{item:'camera',count:3},{item:'',count:1}]});
   h.view.render();await h.flush();
-  const category=h.control('[data-match-source="manual"]');
-  assert.equal(category.getAttribute('aria-pressed'),'false');
-  category.onclick();await h.flush();
+  const manualLink=()=>h.sidebar().find(entry=>entry.label==='Manually added');
+  assert.equal(manualLink().on,false);assert.equal(manualLink().badge,'1');
+  h.nav('Manually added');await h.flush();
   const params=new URL(h.requests.at(-1),'http://localhost').searchParams;
   assert.equal(params.get('source'),'manual');assert.equal(params.get('item'),null);
   assert.equal(h.state.route,'#/monitor/matches?status=all&source=manual');
-  assert.match(h.node('match-chips').innerHTML,/Category: Manually added/);
-  assert.equal(h.control('[data-match-source="manual"]').getAttribute('aria-pressed'),'true');
-  h.control('[data-match-category="camera"]').onclick();await h.flush();
+  assert.doesNotMatch(h.node('match-chips').innerHTML,/Manually added/);
+  assert.equal(manualLink().on,true);
+  h.state.matchSummary.manual={failed:1};
+  assert.equal(manualLink().badge,'1 failed');assert.equal(manualLink().badgeClass,'warn');
+  h.nav('camera');await h.flush();
   assert.equal(h.state.route,'#/monitor/matches?status=all&item=camera');
 });
 
@@ -421,14 +426,68 @@ test('rows show at most two exception badges and never badge an unknown seller',
   assert.doesNotMatch(html,/data-expand|Show \d+ more/);
 });
 
-test('category buttons filter by saved search and mark the active one',async t=>{
-  const h=viewHarness(t,{matches:[row('fb:1','camera')],groups:[{item:'camera',count:3},{item:'gear',count:2}]});
+test('sidebar sources filter by saved search with view counts and never link to Monitor searches',async t=>{
+  const h=viewHarness(t,{matches:[row('fb:1','camera')],groups:[{item:'camera',count:3},{item:'gear',count:2}],viewGroups:[{item:'camera',count:1}]});
+  h.state.config.item.bike={};
   h.view.render();await h.flush();
-  const gear=h.control('[data-match-category="gear"]');
-  assert.equal(h.control('[data-match-category=""]').getAttribute('aria-pressed'),'true');
-  gear.onclick();await h.flush();
+  const links=h.sidebar(), source=label=>h.sidebar().find(entry=>entry.label===label);
+  assert.deepEqual(links.map(entry=>entry.label),['New','★ Shortlist','Contacted','Dismissed','All','All sources','camera','gear']);
+  assert.ok(links.every(entry=>entry.href.startsWith('#/monitor/matches')));
+  assert.equal(source('All sources').on,true);assert.equal(source('camera').badge,'1');assert.equal(source('gear').badge,'0');
+  assert.match(h.view.sidebarHtml(),/bike has no matches yet\. <a href="#\/monitor\/all">Manage searches in Monitor →<\/a>/);
+  h.nav('gear');await h.flush();
   assert.match(h.requests.at(-1),/item=gear/);
-  assert.equal(h.control('[data-match-category="gear"]').getAttribute('aria-pressed'),'true');
+  assert.equal(source('gear').on,true);assert.equal(source('All sources').on,false);
+});
+
+test('filter changes keep the current list visible and marked busy until results arrive',async t=>{
+  let release;
+  const h=viewHarness(t,{matches:[row('fb:1','camera')],respond:url=>url.includes('item=gear')?new Promise(resolve=>{release=()=>resolve({matches:[],counts:{all:0},groups:[],filtered_groups:[],view_groups:[]});}):undefined});
+  h.view.render();await h.flush();
+  const shown=h.node('matches-body').innerHTML;
+  h.view.sidebarClick({target:{closest:()=>({getAttribute:()=>'#/monitor/matches?item=gear'})},preventDefault(){}});await h.flush();
+  assert.equal(h.node('matches-body').innerHTML,shown);assert.doesNotMatch(shown,/Loading matches/);
+  assert.equal(h.node('matches-body').getAttribute('aria-busy'),'true');
+  release();await h.flush();
+  assert.equal(h.node('matches-body').getAttribute('aria-busy'),'false');
+});
+
+test('a quiet reload that supersedes a filter load still clears the busy state',async t=>{
+  let release;
+  const h=viewHarness(t,{matches:[row('fb:1','camera')],respond:url=>url.includes('item=gear')?new Promise(resolve=>{release=()=>resolve({matches:[],counts:{all:0},groups:[],filtered_groups:[],view_groups:[]});}):undefined});
+  h.view.render();await h.flush();
+  h.view.sidebarClick({target:{closest:()=>({getAttribute:()=>'#/monitor/matches?item=gear'})},preventDefault(){}});await h.flush();
+  h.view.onRecord({extra:{kind:'match_seen'}});await h.tick();await h.flush();
+  release();await h.flush();
+  assert.equal(h.node('matches-body').getAttribute('aria-busy'),'false');
+});
+
+test('searches whose matches are all dismissed stay selectable in the Dismissed view',async t=>{
+  const h=viewHarness(t,{route:'#/monitor/matches?status=dismissed',matches:[row('fb:1','gear')],groups:[{item:'camera',count:1}],viewGroups:[{item:'gear',count:1}]});
+  h.view.render();await h.flush();
+  assert.equal(h.sidebar().find(entry=>entry.label==='gear').badge,'1');
+  assert.doesNotMatch(h.view.sidebarHtml(),/gear has no matches/);
+});
+
+test('text typed just before a sidebar click is still applied',async t=>{
+  const h=viewHarness(t,{matches:[row('fb:1','camera')]});
+  h.view.render();await h.flush();
+  const input=h.node('matches-query');input.value='lens';input.oninput({target:input});
+  h.status('shortlisted');await h.tick();await h.flush();
+  const params=new URL(h.requests.at(-1),'http://localhost').searchParams;
+  assert.equal(params.get('status'),'shortlisted');assert.equal(params.get('q'),'lens');
+});
+
+test('match detail highlights its source and sidebar links return to the filtered list',async t=>{
+  const manual=row('fb:2','',{source:'manual'});
+  const h=viewHarness(t,{route:'#/monitor/matches/fb/2?status=all&match_item=',matches:[manual],groups:[{item:'camera',count:1},{item:'',count:1}]});
+  h.view.render();await h.flush();
+  const source=label=>h.sidebar().find(entry=>entry.label===label);
+  assert.equal(source('Manually added').on,true);assert.equal(source('All sources').on,false);assert.equal(source('All').on,true);
+  assert.equal(source('camera').href,'#/monitor/matches?status=all&item=camera');
+  h.nav('camera');await h.flush();
+  assert.equal(h.state.route,'#/monitor/matches?status=all&item=camera');
+  assert.ok(h.node('matches-query'));
 });
 
 test('single-key shortcuts ignore typing, modifiers and dialogs',()=>{
@@ -443,7 +502,7 @@ test('Matches opens on New, offers Show all when caught up and Mark all seen can
   const h=viewHarness(t,{matches:[]});h.view.render();await h.flush();
   const request=()=>new URL(h.requests.at(-1),'http://localhost').searchParams;
   assert.equal(request().get('status'),'new');
-  assert.equal(h.control('[data-match-status="new"]').getAttribute('aria-pressed'),'true');
+  assert.equal(h.sidebar().find(entry=>entry.label==='New').on,true);
   assert.match(h.node('matches-body').innerHTML,/You’re all caught up/);
   h.node('matches-show-all').onclick();await h.flush();
   assert.equal(request().get('status'),'all');
@@ -477,6 +536,18 @@ test('keyboard triage moves through rows, decides, advances and undoes',async t=
   h.stored.set('aimm-shortcuts','off');const before=puts.length;await press('s');assert.equal(puts.length,before);
 });
 
+test('rapid triage decisions share one list reload after the last one',async t=>{
+  const listings=[1,2,3].map(id=>row('fb:'+id,'camera',{title:'Listing '+id}));
+  const h=viewHarness(t,{matches:listings,respond:(url,options)=>url.endsWith('/state')?JSON.parse(options.body):undefined});
+  h.view.render();await h.flush();
+  const listRequests=()=>h.requests.filter(url=>url.startsWith('/api/matches?')).length, before=listRequests();
+  for(const key of ['j','s','c','s'])h.view.onKey({key,target:null,preventDefault(){}});
+  await h.flush();await h.flush();
+  assert.equal(listRequests(),before);
+  await h.tick();await h.flush();
+  assert.equal(listRequests(),before+1);
+});
+
 test('key dates list labelled events newest first and skip missing ones',()=>{
   const html=keyDates({found_at:'2026-10-01T18:40:00',last_seen:'2026-10-03T13:58:00',seen_count:6,notified_users:['me'],recheck:{at:'invalid',status:'passed'}});
   assert.ok(html.indexOf('Last seen by a search')<html.indexOf('Found'));
@@ -500,7 +571,7 @@ test('detail page leads with price, decisions and the seller description, foldin
 test('applied filters appear as removable chips and price drop is a checkbox',async t=>{
   const h=viewHarness(t,{route:'#/monitor/matches?item=camera&min_score=4&price_drop=true&q=lens'});h.view.render();await h.flush();
   const chips=h.node('match-chips').innerHTML;
-  assert.match(chips,/Category: camera/);assert.match(chips,/Good or better/);assert.match(chips,/Price dropped/);assert.match(chips,/Contains “lens”/);
+  assert.doesNotMatch(chips,/camera/);assert.match(chips,/Good or better/);assert.match(chips,/Price dropped/);assert.match(chips,/Contains “lens”/);
   assert.equal(h.node('match-chips-row').hidden,false);
   h.control('[data-remove-filter="min_score"]').onclick();await h.flush();
   const params=new URL(h.requests.at(-1),'http://localhost').searchParams;
@@ -527,10 +598,10 @@ test('bulk selection supports ranges, updates each listing once and can be undon
 
 test('new matches arriving mid-triage wait behind a Show button',async t=>{
   const h=viewHarness(t,{matches:[row('fb:1','camera')]});h.view.render();await h.flush();
-  const before=h.requests.filter(url=>url.includes('status=new')).length;
+  const listRequests=()=>h.requests.filter(url=>url.includes('status=new')&&url.includes('limit=200')).length, before=listRequests();
   h.view.onRecord({extra:{kind:'match_recorded'}});h.view.onRecord({extra:{kind:'match_recorded'}});await h.tick();
   assert.match(h.node('matches-arrivals').innerHTML,/2 new matches · Show/);
-  assert.equal(h.requests.filter(url=>url.includes('status=new')).length,before);
+  assert.equal(listRequests(),before);
   h.node('matches-arrivals-show').onclick();await h.flush();
   assert.equal(h.node('matches-arrivals').innerHTML,'');
 });
