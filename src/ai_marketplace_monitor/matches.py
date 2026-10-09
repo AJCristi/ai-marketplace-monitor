@@ -598,12 +598,10 @@ def query_matches(
                     groups[name] = groups.get(name, 0) + 1
                     new_groups[name] = new_groups.get(name, 0) + int(is_new)
     manual_rows = [row for row in rows if row["item"] == "" and not row["state"]["dismissed"]]
-    rows = [
+    view_rows = [
         row
         for row in rows
-        if (not item or item in row["filed_under"])
-        and (source != "manual" or "" in row["filed_under"])
-        and (not price_drop or price_dropped(row))
+        if (not price_drop or price_dropped(row))
         and (min_score is None or (row["score"] is not None and row["score"] >= min_score))
         and (
             status == "all"
@@ -623,6 +621,16 @@ def query_matches(
                 for name in ("title", "seller", "description", "location", "item")
             ).casefold()
         )
+    ]
+    view_groups: dict[str, set[str]] = {}
+    for row in view_rows:
+        for name in row["filed_under"]:
+            view_groups.setdefault(name, set()).add(row["key"])
+    rows = [
+        row
+        for row in view_rows
+        if (not item or item in row["filed_under"])
+        and (source != "manual" or "" in row["filed_under"])
     ]
     filtered_groups: dict[str, set[str]] = {}
     for row in rows:
@@ -644,6 +652,10 @@ def query_matches(
         "counts": counts,
         "filtered_groups": [
             {"item": name, "count": len(keys)} for name, keys in sorted(filtered_groups.items())
+        ],
+        "view_total": len(view_rows),
+        "view_groups": [
+            {"item": name, "count": len(keys)} for name, keys in sorted(view_groups.items())
         ],
         "groups": [
             {"item": name, "count": count, "new_since": new_groups.get(name, 0)}

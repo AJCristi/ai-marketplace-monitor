@@ -33,12 +33,15 @@ can leave an entry awaiting assessment; use **Assess again** to resume it. Exist
 shortlist, contacted, dismissal, filing and **Check against another search** actions
 also apply to manually added listings. Search evaluations keep their own ratings.
 
-While any manually added listings remain undismissed, the sidebar shows them under
-**Added by you** with their count and any entries awaiting or failing assessment.
-Select it, or the **Manually added** category button, to show only those listings.
+While any manually added listings remain undismissed, the Monitor sidebar shows them
+under **Added by you** with their count and any entries awaiting or failing assessment.
+Select it to open Matches showing only those listings.
 
-Each saved search is a category. Use the **Category** buttons to show one search,
-filter by rating, status, price drops or text, and group by category or day found.
+Matches has its own sidebar. **Views** chooses New, Shortlist, Contacted, Dismissed or
+All. **Found by** chooses one saved search or **Manually added**; its counts follow the
+selected view and filters. Searches with no matches yet are listed under it, with a
+link back to Monitor to manage them. Filter by rating, price drops or text above the
+list, and group by category or day found. **Clear filters** keeps the sidebar choices.
 Category groups show every match and collapse from their heading, which summarises
 new matches, the best rating and price drops.
 Ratings read as words with a five-step bar: Poor, Unclear, Fair, Good and Great deal

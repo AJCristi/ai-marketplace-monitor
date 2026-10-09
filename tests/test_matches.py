@@ -1177,6 +1177,27 @@ def test_filtered_group_counts_cover_all_pages_and_deduplicate(
     ]
 
 
+def test_view_group_counts_follow_view_filters_but_not_the_selected_source(
+    match_cache: Cache, listing: Listing
+) -> None:
+    record_match(match_cache, listing, "test", AIResponse(5, "good"))
+    second = dataclasses.replace(listing, id="222", title="Another listing")
+    record_match(match_cache, second, "other", AIResponse(3, "fair"))
+    record_manual_listing(
+        match_cache, dataclasses.replace(listing, id="223"), AIResponse(5, "good"), "assessed"
+    )
+
+    def view(**filters: Any) -> tuple[int, dict[str, int]]:
+        result = query_matches(match_cache, **filters)
+        return result["view_total"], {g["item"]: g["count"] for g in result["view_groups"]}
+
+    assert view() == (3, {"test": 1, "other": 1, "": 1})
+    assert view(item="test") == view(source="manual") == view()
+    assert view(min_score=5) == (2, {"test": 1, "": 1})
+    update_state(match_cache, "facebook", listing.id, {"shortlisted": True})
+    assert view(status="shortlisted", item="other") == (1, {"test": 1})
+
+
 @pytest.mark.parametrize(
     "price", ["PHP225K", "PHP200 | PHP210", "$100-$200", "-10", "1,5", "100 negotiable"]
 )
