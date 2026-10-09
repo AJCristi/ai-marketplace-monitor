@@ -226,7 +226,8 @@ test('gallery uses only local photo routes, wraps selection and omits controls f
   listing.photos.push({digest:'b'.repeat(64)});
   assert.match(galleryHtml(listing,-1),/Photo 2 of 2 —/);
   assert.match(galleryHtml(listing,2),/Photo 1 of 2 —/);
-  assert.match(galleryHtml(listing),/src="\/api\/matches\/fb\/1\/photos\/a{64}\.webp"/);
+  assert.match(galleryHtml(listing),/src="\/api\/matches\/fb\/1\/photos\/a{64}\.webp" alt="Photo 1/);
+  assert.match(galleryHtml(listing),/data-photo-index="1"[^>]*><img src="\/api\/matches\/fb\/1\/photos\/b{64}\.webp\?size=thumb"/);
   assert.doesNotMatch(galleryHtml({...listing,photos:[{digest:'../bad'}]}),/<img/);
 });
 

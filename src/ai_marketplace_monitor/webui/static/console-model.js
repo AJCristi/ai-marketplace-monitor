@@ -113,7 +113,7 @@ export function renameSection(content, prefix, oldName, newName) {
   return content.replace(pattern, `$1${newName}$2`);
 }
 
-export function matchPhotoUrl(row, photo = row.photos?.[0]) {
+export function matchPhotoUrl(row, photo = row.photos?.[0], size = 'full') {
   if (!row.marketplace || !row.listing_id || !/^[a-f0-9]{64}$/.test(photo?.digest || '')) return null;
-  return `/api/matches/${encodeURIComponent(row.marketplace)}/${encodeURIComponent(row.listing_id)}/photos/${photo.digest}.webp`;
+  return `/api/matches/${encodeURIComponent(row.marketplace)}/${encodeURIComponent(row.listing_id)}/photos/${photo.digest}.webp${size === 'thumb' ? '?size=thumb' : ''}`;
 }

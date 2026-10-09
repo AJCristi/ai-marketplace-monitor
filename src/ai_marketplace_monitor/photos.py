@@ -90,6 +90,13 @@ def prepare_webp(raw: bytes) -> bytes:
     return data
 
 
+def thumbnail_webp(data: bytes) -> bytes:
+    """Lists show photos at about 96 px, so send a small copy of the 1600 px archive."""
+    output = io.BytesIO()
+    open_photo(data, 320).save(output, "WEBP", quality=75)
+    return output.getvalue()
+
+
 def archive_next_photo(
     local_cache: Cache, attempted: set[tuple[str, str, str]]
 ) -> dict[str, Any] | None:

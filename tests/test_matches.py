@@ -16,6 +16,7 @@ from unittest.mock import Mock
 import pytest
 from diskcache import Cache  # type: ignore
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from ai_marketplace_monitor.ai import AIResponse, AIUnavailableError
 from ai_marketplace_monitor.facebook import FacebookMarketplace
@@ -782,14 +783,27 @@ def test_api_auth_validation_and_persistence(
     photo = client.get(photo_url)
     assert photo.content == b"synthetic photo"
     assert photo.headers["content-type"] == "image/webp"
-    assert photo.headers["cache-control"] == "private, no-cache"
+    assert photo.headers["cache-control"] == "private, max-age=31536000, immutable"
     assert (
         client.get(photo_url, headers={"If-None-Match": photo.headers["etag"]}).status_code == 304
     )
+    unreadable_thumbnail = client.get(photo_url + "?size=thumb")
+    assert unreadable_thumbnail.content == b"synthetic photo"
+    assert unreadable_thumbnail.headers["etag"] == f'"{digest}-thumb"'
+    large = io.BytesIO()
+    Image.new("RGB", (1600, 1200), "teal").save(large, "WEBP")
+    large_digest = "c" * 64
+    with library(match_cache) as store:
+        store.save_photo("facebook", listing.id, "large", large_digest, large.getvalue())
+    thumbnail = client.get(photo_url.replace(digest, large_digest) + "?size=thumb")
+    with Image.open(io.BytesIO(thumbnail.content)) as small:
+        assert small.size == (320, 240)
+    assert len(thumbnail.content) < len(large.getvalue())
+    assert client.get(photo_url + "?size=huge").status_code == 422
     assert client.get(photo_url.replace(digest, "invalid")).status_code == 404
     assert client.get(photo_url.replace(digest, "b" * 64)).status_code == 404
     saved_photos = client.get(detail_url).json()["photos"]
-    assert len(saved_photos) == 1 and saved_photos[0]["digest"] == digest
+    assert [photo["digest"] for photo in saved_photos] == [digest, large_digest]
     assert set(saved_photos[0]) == {"digest", "saved_at"}
     assert client.get(detail_url.replace("item=test", "item=missing")).status_code == 404
     assert client.put(url, json={"shortlisted": True}).status_code == 403
