@@ -1,4 +1,4 @@
-import {safeUrl, matchPhotoUrl, esc} from './console-model.js';
+import {safeUrl, matchPhotoUrl, matchThumbnailUrl, esc} from './console-model.js';
 import {createRelatedView} from './related.js';
 
 export const matchId = row => JSON.stringify([row.key, row.item]);
@@ -97,12 +97,12 @@ function sellerDetail(row) {
   const reasons=assessment?.reasons?.length?assessment.reasons:['Seller evidence is not available. Re-check this listing to collect it.'];
   return `<section class="match-more-body" aria-label="Seller credibility"><p>${sellerBadge(row)}</p><ul class="sm">${reasons.map(reason=>`<li>${esc(reason)}</li>`).join('')}</ul>${url?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">View seller profile ↗</a>`:''}${assessment?.checked_at?`<p class="xs d">Checked ${esc(matchDate(assessment.checked_at))}</p>`:''}<p class="xs d">Based on the listing’s seller panel. This does not verify identity or guarantee a safe transaction.</p></section>`;
 }
-const photo = row => {const url=matchPhotoUrl(row,undefined,'thumb');return `<span class="match-photo"><span>no photo</span>${url?`<img src="${esc(url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`:''}</span>`;};
+const photo = row => {const url=matchThumbnailUrl(row);return `<span class="match-photo"><span>no photo</span>${url?`<img src="${esc(url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`:''}</span>`;};
 export function galleryHtml(row, selected = 0) {
   const photos=(row.photos||[]).filter(photo=>matchPhotoUrl(row,photo));
   if(!photos.length)return '<section class="match-gallery" aria-label="Photos"><div class="gallery-main">No photos saved</div><p class="xs d">Photos are saved by the monitor. Re-check to collect a listing’s gallery.</p></section>';
   selected=((selected%photos.length)+photos.length)%photos.length;
-  return `<section class="match-gallery" aria-label="Photos"><div class="gallery-main"><img src="${esc(matchPhotoUrl(row,photos[selected]))}" alt="Photo ${selected+1} of ${photos.length} — ${esc(row.title)}">${photos.length>1?'<div class="gallery-controls row"><button class="btn sm" data-photo-step="-1" aria-label="Previous photo">‹</button><button class="btn sm" data-photo-step="1" aria-label="Next photo">›</button></div>':''}</div>${photos.length>1?`<div class="gallery-thumbs" role="group" aria-label="Choose a photo">${photos.map((photo,index)=>`<button type="button" data-photo-index="${index}" aria-label="Photo ${index+1} of ${photos.length}" aria-pressed="${index===selected}"><img src="${esc(matchPhotoUrl(row,photo,'thumb'))}" alt="" loading="lazy" decoding="async"></button>`).join('')}</div>`:''}<p class="xs d">${photos.length} saved ${photos.length===1?'photo':'photos'}${row.photo_pending?` · ${row.photo_pending} awaiting capture or unavailable`:''} · archived on the monitor, available after the listing is removed.</p></section>`;
+  return `<section class="match-gallery" aria-label="Photos"><div class="gallery-main"><img src="${esc(matchPhotoUrl(row,photos[selected]))}" alt="Photo ${selected+1} of ${photos.length} — ${esc(row.title)}">${photos.length>1?'<div class="gallery-controls row"><button class="btn sm" data-photo-step="-1" aria-label="Previous photo">‹</button><button class="btn sm" data-photo-step="1" aria-label="Next photo">›</button></div>':''}</div>${photos.length>1?`<div class="gallery-thumbs" role="group" aria-label="Choose a photo">${photos.map((photo,index)=>`<button type="button" data-photo-index="${index}" aria-label="Photo ${index+1} of ${photos.length}" aria-pressed="${index===selected}"><img src="${esc(matchThumbnailUrl(row,photo))}" alt="" loading="lazy" decoding="async"></button>`).join('')}</div>`:''}<p class="xs d">${photos.length} saved ${photos.length===1?'photo':'photos'}${row.photo_pending?` · ${row.photo_pending} awaiting capture or unavailable`:''} · archived on the monitor, available after the listing is removed.</p></section>`;
 }
 const unratedText = row => row.source==='manual' ? row.evaluation_status==='error' ? row.assessment_reason||'AI assessment failed. Open the listing to retry.' : 'Awaiting AI assessment. Open the listing to retry if the monitor restarted.' : 'no AI rating — sends every listing that passes the filters';
 function attrsHtml(row, sort) {
@@ -134,6 +134,7 @@ const STATE_MESSAGES = {shortlisted:['Shortlisted','Removed from shortlist'],dis
 const MATCH_VIEWS = [['new','New'],['shortlisted','★ Shortlist'],['contacted','Contacted'],['dismissed','Dismissed'],['all','All']];
 const SIDEBAR_KEYS = ['status','item','source'];
 const BAR_FILTER_KEYS = ['min_score','price_drop','q','include_dismissed'];
+const TRIAGE_RELOAD_DELAY_MS = 400;
 const joinNames = names => names.length>1 ? `${names.slice(0,-1).join(', ')} and ${names.at(-1)}` : names[0] || '';
 
 export function createMatchesView({state, json, pageHeader, exportCsv, toast, renderSidebar, searchSummary}) {
@@ -187,7 +188,8 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     try{const seen=storage('localStorage','aimm-matches-seen')||cutoff;const p=active()?params():new URLSearchParams();p.set('limit','1');p.delete('cursor');if(seen)p.set('since',seen);const result=await json('/api/matches?'+p);state.matchSummary=result;renderSidebar();}catch{}
   }
   async function load(more=false, quiet=false, reuse=false) {
-    if(!active())return;
+    clearTimeout(reloadTimer);const waiters=reloadWaiters;reloadWaiters=[];
+    if(!active()){waiters.forEach(done=>done());return;}
     const token=++request, showStale=keepList&&rows.length>0&&!detail();error='';loading=!quiet&&!more&&!showStale;keepList=false;
     if(loading)renderBody();
     if(showStale)$('#matches-body')?.setAttribute('aria-busy','true');
@@ -216,7 +218,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
       renderSidebar();renderBody();
       if(!detail()&&reuse){const pane=$('#pane');pane.scrollTop=listScroll;if(typeof window!=='undefined')window.scrollTo?.(0,listWindowScroll);if(cursorKey)focusCursor();}
     }catch(err){if(token!==request)return;loading=false;error=err.message;renderBody();}
-    finally{if(token===request&&showStale)$('#matches-body')?.setAttribute('aria-busy','false');}
+    finally{if(token===request)$('#matches-body')?.setAttribute?.('aria-busy','false');waiters.forEach(done=>done());}
   }
   const isNewRow=row=>Boolean(row.found_at)&&!row.state.shortlisted&&!row.state.contacted&&!row.state.dismissed&&(!cutoff||new Date(row.found_at)>new Date(cutoff));
   function groupSummary(entries){
@@ -230,7 +232,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     const listHref=changes=>{const next=query();for(const key of ['match_item','cursor'])next.delete(key);for(const [key,value] of Object.entries(changes))if(value)next.set(key,value);else next.delete(key);return '#/monitor/matches'+(next.size?'?'+next:'');};
     const entry=({kind,href,on,label,labelClass='b',badge,badgeClass='d',lines=[]})=>`<a class="it${on?' on':''}" href="${esc(href)}" data-match-nav="${kind}"${on?' aria-current="true"':''}><div class="row sb"><span class="${labelClass}">${esc(label)}</span><span class="m xs ${badgeClass}">${esc(String(badge??'—'))}</span></div>${lines.map(line=>`<div class="s">${esc(line)}</div>`).join('')}</a>`;
     const viewCounts=new Map((summary.view_groups||[]).map(group=>[group.item,group.count]));
-    const withMatches=new Set((summary.groups||[]).map(group=>group.item));
+    const withMatches=new Set([...(summary.groups||[]),...(summary.view_groups||[])].map(group=>group.item));
     const names=[...new Set([...Object.keys(searches).filter(name=>withMatches.has(name)),...withMatches,selectedItem])].filter(Boolean);
     const {awaiting=0,failed=0}=summary.manual||{};
     const showManual=withMatches.has('')||manualSelected;
@@ -244,9 +246,9 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   function sidebarClick(event){
     const link=event.target?.closest?.('[data-match-nav]');
     if(!link||!active()||event.defaultPrevented||event.button>0||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;
-    event.preventDefault();clearTimeout(filterTimer);
+    event.preventDefault();
     const href=link.getAttribute('href');
-    if(detail()){state.route=href;history.pushState(null,'',href);render(false);renderSidebar();return;}
+    if(detail()){openList(href);return;}
     applyListQuery(new URLSearchParams(href.split('?')[1]||''));
   }
   function selectHtml(name,label,options){const value=query().get(name)||'';return `<label class="sm">${label}<select class="in" data-match-filter="${name}">${options.map(([id,text])=>`<option value="${esc(id)}" ${id===value?'selected':''}>${esc(text)}</option>`).join('')}</select></label>`;}
@@ -401,7 +403,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     if($('#related-listings'))relatedView.mount($('#related-listings'),row);
     const back=query();back.delete('match_item');
     $('#match-page-top').innerHTML=`<div class="ph"><div><a id="match-back" href="#/monitor/matches${back.size?'?'+back:''}">← Matches</a><p class="m d sm">${esc(row.source==='manual'?'Manually added':row.item)}${row.source==='manual'||state.config.item?.[row.item]?'':' (removed search)'}</p><h1 id="match-title" tabindex="-1">${esc(row.title||'Listing details unavailable')}</h1><p class="match-attrs">${attrsHtml(row,'')}</p>${badgesHtml(row)?`<p class="match-line1">${badgesHtml(row)}</p>`:''}</div></div>${row.state.dismissed?'<div class="nt" role="status">Dismissed. Hidden from Matches. <button class="btn q" id="detail-undo">Undo</button></div>':''}`;
-    $('#match-back').onclick=event=>{if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;event.preventDefault();state.route='#/monitor/matches'+(back.size?'?'+back:'');history.pushState(null,'',state.route);render(false);};
+    $('#match-back').onclick=event=>{if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;event.preventDefault();openList('#/monitor/matches'+(back.size?'?'+back:''));};
     $('#detail-undo')?.addEventListener('click',()=>saveState(row,{dismissed:false},{silent:true}));
     function drawGallery(){
       const target=$('#match-gallery');if(!target)return;
@@ -535,12 +537,11 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     target.innerHTML=arrivals?`<div class="match-arrivals" role="status"><button class="btn sm" id="matches-arrivals-show">${arrivals} new ${arrivals===1?'match':'matches'} · Show</button></div>`:'';
     $('#matches-arrivals-show')?.addEventListener('click',()=>{arrivals=0;renderArrivals();load(false,true);});
   }
+  function openList(route){state.route=route;history.pushState(null,'',route);render(false);renderSidebar();}
   function reloadSoon(){
     clearTimeout(reloadTimer);
-    return new Promise(resolve=>{
-      reloadWaiters.push(resolve);
-      reloadTimer=setTimeout(async()=>{const waiters=reloadWaiters;reloadWaiters=[];try{await load(false,true);}finally{waiters.forEach(done=>done());}},400);
-    });
+    reloadTimer=setTimeout(()=>load(false,true),TRIAGE_RELOAD_DELAY_MS);
+    return new Promise(resolve=>reloadWaiters.push(resolve));
   }
   async function saveState(row,patch,{fromRow=false,silent=false,viaKey=false}={}) {
     if(pendingStates.has(row.key))return;

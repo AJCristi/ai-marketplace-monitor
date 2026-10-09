@@ -113,7 +113,11 @@ export function renameSection(content, prefix, oldName, newName) {
   return content.replace(pattern, `$1${newName}$2`);
 }
 
-export function matchPhotoUrl(row, photo = row.photos?.[0], size = 'full') {
+export function matchPhotoUrl(row, photo = row.photos?.[0]) {
   if (!row.marketplace || !row.listing_id || !/^[a-f0-9]{64}$/.test(photo?.digest || '')) return null;
-  return `/api/matches/${encodeURIComponent(row.marketplace)}/${encodeURIComponent(row.listing_id)}/photos/${photo.digest}.webp${size === 'thumb' ? '?size=thumb' : ''}`;
+  return `/api/matches/${encodeURIComponent(row.marketplace)}/${encodeURIComponent(row.listing_id)}/photos/${photo.digest}.webp`;
+}
+export function matchThumbnailUrl(row, photo = row.photos?.[0]) {
+  const url = matchPhotoUrl(row, photo);
+  return url && `${url}?size=thumb`;
 }

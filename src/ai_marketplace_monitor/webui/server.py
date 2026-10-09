@@ -51,7 +51,7 @@ from ..matches import (
     record_manual_listing,
     update_state,
 )
-from ..photos import thumbnail_webp
+from ..photos import THUMBNAIL_CACHE_SIZE, thumbnail_webp
 from ..recheck import RecheckQueue, facebook_listing_id
 from ..utils import cache
 from .auth import (
@@ -591,20 +591,21 @@ def create_app(
             raise HTTPException(status_code=404, detail="Match not found for this search")
         return row
 
-    def read_photo(marketplace: str, listing_id: str, digest: str) -> bytes | None:
+    def read_photo(marketplace: str, listing_id: str, digest: str) -> bytes:
         with reading_library(cache) as store:
             photo = store.db.execute(
                 "SELECT data FROM photos WHERE marketplace=? AND listing_id=? AND digest=?",
                 (marketplace, listing_id, digest),
             ).fetchone()
-        return None if photo is None else photo[0]
+        if photo is None:
+            raise HTTPException(status_code=404, detail="Photo not found")
+        return photo[0]
 
     # Saved photos are never deleted or changed, so a thumbnail stays valid for its digest.
-    @lru_cache(maxsize=512)
-    def photo_thumbnail(marketplace: str, listing_id: str, digest: str) -> bytes | None:
+    # A missing photo raises, and lru_cache does not cache exceptions.
+    @lru_cache(maxsize=THUMBNAIL_CACHE_SIZE)
+    def photo_thumbnail(marketplace: str, listing_id: str, digest: str) -> bytes:
         photo = read_photo(marketplace, listing_id, digest)
-        if photo is None:
-            return None
         try:
             return thumbnail_webp(photo)
         except ValueError:
@@ -626,11 +627,12 @@ def create_app(
             if size == "thumb"
             else read_photo(marketplace, listing_id, digest)
         )
-        if photo is None:
-            raise HTTPException(status_code=404, detail="Photo not found")
         headers = {
             "ETag": f'"{digest}-thumb"' if size == "thumb" else f'"{digest}"',
-            "Cache-Control": "private, max-age=31536000, immutable",
+            # Exposed consoles revalidate so photos are not readable from the cache after logout.
+            "Cache-Control": (
+                "private, no-cache" if state.exposed else "private, max-age=31536000, immutable"
+            ),
             "X-Content-Type-Options": "nosniff",
         }
         if request.headers.get("if-none-match") == headers["ETag"]:

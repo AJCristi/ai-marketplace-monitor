@@ -783,7 +783,12 @@ def test_api_auth_validation_and_persistence(
     photo = client.get(photo_url)
     assert photo.content == b"synthetic photo"
     assert photo.headers["content-type"] == "image/webp"
-    assert photo.headers["cache-control"] == "private, max-age=31536000, immutable"
+    assert photo.headers["cache-control"] == "private, no-cache"
+    state.exposed = False
+    assert client.get(photo_url).headers["cache-control"] == (
+        "private, max-age=31536000, immutable"
+    )
+    state.exposed = True
     assert (
         client.get(photo_url, headers={"If-None-Match": photo.headers["etag"]}).status_code == 304
     )

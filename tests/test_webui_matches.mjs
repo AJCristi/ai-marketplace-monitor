@@ -452,6 +452,32 @@ test('filter changes keep the current list visible and marked busy until results
   assert.equal(h.node('matches-body').getAttribute('aria-busy'),'false');
 });
 
+test('a quiet reload that supersedes a filter load still clears the busy state',async t=>{
+  let release;
+  const h=viewHarness(t,{matches:[row('fb:1','camera')],respond:url=>url.includes('item=gear')?new Promise(resolve=>{release=()=>resolve({matches:[],counts:{all:0},groups:[],filtered_groups:[],view_groups:[]});}):undefined});
+  h.view.render();await h.flush();
+  h.view.sidebarClick({target:{closest:()=>({getAttribute:()=>'#/monitor/matches?item=gear'})},preventDefault(){}});await h.flush();
+  h.view.onRecord({extra:{kind:'match_seen'}});await h.tick();await h.flush();
+  release();await h.flush();
+  assert.equal(h.node('matches-body').getAttribute('aria-busy'),'false');
+});
+
+test('searches whose matches are all dismissed stay selectable in the Dismissed view',async t=>{
+  const h=viewHarness(t,{route:'#/monitor/matches?status=dismissed',matches:[row('fb:1','gear')],groups:[{item:'camera',count:1}],viewGroups:[{item:'gear',count:1}]});
+  h.view.render();await h.flush();
+  assert.equal(h.sidebar().find(entry=>entry.label==='gear').badge,'1');
+  assert.doesNotMatch(h.view.sidebarHtml(),/gear has no matches/);
+});
+
+test('text typed just before a sidebar click is still applied',async t=>{
+  const h=viewHarness(t,{matches:[row('fb:1','camera')]});
+  h.view.render();await h.flush();
+  const input=h.node('matches-query');input.value='lens';input.oninput({target:input});
+  h.status('shortlisted');await h.tick();await h.flush();
+  const params=new URL(h.requests.at(-1),'http://localhost').searchParams;
+  assert.equal(params.get('status'),'shortlisted');assert.equal(params.get('q'),'lens');
+});
+
 test('match detail highlights its source and sidebar links return to the filtered list',async t=>{
   const manual=row('fb:2','',{source:'manual'});
   const h=viewHarness(t,{route:'#/monitor/matches/fb/2?status=all&match_item=',matches:[manual],groups:[{item:'camera',count:1},{item:'',count:1}]});
