@@ -495,6 +495,8 @@ def test_cancel_stops_search_and_reports_partial_summary(
     monitor.photo_attempts = set()
     monitor.search_requested = threading.Event()
     monitor.search_cancelled = threading.Event()
+    monitor.requested_item_searches = set()
+    monitor.requested_item_searches_lock = threading.Lock()
     monitor.config = SimpleNamespace(user={})
     monitor.logger = Mock()
     rating_started = threading.Event()
@@ -1192,6 +1194,8 @@ def test_due_search_precedes_background_work(
     monitor.photo_attempts = set()
     monitor.search_requested = threading.Event()
     monitor.search_cancelled = threading.Event()
+    monitor.requested_item_searches = set()
+    monitor.requested_item_searches_lock = threading.Lock()
     monitor.rechecks = RecheckQueue()
     if work_kind == "recheck":
         monitor.rechecks.enqueue([{"marketplace": "facebook", "listing_id": "1"}], None, True)

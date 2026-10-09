@@ -112,6 +112,7 @@ class WebUIConfig:
     config_files: List[Path] = field(default_factory=list)
     log_handler: LogBroadcastHandler | None = None
     request_search: Callable[[], None] | None = None
+    request_item_search: Callable[[str], None] | None = None
     cancel_search: Callable[[], None] | None = None
     search_progress: Callable[[], Dict[str, Any]] | None = None
     rechecks: RecheckQueue | None = None
@@ -412,6 +413,23 @@ def create_app(
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to touch config: {e}") from e
+
+    @app.post("/api/monitor/search")
+    async def search_item_now(
+        body: Dict[str, Any],
+        _: str = Depends(require_session),
+        __: None = Depends(require_csrf),
+    ) -> Dict[str, Any]:
+        item = body.get("item")
+        if not isinstance(item, str) or not item or len(item) > 200:
+            raise HTTPException(status_code=400, detail="Supply a saved search name")
+        if config.request_item_search is None:
+            raise HTTPException(status_code=503, detail="The monitor is not running")
+        config.request_item_search(item)
+        return {
+            "ok": True,
+            "message": f"Search requested — {item} runs after the current scan.",
+        }
 
     @app.get("/api/monitor/progress")
     async def search_progress(_: str = Depends(require_session)) -> Dict[str, Any]:

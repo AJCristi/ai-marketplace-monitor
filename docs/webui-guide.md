@@ -277,8 +277,14 @@ progress bar, and marks the other searches **queued**.
 
 **Cancel** stops the running search after its current listing and skips the
 remaining requested searches, which go back to their schedule. Matches found
-before the cancel stay saved. A notice reports what was kept. This console has no per-search Run now or next-run countdown;
-check activity or terminal output for the scheduler's next-job details.
+before the cancel stay saved. A notice reports what was kept. Cancel also drops any
+pending **Search now** requests.
+
+**Search now** on a saved search's page runs just that search after the current scan
+reaches a safe point. Other searches keep their schedule, and the interval for this
+search restarts from the run. Paused searches must be resumed first. This console has
+no next-run countdown; check activity or terminal output for the scheduler's next-job
+details.
 
 Each saved search shows **Last searched at: HH:MM** in the sidebar and its activity
 header, using your browser's local time. This is the latest completed search seen

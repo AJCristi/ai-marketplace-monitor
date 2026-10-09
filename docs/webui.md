@@ -19,7 +19,8 @@ Use **Edit** or **Add search** for guided forms. Fields can use their defaults o
 an explicit value; Advanced options include first/subsequent search filters,
 Boolean keyword expressions, seller filters, prompts, and sorting. Fixed start
 times replace interval scheduling. **Search all now** requests every enabled
-search after the current scan finishes. Saving config changes may also restart
+search after the current scan finishes; **Search now** on a saved search runs only
+that one. Saving config changes may also restart
 searches when the monitor reloads them.
 
 **Settings** includes marketplace accounts/defaults, AI providers, users and shared
