@@ -33,6 +33,10 @@ can leave an entry awaiting assessment; use **Assess again** to resume it. Exist
 shortlist, contacted, dismissal, filing and **Check against another search** actions
 also apply to manually added listings. Search evaluations keep their own ratings.
 
+While any manually added listings remain undismissed, the sidebar shows them under
+**Added by you** with their count and any entries awaiting or failing assessment.
+Select it, or the **Manually added** category button, to show only those listings.
+
 Each saved search is a category. Use the **Category** buttons to show one search,
 filter by rating, status, price drops or text, and group by category or day found.
 Category groups show every match and collapse from their heading, which summarises

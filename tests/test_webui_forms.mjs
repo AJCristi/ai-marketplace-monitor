@@ -284,6 +284,23 @@ test('live search completions update sidebar and activity labels while the feed 
   }
 });
 
+test('sidebar shows manually added matches with assessment status only when there are some',()=>{
+  const app=consoleUnderTest();app.state.config={item:{camera:{search_phrases:['camera']}}};
+  const toggles=[];
+  for(const selector of ['#monitor-nav','#matches-top-nav','#settings-nav','#matches-nav']){
+    app.control(selector).classList={toggle:(name,on)=>toggles.push([selector,on])};app.control(selector).removeAttribute=()=>{};app.control(selector).setAttribute=()=>{};
+  }
+  app.state.route='#/monitor/matches';app.state.matchSummary={groups:[{item:'camera',count:2}],manual:{awaiting:0,failed:0,last_added:null}};
+  app.run('renderSidebar();');
+  assert.doesNotMatch(app.control('#sidebar').innerHTML,/Added by you/);
+  app.state.route='#/monitor/matches?source=manual&status=all';app.state.matchSummary={groups:[{item:'',count:2}],manual:{awaiting:1,failed:0,last_added:'2026-10-02T20:15:00'}};
+  toggles.length=0;app.run('renderSidebar();');
+  const html=app.control('#sidebar').innerHTML;
+  assert.match(html,/<div class="sh">Added by you<\/div><a class="it on" id="manual-matches-nav" href="#\/monitor\/matches\?source=manual&status=all" aria-current="page">/);
+  assert.match(html,/1 awaiting<\/span>.*2 matches · general AI assessment · not searched.*Awaiting AI assessment/);
+  assert.deepEqual(toggles.find(([selector])=>selector==='#matches-nav'),['#matches-nav',false]);
+});
+
 test('View matches scopes results to the saved search with a safely encoded name',()=>{
   const app=consoleUnderTest(),name='camera & lens/#?';app.state.config={item:{[name]:{search_phrases:['camera']}}};
   app.run('renderFeed=()=>{};');app.renderActivity(name);
