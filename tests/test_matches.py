@@ -3,7 +3,9 @@
 import csv
 import dataclasses
 import io
+import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +27,7 @@ from ai_marketplace_monitor.matches import (
     price_dropped,
     price_number,
     query_matches,
+    reading_library,
     record_delivery,
     record_failed_rating,
     record_manual_listing,
@@ -195,6 +198,48 @@ def test_repeated_search_skips_ai_but_keeps_sighting(
     monitor.search_item(market, Mock(search=search), item)
     assert load_matches(match_cache)[0]["seen_count"] == 2
     user.notify.assert_not_called()
+
+
+def test_slow_reads_do_not_block_monitor_writes(match_cache: Cache, listing: Listing) -> None:
+    record_match(match_cache, listing, "test", AIResponse(4, "good"), run="initial")
+    with reading_library(match_cache) as store:
+        store.db.execute("SELECT * FROM listings").fetchall()
+        started = time.monotonic()
+        assert record_sighting(match_cache, listing, "test", "second")
+        assert time.monotonic() - started < 5
+
+
+def test_locked_library_does_not_stop_search(
+    match_cache: Cache,
+    listing: Listing,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record_match(match_cache, listing, "test", AIResponse(4, "good"), run="initial")
+    monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.search_cancelled = threading.Event()
+    monitor.photo_attempts = set()
+    monitor.config = SimpleNamespace(user={"me": SimpleNamespace(enabled=True)})
+    monitor.logger = Mock()
+    monitor.evaluate_by_ai = Mock(side_effect=AssertionError("No repeated AI call"))
+    item = SimpleNamespace(name="test", notify=None, rating=[4], searched_count=1)
+    market = SimpleNamespace(name="facebook", notify=None, rating=None)
+    user = Mock()
+    user.notification_status.return_value = NotificationStatus.NOTIFIED
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.User", Mock(return_value=user))
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.cache", match_cache)
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.counter", Mock())
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.time.sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        "ai_marketplace_monitor.monitor.record_sighting",
+        Mock(side_effect=sqlite3.OperationalError("database is locked")),
+    )
+
+    def search(_item: Any, on_listing: Any, should_stop: Any, on_results: Any) -> Any:
+        on_listing(listing)
+        return [listing]
+
+    monitor.search_item(market, Mock(search=search), item)
+    monitor.logger.warning.assert_called()
 
 
 def test_facebook_observes_before_filtering_without_fetching(

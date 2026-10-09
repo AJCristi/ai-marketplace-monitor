@@ -29,7 +29,9 @@ def photo_urls(row: dict[str, Any]) -> list[str]:
 
 
 class MatchStore:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, read_only: bool = False) -> None:
+        # WAL readers see a consistent snapshot without blocking writers.
+        self.begin = "BEGIN" if read_only else "BEGIN IMMEDIATE"
         self.db = sqlite3.connect(path, timeout=10)
         self.db.row_factory = sqlite3.Row
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
@@ -71,7 +73,7 @@ class MatchStore:
 
     def __enter__(self) -> MatchStore:
         """Serialize a short library operation, including migration."""
-        self.db.execute("BEGIN IMMEDIATE")
+        self.db.execute(self.begin)
         return self
 
     def __exit__(self, *error: Any) -> None:

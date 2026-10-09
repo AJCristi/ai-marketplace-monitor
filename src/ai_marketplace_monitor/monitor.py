@@ -1,4 +1,5 @@
 import random
+import sqlite3
 import sys
 import threading
 import time
@@ -233,7 +234,14 @@ class MarketplaceMonitor:
             )
 
         def observe(listing: Listing) -> None:
-            if record_sighting(cache, listing, item_config.name, run) and self.logger:
+            try:
+                seen_again = record_sighting(cache, listing, item_config.name, run)
+            except sqlite3.OperationalError as error:
+                # A missed sighting is cheaper than stopping the whole monitor.
+                if self.logger:
+                    self.logger.warning(f"Could not record sighting of {listing.title}: {error}")
+                return
+            if seen_again and self.logger:
                 self.logger.info(
                     "Known match seen again: %s",
                     listing.title,
