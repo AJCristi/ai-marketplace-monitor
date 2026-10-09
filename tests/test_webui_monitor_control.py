@@ -1,6 +1,7 @@
 """Regression checks for manual searches with unchanged config content."""
 
 import logging
+import socketserver
 import subprocess
 import threading
 from pathlib import Path
@@ -152,6 +153,35 @@ def test_restart_api_signals_monitor_and_context_requires_auth(tmp_path: Path) -
     assert client.get("/api/config/context").status_code == 401
     assert client.post("/api/monitor/restart").status_code == 401
     assert client.get("/api/monitor/progress").status_code == 401
+
+
+@pytest.mark.parametrize("subprotocols", [[], ["binary"]])
+def test_vnc_bridge_accepts_novnc_without_subprotocol(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, subprotocols: list[str]
+) -> None:
+    class VncGreeting(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            self.request.sendall(b"RFB 003.008\n")
+
+    with socketserver.TCPServer(("127.0.0.1", 0), VncGreeting) as vnc_server:
+        threading.Thread(target=vnc_server.serve_forever, daemon=True).start()
+        monkeypatch.setenv("AIMM_ENABLE_VNC", "1")
+        monkeypatch.setenv("AIMM_NOVNC_DIR", str(tmp_path))
+        monkeypatch.setenv("AIMM_VNC_PORT", str(vnc_server.server_address[1]))
+        path = tmp_path / "config.toml"
+        path.write_text("", encoding="utf-8")
+        client = TestClient(
+            create_app(
+                WebUIConfig(config_files=[path]),
+                AuthState(),
+                ConfigFileService([path]),
+                LogBroadcastHandler(),
+            )
+        )
+        with client.websocket_connect("/ws/vnc", subprotocols=subprotocols) as vnc:
+            assert vnc.accepted_subprotocol == (subprotocols[0] if subprotocols else None)
+            assert vnc.receive_bytes() == b"RFB 003.008\n"
+        vnc_server.shutdown()
 
 
 def test_authenticated_console_requires_csrf_and_recovers_after_expiry(

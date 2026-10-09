@@ -498,7 +498,9 @@ def create_app(
                 if not session or sessions.validate(session) is None:
                     await websocket.close(code=4401)
                     return
-            await websocket.accept(subprotocol="binary")
+            # noVNC 1.3 requests no subprotocol; browsers reject an unrequested one.
+            requested = websocket.scope.get("subprotocols") or []
+            await websocket.accept(subprotocol="binary" if "binary" in requested else None)
             try:
                 reader, writer = await asyncio.open_connection(vnc_host, vnc_port)
             except OSError:
@@ -717,6 +719,11 @@ def create_app(
                 status_code=400,
                 detail="Supply 1-25 listings, an optional search name, and a boolean refresh",
             )
+        searches_by_listing: dict[tuple[str, str], set[str]] = {}
+        for row in load_matches(cache):
+            searches_by_listing.setdefault((row["marketplace"], row["listing_id"]), set()).add(
+                row["item"]
+            )
         validated = []
         for entry in listings:
             if (
@@ -726,11 +733,11 @@ def create_app(
                 or not re.fullmatch(r"[0-9]{1,40}", entry["listing_id"])
             ):
                 raise HTTPException(status_code=400, detail="Invalid listing identity")
-            rows = load_matches(cache, entry["marketplace"], entry["listing_id"])
-            if not rows:
+            searches = searches_by_listing.get((entry["marketplace"], entry["listing_id"]))
+            if not searches:
                 raise HTTPException(status_code=404, detail="Match not found")
             original_item = entry.get("original_item")
-            if original_item is not None and not any(row["item"] == original_item for row in rows):
+            if original_item is not None and original_item not in searches:
                 raise HTTPException(status_code=400, detail="Unknown original search")
             validated.append(
                 {

@@ -378,6 +378,22 @@ class FacebookMarketplace(Marketplace):
                 )
             doze(login_wait_time, keyboard_monitor=self.keyboard_monitor)
 
+        if not self.is_logged_in() and self.logger:
+            self.logger.warning(
+                f"""{hilight("[Login]", "fail")} Not logged into Facebook. Seller names, seller """
+                "checks and exclude_sellers will not work until you log in through the browser window."
+            )
+
+    def is_logged_in(self: "FacebookMarketplace") -> bool:
+        try:
+            assert self.page is not None
+            return any(
+                cookie.get("name") == "c_user"
+                for cookie in self.page.context.cookies("https://www.facebook.com")
+            )
+        except Exception:
+            return False
+
     def search(
         self: "FacebookMarketplace",
         item_config: FacebookItemConfig,

@@ -64,6 +64,18 @@ def library(local_cache: Cache) -> Iterator[MatchStore]:
         yield store
 
 
+@contextmanager
+def reading_library(local_cache: Cache) -> Iterator[MatchStore]:
+    """Slow full reads must not hold the write lock the monitor needs for sightings."""
+    path = Path(local_cache.directory) / "matches.sqlite3"
+    with MatchStore(path, read_only=True) as store:
+        if store.db.execute("SELECT 1 FROM metadata WHERE key='imported'").fetchone():
+            yield store
+            return
+    with library(local_cache) as store:
+        yield store
+
+
 def initialize_library(local_cache: Cache) -> None:
     with library(local_cache):
         pass
@@ -314,7 +326,7 @@ def load_matches(
     local_cache: Cache, only_marketplace: str | None = None, only_listing_id: str | None = None
 ) -> list[dict[str, Any]]:
     """Load every match, or only one listing's matches when its identity is given."""
-    with library(local_cache) as store:
+    with reading_library(local_cache) as store:
         listings = {
             (r[0], r[1]): json.loads(r[2]) for r in store.db.execute("SELECT * FROM listings")
         }

@@ -201,6 +201,23 @@ def test_optional_scrape_failure_does_not_fail_listing() -> None:
     assert assess_seller(evidence)["status"] == "unknown"
 
 
+@pytest.mark.parametrize(
+    ("cookies", "warned"), [([{"name": "c_user"}], False), ([{"name": "datr"}], True)]
+)
+def test_login_warns_when_facebook_session_is_missing(
+    cookies: list[dict[str, str]], warned: bool
+) -> None:
+    market: Any = object.__new__(FacebookMarketplace)
+    page = Mock()
+    page.context.cookies.return_value = cookies
+    market.browser, market.page, market.logger = Mock(), None, Mock()
+    market.create_page, market.goto_url = Mock(return_value=page), Mock()
+    market.keyboard_monitor = None
+    market.config = Mock(username=None, password=None, login_wait_time=0)
+    market.login()
+    assert market.logger.warning.called is warned
+
+
 def test_legacy_and_stale_listings_refresh_automatically(
     listing: Listing, monkeypatch: pytest.MonkeyPatch
 ) -> None:
