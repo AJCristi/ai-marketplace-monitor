@@ -111,6 +111,9 @@ AI Service Issues
 - Verify network connectivity
 - Review OpenAI status page for service issues
 
+While no configured AI service answers, searches skip listings instead of saving or
+notifying them unrated; a later search evaluates them again.
+
 **AI responses seem incorrect**
 
 *Solutions:*

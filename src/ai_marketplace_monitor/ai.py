@@ -22,6 +22,10 @@ class AIServiceProvider(Enum):
     OLLAMA = "Ollama"
 
 
+class AIUnavailableError(RuntimeError):
+    """Configured AI services gave no evaluation."""
+
+
 @dataclass
 class AIResponse:
     score: int
