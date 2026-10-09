@@ -121,6 +121,7 @@ class WebUIConfig:
 @dataclass
 class MatchFilters:
     item: str | None = None
+    source: str | None = Query(default=None, pattern="^manual$")
     min_score: int | None = Query(default=None, ge=1, le=5)
     status: str = Query(default="all", pattern="^(all|new|shortlisted|contacted|dismissed)$")
     include_dismissed: bool = False

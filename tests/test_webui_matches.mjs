@@ -271,6 +271,22 @@ test('group counts and re-check scope honor all filters without changing sidebar
   await h.flush();
 });
 
+test('manually added listings get their own category that filters by source',async t=>{
+  const manual=row('fb:2','',{source:'manual'});
+  const h=viewHarness(t,{route:'#/monitor/matches?item=camera&status=all',matches:[manual],groups:[{item:'camera',count:3},{item:'',count:1}]});
+  h.view.render();await h.flush();
+  const category=h.control('[data-match-source="manual"]');
+  assert.equal(category.getAttribute('aria-pressed'),'false');
+  category.onclick();await h.flush();
+  const params=new URL(h.requests.at(-1),'http://localhost').searchParams;
+  assert.equal(params.get('source'),'manual');assert.equal(params.get('item'),null);
+  assert.equal(h.state.route,'#/monitor/matches?status=all&source=manual');
+  assert.match(h.node('match-chips').innerHTML,/Category: Manually added/);
+  assert.equal(h.control('[data-match-source="manual"]').getAttribute('aria-pressed'),'true');
+  h.control('[data-match-category="camera"]').onclick();await h.flush();
+  assert.equal(h.state.route,'#/monitor/matches?status=all&item=camera');
+});
+
 test('AI emphasis markers are removed while comments remain escaped plain text',async t=>{
   const listing=row('fb:1','camera',{score:4,comment:'**Good value** with <img src=x> and 2 * 3',state:{filed_under:[]},notified_users:[]});
   const h=viewHarness(t,{matches:[listing]});h.view.render();await h.flush();

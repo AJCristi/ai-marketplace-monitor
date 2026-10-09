@@ -147,7 +147,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   const active=()=>state.route.split('?')[0]==='#/monitor/matches'||state.route.startsWith('#/monitor/matches/');
   const detail=()=>state.route.split('?')[0].startsWith('#/monitor/matches/');
   const query=()=>new URLSearchParams(state.route.split('?')[1]||'');
-  const viewKeys=['item','min_score','status','include_dismissed','price_drop','q','sort','group'];
+  const viewKeys=['item','source','min_score','status','include_dismissed','price_drop','q','sort','group'];
   const viewSignature=()=>JSON.stringify(viewKeys.filter(key=>key!=='group').map(key=>query().get(key)));
   const currentStatus=()=>query().get('status')||'new';
   const shortcutsOn=()=>storage('localStorage','aimm-shortcuts')!=='off';
@@ -157,6 +157,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   const density=()=>storage('localStorage','aimm-matches-density')==='compact'?'compact':'comfortable';
   function chipLabel(key,value){
     if(key==='item')return 'Category: '+value;
+    if(key==='source')return 'Category: Manually added';
     if(key==='min_score')return ({4:'Good or better',5:'Great deal only'})[value]||`${ratingWord(Number(value))} or better`;
     if(key==='q')return `Contains “${value}”`;
     return ({price_drop:'Price dropped',include_dismissed:'Including dismissed'})[key]||'';
@@ -172,7 +173,8 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   const running=()=>[...jobs.values()].some(job=>['queued','running'].includes(job.state));
   const rememberJobs=()=>{storage('sessionStorage','aimm-recheck-jobs',JSON.stringify([...jobs.values()].filter(job=>['queued','running'].includes(job.state)).map(job=>job.job_id)));};
   const params=()=>{const p=query();p.delete('group');p.delete('match_item');p.set('limit','200');if(!p.get('status'))p.set('status','new');if(cutoff)p.set('since',cutoff);return p;};
-  function setFilter(name,value){if(!active())return;const p=query();if(value)p.set(name,value);else p.delete(name);p.delete('cursor');updateQuery(p);dismissedRows.clear();selectedKeys.clear();listScroll=0;load();}
+  const setFilter=(name,value)=>setFilters({[name]:value});
+  function setFilters(values){if(!active())return;const p=query();for(const [name,value] of Object.entries(values))if(value)p.set(name,value);else p.delete(name);p.delete('cursor');updateQuery(p);dismissedRows.clear();selectedKeys.clear();listScroll=0;load();}
   function notify(message, action) {
     toast(message);
     const host=$('#toast');if(action&&host){const button=document.createElement('button');button.className='btn';button.textContent='Undo';button.onclick=action;host.append(' ',button);}
@@ -219,11 +221,12 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   }
   function renderCategories(result){
     const target=$('#match-categories');if(!target)return;
-    const counts=new Map(result.groups.map(group=>[group.item,group.count])), current=query().get('item')||'';
+    const counts=new Map(result.groups.map(group=>[group.item,group.count])), currentItem=query().get('item')||'', currentSource=query().get('source')||'';
     const names=[...new Set([...Object.keys(state.config.item||{}),...result.groups.map(group=>group.item)])].filter(Boolean);
-    const options=[['','All',result.counts?.all??0],...names.map(name=>[name,Object.hasOwn(state.config.item||{},name)?name:name+' (removed)',counts.get(name)||0])];
-    target.innerHTML='<span class="sm d">Category</span>'+options.map(([value,label,count])=>`<button type="button" class="match-category" data-match-category="${esc(value)}" aria-pressed="${value===current}">${esc(label)} <span class="match-category-count">${count}</span></button>`).join('');
-    document.querySelectorAll('[data-match-category]').forEach(button=>button.onclick=()=>setFilter('item',button.dataset.matchCategory));
+    const manualCount=counts.get('')||0;
+    const options=[['','','All',result.counts?.all??0],...names.map(name=>[name,'',Object.hasOwn(state.config.item||{},name)?name:name+' (removed)',counts.get(name)||0]),...(manualCount||currentSource==='manual'?[['','manual','Manually added',manualCount]]:[])];
+    target.innerHTML='<span class="sm d">Category</span>'+options.map(([item,source,label,count])=>`<button type="button" class="match-category" data-match-category="${esc(item)}" data-match-source="${source}" aria-pressed="${item===currentItem&&source===currentSource}">${esc(label)} <span class="match-category-count">${count}</span></button>`).join('');
+    document.querySelectorAll('[data-match-category]').forEach(button=>button.onclick=()=>setFilters({item:button.dataset.matchCategory,source:button.dataset.matchSource}));
   }
   function selectHtml(name,label,options){const value=query().get(name)||'';return `<label class="sm">${label}<select class="in" data-match-filter="${name}">${options.map(([id,text])=>`<option value="${esc(id)}" ${id===value?'selected':''}>${esc(text)}</option>`).join('')}</select></label>`;}
   function render(restore=true) {
@@ -240,7 +243,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
       try{
         const saved=new URLSearchParams(storage('localStorage','aimm-matches-view')||''), p=new URLSearchParams([...saved].filter(([key])=>viewKeys.includes(key)));
         if(p.has('item')&&!Object.hasOwn(state.config.item||{},p.get('item'))&&!state.matchSummary?.groups?.some(group=>group.item===p.get('item')))p.delete('item');
-        for(const [key,values] of Object.entries({status:['new','all','shortlisted','contacted','dismissed'],min_score:['1','2','3','4','5'],sort:['newest','last_seen','price','score'],group:['search','date','none'],include_dismissed:['true','false'],price_drop:['true','false']}))if(p.has(key)&&!values.includes(p.get(key)))p.delete(key);
+        for(const [key,values] of Object.entries({source:['manual'],status:['new','all','shortlisted','contacted','dismissed'],min_score:['1','2','3','4','5'],sort:['newest','last_seen','price','score'],group:['search','date','none'],include_dismissed:['true','false'],price_drop:['true','false']}))if(p.has(key)&&!values.includes(p.get(key)))p.delete(key);
         updateQuery(p);
       }catch{}
     }else rememberView(query());

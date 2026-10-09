@@ -551,6 +551,7 @@ def query_matches(
     local_cache: Cache,
     *,
     item: str | None = None,
+    source: str | None = None,
     min_score: int | None = None,
     status: str = "all",
     include_dismissed: bool = False,
@@ -584,10 +585,12 @@ def query_matches(
                     memberships.add(membership)
                     groups[name] = groups.get(name, 0) + 1
                     new_groups[name] = new_groups.get(name, 0) + int(is_new)
+    manual_rows = [row for row in rows if row["item"] == "" and not row["state"]["dismissed"]]
     rows = [
         row
         for row in rows
         if (not item or item in row["filed_under"])
+        and (source != "manual" or "" in row["filed_under"])
         and (not price_drop or price_dropped(row))
         and (min_score is None or (row["score"] is not None and row["score"] >= min_score))
         and (
@@ -634,6 +637,11 @@ def query_matches(
             {"item": name, "count": count, "new_since": new_groups.get(name, 0)}
             for name, count in sorted(groups.items())
         ],
+        "manual": {
+            "awaiting": sum(row.get("evaluation_status") == "pending" for row in manual_rows),
+            "failed": sum(row.get("evaluation_status") == "error" for row in manual_rows),
+            "last_added": max((row["found_at"] for row in manual_rows), default=None),
+        },
         "next_cursor": (
             str(cursor + limit) if limit is not None and cursor + limit < len(rows) else None
         ),

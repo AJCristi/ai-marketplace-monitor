@@ -1016,6 +1016,21 @@ def test_new_badges_and_manual_groups(match_cache: Cache, listing: Listing) -> N
     )
 
 
+def test_manual_source_filter_and_assessment_summary(match_cache: Cache, listing: Listing) -> None:
+    record_match(match_cache, listing, "test", AIResponse(4, "good"))
+    for listing_id, status in (("221", "pending"), ("222", "error"), ("223", "assessed")):
+        record_manual_listing(
+            match_cache, dataclasses.replace(listing, id=listing_id), None, status
+        )
+    update_state(match_cache, "facebook", "223", {"dismissed": True})
+    result = query_matches(match_cache, source="manual")
+    assert [row["listing_id"] for row in result["matches"]] == ["222", "221"]
+    assert result["counts"]["all"] == 3
+    assert result["manual"]["awaiting"] == 1 and result["manual"]["failed"] == 1
+    assert result["manual"]["last_added"] == result["matches"][0]["found_at"]
+    assert query_matches(match_cache)["total"] == 3
+
+
 def test_new_status_lists_undecided_matches_found_since_last_seen(
     match_cache: Cache, listing: Listing
 ) -> None:
