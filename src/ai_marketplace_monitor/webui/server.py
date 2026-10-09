@@ -498,7 +498,9 @@ def create_app(
                 if not session or sessions.validate(session) is None:
                     await websocket.close(code=4401)
                     return
-            await websocket.accept(subprotocol="binary")
+            # noVNC 1.3 requests no subprotocol; browsers reject an unrequested one.
+            requested = websocket.scope.get("subprotocols") or []
+            await websocket.accept(subprotocol="binary" if "binary" in requested else None)
             try:
                 reader, writer = await asyncio.open_connection(vnc_host, vnc_port)
             except OSError:
