@@ -143,7 +143,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
   const relatedView=createRelatedView({json,toast});
   let busy=false, refreshTimer=null, filterTimer=null, noteTimer=null, detailRow=null, photoIndex=0, photoSelection=null, listScroll=0, listWindowScroll=0;
   const dismissedRows=new Map(), pendingStates=new Set(), selectedKeys=new Set();
-  let selectionAnchor=null, arrivals=0, keepList=false;
+  let selectionAnchor=null, arrivals=0, keepList=false, reloadTimer=null, reloadWaiters=[];
   let focusDetail=false, loadedView=null, recheckState=new Map(), openSections=new Set();
   const storage=(name,key,value)=>{try{const store=globalThis[name];return value===undefined?store.getItem(key):value===null?store.removeItem(key):store.setItem(key,value);}catch{return null;}};
   cutoff=storage('localStorage','aimm-matches-seen')||'';
@@ -535,6 +535,13 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     target.innerHTML=arrivals?`<div class="match-arrivals" role="status"><button class="btn sm" id="matches-arrivals-show">${arrivals} new ${arrivals===1?'match':'matches'} · Show</button></div>`:'';
     $('#matches-arrivals-show')?.addEventListener('click',()=>{arrivals=0;renderArrivals();load(false,true);});
   }
+  function reloadSoon(){
+    clearTimeout(reloadTimer);
+    return new Promise(resolve=>{
+      reloadWaiters.push(resolve);
+      reloadTimer=setTimeout(async()=>{const waiters=reloadWaiters;reloadWaiters=[];try{await load(false,true);}finally{waiters.forEach(done=>done());}},400);
+    });
+  }
   async function saveState(row,patch,{fromRow=false,silent=false,viaKey=false}={}) {
     if(pendingStates.has(row.key))return;
     pendingStates.add(row.key);
@@ -546,10 +553,10 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     renderBody();
     try{
       const updated=await json(`/api/matches/${encodeURIComponent(row.marketplace)}/${encodeURIComponent(row.listing_id)}/state`,{method:'PUT',body:JSON.stringify(patch)});
-      Object.assign(row.state,updated);
+      Object.assign(row.state,updated);pendingStates.delete(row.key);
       const changed=Object.keys(patch).find(name=>STATE_MESSAGES[name]);
       if(changed&&!silent){const undo=()=>{if(lastUndo===undo)lastUndo=null;toast('Change undone.');return saveState(row,previous,{fromRow,silent:true});};lastUndo=undo;notify(`${STATE_MESSAGES[changed][patch[changed]?0:1]}: ${row.title||'listing'}`,undo);}
-      if(state.route===route){await load(false,true);if(viaKey)focusCursor();else if(fromRow&&patch.dismissed===true)document.querySelector('[data-undo-row]')?.focus();}
+      if(state.route===route){await reloadSoon();if(state.route!==route)return;if(viaKey)focusCursor();else if(fromRow&&patch.dismissed===true)document.querySelector('[data-undo-row]')?.focus();}
     }catch(err){Object.assign(row.state,previous);dismissedRows.delete(matchId(row));if(state.route===route)renderBody();toast(err.message);}
     finally{pendingStates.delete(row.key);}
   }

@@ -510,6 +510,18 @@ test('keyboard triage moves through rows, decides, advances and undoes',async t=
   h.stored.set('aimm-shortcuts','off');const before=puts.length;await press('s');assert.equal(puts.length,before);
 });
 
+test('rapid triage decisions share one list reload after the last one',async t=>{
+  const listings=[1,2,3].map(id=>row('fb:'+id,'camera',{title:'Listing '+id}));
+  const h=viewHarness(t,{matches:listings,respond:(url,options)=>url.endsWith('/state')?JSON.parse(options.body):undefined});
+  h.view.render();await h.flush();
+  const listRequests=()=>h.requests.filter(url=>url.startsWith('/api/matches?')).length, before=listRequests();
+  for(const key of ['j','s','c','s'])h.view.onKey({key,target:null,preventDefault(){}});
+  await h.flush();await h.flush();
+  assert.equal(listRequests(),before);
+  await h.tick();await h.flush();
+  assert.equal(listRequests(),before+1);
+});
+
 test('key dates list labelled events newest first and skip missing ones',()=>{
   const html=keyDates({found_at:'2026-10-01T18:40:00',last_seen:'2026-10-03T13:58:00',seen_count:6,notified_users:['me'],recheck:{at:'invalid',status:'passed'}});
   assert.ok(html.indexOf('Last seen by a search')<html.indexOf('Found'));
