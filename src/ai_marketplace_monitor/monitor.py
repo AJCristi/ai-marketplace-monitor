@@ -84,6 +84,8 @@ class MarketplaceMonitor:
         self.logger = logger
         self.search_requested = threading.Event()
         self.search_cancelled = threading.Event()
+        self.requested_item_searches: set[str] = set()
+        self.requested_item_searches_lock = threading.Lock()
         self.search_progress: dict[str, Any] = {}
         self.rechecks = RecheckQueue()
         self.image_matcher = ImageMatcher(cache)
@@ -95,6 +97,27 @@ class MarketplaceMonitor:
         """Ask the monitor thread to run every enabled search at its next safe point."""
         self.search_requested.set()
 
+    def request_item_search(self: "MarketplaceMonitor", item: str) -> None:
+        """Ask the monitor thread to run one saved search at its next safe point."""
+        with self.requested_item_searches_lock:
+            self.requested_item_searches.add(item)
+        self.rechecks.wake.set()
+
+    def run_requested_item_search(self: "MarketplaceMonitor") -> bool:
+        """Run one requested saved search; its interval restarts from now."""
+        with self.requested_item_searches_lock:
+            if not self.requested_item_searches:
+                return False
+            item = self.requested_item_searches.pop()
+        jobs = schedule.get_jobs(item)
+        if jobs:
+            jobs[0].run()
+        elif self.logger:
+            self.logger.warning(
+                f"""{hilight("[Search]", "fail")} {item} is paused or no longer configured, so it was not searched."""
+            )
+        return True
+
     def progress_snapshot(self: "MarketplaceMonitor") -> dict[str, Any]:
         """Listing counts for the running search, read by the web UI thread."""
         return {**self.search_progress, "cancelling": self.search_cancelled.is_set()}
@@ -102,6 +125,8 @@ class MarketplaceMonitor:
     def cancel_search(self: "MarketplaceMonitor") -> None:
         """Stop the running search at its next listing and skip the rest of a requested run."""
         self.search_requested.clear()
+        with self.requested_item_searches_lock:
+            self.requested_item_searches.clear()
         self.search_cancelled.set()
 
     def load_config_file(self: "MarketplaceMonitor") -> Config:
@@ -730,6 +755,9 @@ class MarketplaceMonitor:
                     continue
                 if self.reload_requested():
                     break
+                if self.run_requested_item_search():
+                    self.handle_pause()
+                    continue
                 if self.rechecks.pending() and time.monotonic() >= self.recheck_after:
                     # A due search always runs first. Execute one listing, then check
                     # the schedule and configuration again before taking another.
@@ -753,7 +781,7 @@ class MarketplaceMonitor:
                 if self.process_photo():
                     continue
                 self.rechecks.wake.clear()
-                if self.image_matcher.queue.pending():
+                if self.image_matcher.queue.pending() or self.requested_item_searches:
                     # A manual request can arrive between the earlier check and clear.
                     idle_seconds = min(idle_seconds, 1)
                 if self.rechecks.pending():

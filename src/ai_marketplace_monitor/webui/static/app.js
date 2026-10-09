@@ -308,7 +308,7 @@ function renderActivity(name = null) {
     const region = itemValue(state.config,name,'search_region');
     const place = region?.length ? 'region: '+labelValue(region) : labelValue(itemValue(state.config,name,'search_city'));
     description = `${esc(searchSummary(name))} · ${esc(place)}${!filled(item.search_city)&&!filled(item.search_region)?'*':''} · AI: ${esc(labelValue(itemValue(state.config,name,'ai')))} · notify: ${esc(labelValue(itemValue(state.config,name,'notify')))} · <span data-item-last-searched="${esc(name)}">${esc(lastSearchedLabel(name))}</span>`;
-    actions = `<a class="btn" href="#/monitor/matches?item=${encodeURIComponent(name)}&status=all">View matches</a><button class="btn" id="toggle-search" type="button" ${state.saving?'disabled':''}>${item.enabled===false?'Resume search':'Pause search'}</button><a class="btn" href="${itemRoute(name)}/edit">Edit</a><button class="btn" id="duplicate-search">Duplicate</button><button class="btn x" id="delete-search">Delete</button>`;
+    actions = `<a class="btn" href="#/monitor/matches?item=${encodeURIComponent(name)}&status=all">View matches</a><button class="btn" id="search-now" type="button" ${item.enabled===false?'disabled title="Resume this search to run it"':''}>Search now</button><button class="btn" id="toggle-search" type="button" ${state.saving?'disabled':''}>${item.enabled===false?'Resume search':'Pause search'}</button><a class="btn" href="${itemRoute(name)}/edit">Edit</a><button class="btn" id="duplicate-search">Duplicate</button><button class="btn x" id="delete-search">Delete</button>`;
   }
   const types = [['','All'],['ai_eval','AI ratings'],['search_summary','Searches'],['listing_skip','Skipped'],...(!name?[['credentials_wait','Login']]:[])];
   $('#pane').innerHTML = pageHeader(name || 'All activity',name?description:esc(description),actions) + (name && item.description?`<p class="section-note">“${esc(item.description)}”</p>`:'') + (!name?'<p class="section-note">Every listing recorded as notified in the cache: link, price, rating, details. Export ignores the filters below.</p>':'') + `<div class="bar"><div class="row wr" role="group" aria-label="Activity type">${types.map(([kind,title])=>`<button class="pill" data-kind="${kind}" aria-pressed="${f.kind===kind}">${title}</button>`).join('')}</div><span class="m xs ok" id="follow-state">following live</span></div>` + (!name?`<div class="bar"><label class="sm">Search <span class="sel"><select id="filter-item" aria-label="Search"><option value="">All searches</option>${Object.keys(state.config.item||{}).map(item=>`<option value="${esc(item)}" ${f.item===item?'selected':''}>${esc(item)}</option>`).join('')}</select></span></label><label class="sm">Level <span class="sel"><select id="filter-level" aria-label="Level">${[['','All'],['INFO','Info'],['WARNING','Warning'],['ERROR','Error']].map(([value,title])=>`<option value="${value}" ${f.level===value?'selected':''}>${title}</option>`).join('')}</select></span></label><label class="sm">AI rating <span class="sel"><select id="filter-score" aria-label="AI rating">${[['','Any'],['3','≥3'],['4','≥4'],['5','5']].map(([value,title])=>`<option value="${value}" ${f.score===value?'selected':''}>${title}</option>`).join('')}</select></span></label><label class="sm gr">Contains <input id="filter-text" class="in" type="search" value="${esc(f.text)}" placeholder="Search activity"></label></div>`:'') + '<div id="pause-bar" class="pause-bar" hidden></div><div class="feed" id="feed"></div>' + (name?'<p class="feed-footnote">Delivery results aren’t tagged with a search yet, so they appear in <a href="#/monitor/all">All activity</a>.</p>':'');
@@ -317,6 +317,7 @@ function renderActivity(name = null) {
   $('#filter-text')?.addEventListener('input',event=>filterRoute('text',event.target.value));
   $('#export-csv')?.addEventListener('click',exportCsv);
   $('#toggle-search')?.addEventListener('click',()=>toggleSearch(name));
+  $('#search-now')?.addEventListener('click',()=>searchNow(name));
   $('#delete-search')?.addEventListener('click',()=>deleteSection('item',name));
   $('#duplicate-search')?.addEventListener('click',()=>{
     state.newFields = structuredClone(item); let copy = name+'_copy'; let number = 2;
@@ -326,6 +327,12 @@ function renderActivity(name = null) {
   window.onscroll=()=>{if(window.scrollY>0)pauseFeed();};
   $('#pane').onscroll = () => {if ($('#pane').scrollTop > 0) pauseFeed();};
   renderFeed(true);
+}
+async function searchNow(name) {
+  const button=$('#search-now');button.disabled=true;
+  try{toast((await json('/api/monitor/search',{method:'POST',body:JSON.stringify({item:name})})).message);}
+  catch(error){toast(error.message);}
+  finally{button.disabled=false;}
 }
 async function toggleSearch(name) {
   if(state.saving)return;

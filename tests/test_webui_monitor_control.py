@@ -79,6 +79,8 @@ def test_request_runs_again_with_unchanged_config(
     monitor.photo_attempts = set()
     monitor.search_requested = threading.Event()
     monitor.search_cancelled = threading.Event()
+    monitor.requested_item_searches = set()
+    monitor.requested_item_searches_lock = threading.Lock()
     monitor.rechecks = RecheckQueue()
     pending_image: list[bool] = []
     monitor.image_matcher = SimpleNamespace(
@@ -127,12 +129,13 @@ def test_restart_api_signals_monitor_and_context_requires_auth(tmp_path: Path) -
         '[marketplace.facebook]\nsearch_city = "houston"\n[item.camera]\nsearch_phrases = "camera"\n[user.me]\n',
         encoding="utf-8",
     )
-    request_search, cancel_search = Mock(), Mock()
+    request_search, request_item_search, cancel_search = Mock(), Mock(), Mock()
     handler = LogBroadcastHandler()
     config = WebUIConfig(
         config_files=[path],
         log_handler=handler,
         request_search=request_search,
+        request_item_search=request_item_search,
         cancel_search=cancel_search,
         search_progress=lambda: {"item": "camera", "done": 3, "total": 9},
     )
@@ -140,6 +143,9 @@ def test_restart_api_signals_monitor_and_context_requires_auth(tmp_path: Path) -
     client = TestClient(create_app(config, state, ConfigFileService([path]), handler))
     assert client.post("/api/monitor/restart").status_code == 200
     request_search.assert_called_once()
+    assert client.post("/api/monitor/search", json={"item": "camera"}).status_code == 200
+    request_item_search.assert_called_once_with("camera")
+    assert client.post("/api/monitor/search", json={"item": ""}).status_code == 400
     assert client.post("/api/monitor/search/cancel").status_code == 200
     cancel_search.assert_called_once()
     assert client.get("/api/monitor/progress").json()["done"] == 3
@@ -152,6 +158,7 @@ def test_restart_api_signals_monitor_and_context_requires_auth(tmp_path: Path) -
     state.exposed = True
     assert client.get("/api/config/context").status_code == 401
     assert client.post("/api/monitor/restart").status_code == 401
+    assert client.post("/api/monitor/search", json={"item": "camera"}).status_code == 401
     assert client.get("/api/monitor/progress").status_code == 401
 
 
@@ -211,6 +218,7 @@ def test_authenticated_console_requires_csrf_and_recovers_after_expiry(
     assert client.get("/api/config/context").status_code == 200
     assert client.post("/api/monitor/restart").status_code == 403
     assert client.post("/api/monitor/search/cancel").status_code == 403
+    assert client.post("/api/monitor/search", json={"item": "camera"}).status_code == 403
     headers = {CSRF_HEADER: client.cookies["aimm_csrf"]}
     assert client.post("/api/monitor/restart", headers=headers).status_code == 200
     requested.assert_called_once()
@@ -299,6 +307,8 @@ def test_fixed_times_do_not_repeat_initial_search(monkeypatch: pytest.MonkeyPatc
     monitor.photo_attempts = set()
     monitor.search_requested = threading.Event()
     monitor.search_cancelled = threading.Event()
+    monitor.requested_item_searches = set()
+    monitor.requested_item_searches_lock = threading.Lock()
     monitor.rechecks = RecheckQueue()
     monitor.image_matcher = SimpleNamespace(
         automatic=False, queue=SimpleNamespace(pending=lambda: False)
@@ -334,3 +344,72 @@ def test_fixed_times_do_not_repeat_initial_search(monkeypatch: pytest.MonkeyPatc
     jobs[0].run.assert_called_once()
     jobs[1].run.assert_not_called()
     jobs[2].run.assert_called_once()
+
+
+def test_item_search_request_runs_only_that_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.photo_attempts = set()
+    monitor.search_requested = threading.Event()
+    monitor.search_cancelled = threading.Event()
+    monitor.requested_item_searches = set()
+    monitor.requested_item_searches_lock = threading.Lock()
+    monitor.rechecks = RecheckQueue()
+    monitor.image_matcher = SimpleNamespace(
+        automatic=False, queue=SimpleNamespace(pending=lambda: False)
+    )
+    monitor.recheck_after = 0.0
+    monitor.keyboard_monitor = None
+    monitor.defer_login_until_credentials = False
+    monitor.config = SimpleNamespace()
+    monitor.config_files = []
+    monitor.config_hash = "unchanged"
+    monitor.logger = Mock()
+    monitor.load_config_file = Mock()
+    monitor._launch_browser = Mock()
+    monitor.handle_pause = Mock()
+    monitor.schedule_jobs = Mock()
+    monitor.process_photo = Mock(return_value=False)
+    camera, bike = Mock(next_run=1, tags={"camera"}), Mock(next_run=2, tags={"bike"})
+    jobs = [camera, bike]
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.KeyboardMonitor", Mock())
+    monkeypatch.setattr(
+        "ai_marketplace_monitor.monitor.calculate_file_hash", lambda files: "unchanged"
+    )
+    monkeypatch.setattr(
+        "ai_marketplace_monitor.monitor.schedule.get_jobs",
+        lambda tag=None: [job for job in jobs if tag is None or tag in job.tags],
+    )
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.schedule.jobs", jobs)
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.schedule.idle_seconds", lambda: 5)
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.schedule.run_pending", Mock())
+
+    naps: list[int] = []
+
+    def request_while_sleeping(seconds: int, *_args: Any) -> SleepStatus:
+        naps.append(seconds)
+        if len(naps) > 1:
+            raise RuntimeError("sleep reached")
+        monitor.request_item_search("bike")
+        monitor.request_item_search("removed")
+        return SleepStatus.BY_FILE_CHANGE
+
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.doze", request_while_sleeping)
+    with pytest.raises(RuntimeError, match="sleep reached"):
+        monitor.start_monitor()
+    assert camera.run.call_count == 1
+    assert bike.run.call_count == 2
+    assert "removed is paused" in monitor.logger.warning.call_args.args[0]
+    assert not monitor.requested_item_searches
+
+
+def test_cancel_drops_requested_item_searches() -> None:
+    monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.search_requested = threading.Event()
+    monitor.search_cancelled = threading.Event()
+    monitor.requested_item_searches = set()
+    monitor.requested_item_searches_lock = threading.Lock()
+    monitor.rechecks = RecheckQueue()
+    monitor.request_item_search("bike")
+    assert monitor.rechecks.wake.is_set()
+    monitor.cancel_search()
+    assert not monitor.run_requested_item_search()
