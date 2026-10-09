@@ -17,7 +17,7 @@ import pytest
 from diskcache import Cache  # type: ignore
 from fastapi.testclient import TestClient
 
-from ai_marketplace_monitor.ai import AIResponse
+from ai_marketplace_monitor.ai import AIResponse, AIUnavailableError
 from ai_marketplace_monitor.facebook import FacebookMarketplace
 from ai_marketplace_monitor.listing import Listing
 from ai_marketplace_monitor.matches import (
@@ -419,6 +419,50 @@ def test_search_records_before_delivery(
         "search_started",
         "search_summary",
     ]
+
+
+@pytest.mark.parametrize(
+    ("configured_ai", "expected"),
+    [({}, "not_evaluated"), ({"openai": SimpleNamespace(name="openai", enabled=True)}, "error")],
+)
+def test_failed_configured_ai_does_not_pass_listing(
+    listing: Listing, configured_ai: dict[str, Any], expected: str
+) -> None:
+    monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.config = SimpleNamespace(ai=configured_ai)
+    monitor.logger = None
+    failing_agent = Mock(config=SimpleNamespace(name="openai"))
+    failing_agent.evaluate.side_effect = TimeoutError("provider timeout")
+    monitor.ai_agents = [failing_agent] if configured_ai else []
+    item = SimpleNamespace(ai=None)
+    market = SimpleNamespace(ai=None)
+    if expected == "error":
+        with pytest.raises(AIUnavailableError):
+            monitor.evaluate_by_ai(listing, item, market)
+    else:
+        assert monitor.evaluate_by_ai(listing, item, market).comment == AIResponse.NOT_EVALUATED
+
+
+def test_search_skips_listing_when_configured_ai_is_unavailable(
+    match_cache: Cache, listing: Listing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.search_cancelled = threading.Event()
+    monitor.photo_attempts = set()
+    monitor.config = SimpleNamespace(user={"me": SimpleNamespace(enabled=True)})
+    monitor.logger = Mock()
+    monitor.evaluate_by_ai = Mock(side_effect=AIUnavailableError("no answer"))
+    item = SimpleNamespace(name="test", notify=None, rating=[4], searched_count=0)
+    market = SimpleNamespace(name="facebook", notify=None, rating=None)
+    user = Mock()
+    user.notification_status.return_value = NotificationStatus.NOT_NOTIFIED
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.User", Mock(return_value=user))
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.cache", match_cache)
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.counter", Mock())
+    monkeypatch.setattr("ai_marketplace_monitor.monitor.time.sleep", lambda seconds: None)
+    monitor.search_item(market, Mock(search=Mock(return_value=[listing])), item)
+    assert load_matches(match_cache) == []
+    user.notify.assert_not_called()
 
 
 def test_same_text_different_ids_remain_distinct(

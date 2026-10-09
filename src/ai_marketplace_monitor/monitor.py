@@ -19,7 +19,7 @@ from playwright.sync_api import Browser, Playwright, sync_playwright
 from rich.pretty import pretty_repr
 from rich.prompt import Prompt
 
-from .ai import AIBackend, AIResponse, general_assessment_config
+from .ai import AIBackend, AIResponse, AIUnavailableError, general_assessment_config
 from .config import Config, supported_ai_backends, supported_marketplaces
 from .image_matching import ImageMatcher
 from .listing import Listing
@@ -261,7 +261,15 @@ class MarketplaceMonitor:
             progress["checked"] += 1
             observe(listing)
 
-        def apply_rating(listing: Listing, res: AIResponse) -> None:
+        def apply_rating(listing: Listing, rating: Future[AIResponse]) -> None:
+            try:
+                res = rating.result()
+            except AIUnavailableError:
+                if self.logger:
+                    self.logger.warning(
+                        f"""{hilight("[AI]", "fail")} No configured AI evaluated {hilight(listing.title)}. Skipped until a later search."""
+                    )
+                return
             if self.logger:
                 if res.comment == AIResponse.NOT_EVALUATED:
                     if res.name:
@@ -348,7 +356,7 @@ class MarketplaceMonitor:
             ):
                 while pending and pending[0][1].done():
                     rated_listing, rating = pending.popleft()
-                    apply_rating(rated_listing, rating.result())
+                    apply_rating(rated_listing, rating)
                 progress["rating"] = len(pending)
                 observe(listing)
                 # Exact IDs define identity; similarly worded reposts remain separate listings.
@@ -398,7 +406,7 @@ class MarketplaceMonitor:
                 progress["rating"] = len(pending)
                 rated_listing, rating = pending.popleft()
                 if not rating.cancelled():
-                    apply_rating(rated_listing, rating.result())
+                    apply_rating(rated_listing, rating)
 
         self.search_progress = {}
         p = inflect.engine()
@@ -1176,4 +1184,10 @@ class MarketplaceMonitor:
                         f"""{hilight("[AI]", "fail")} Failed to get an answer from {agent.config.name}: {e}"""
                     )
                 continue
+        assert self.config is not None
+        if any(
+            ai_config.enabled is not False and (ai_agents is None or ai_config.name in ai_agents)
+            for ai_config in (self.config.ai or {}).values()
+        ):
+            raise AIUnavailableError("No configured AI service evaluated the listing")
         return AIResponse(5, AIResponse.NOT_EVALUATED)
