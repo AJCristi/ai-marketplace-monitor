@@ -35,10 +35,10 @@ class MatchStore:
         self.db = sqlite3.connect(path, timeout=10)
         self.db.row_factory = sqlite3.Row
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1, 2):
+        if version not in (0, 1, 2, 3):
             self.db.close()
             raise RuntimeError("The Matches library requires a newer application version")
-        if version == 2:
+        if version == 3:
             return
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(
@@ -63,10 +63,13 @@ class MatchStore:
                 marketplace TEXT, listing_id TEXT, digest TEXT, position INTEGER NOT NULL,
                 data BLOB NOT NULL, saved_at TEXT NOT NULL,
                 PRIMARY KEY (marketplace, listing_id, digest));
+            -- Covers gallery metadata reads so they never page through photo blobs.
+            CREATE INDEX IF NOT EXISTS photos_metadata
+                ON photos(marketplace, listing_id, position, digest, saved_at);
             CREATE TABLE IF NOT EXISTS photo_sources (
                 marketplace TEXT, listing_id TEXT, source_hash TEXT, digest TEXT NOT NULL,
                 PRIMARY KEY (marketplace, listing_id, source_hash));
-            PRAGMA user_version=2;
+            PRAGMA user_version=3;
             COMMIT;
         """
         )

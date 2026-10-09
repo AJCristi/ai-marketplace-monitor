@@ -234,7 +234,7 @@ export function createMatchesView({state, json, pageHeader, exportCsv, toast, re
     if(detail()){
       focusDetail=true;
       $('#pane').innerHTML='<div id="match-page-top"></div><div id="matches-progress"></div><span class="vh" id="matches-announcement" aria-live="polite" aria-atomic="true"></span><div id="matches-body"></div>'+shortcutsDialog();
-      bindShortcutsDialog();load();pollJobs();return;
+      bindShortcutsDialog();load(false,false,Boolean(data)&&loadedView===viewSignature());pollJobs();return;
     }
     const returning=detailRow&&loadedView===viewSignature();
     if(returning)for(const row of rows)if(row.key===detailRow.key)row.state=detailRow.state;

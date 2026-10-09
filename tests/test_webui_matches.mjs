@@ -258,6 +258,19 @@ test('History remains interactive after Related listings is mounted',async t=>{
   assert.equal(h.node('match-history-body').textContent,'No history recorded yet.');
 });
 
+test('opening and stepping through loaded matches fetches only their details',async t=>{
+  const first=row('fb:1','camera',{marketplace:'fb',listing_id:'1',state:{filed_under:[]},notified_users:[]});
+  const second=row('fb:2','camera',{marketplace:'fb',listing_id:'2',found_at:'2000-01-01T00:00:00',state:{filed_under:[]},notified_users:[]});
+  const h=viewHarness(t,{matches:[first,second]});
+  h.view.render();await h.flush();
+  const listRequests=()=>h.requests.filter(url=>url.startsWith('/api/matches?')).length, before=listRequests();
+  await h.open();
+  h.node('match-next').onclick();await h.flush();
+  assert.equal(listRequests(),before);
+  assert.deepEqual(h.requests.filter(url=>url.includes('/detail?')),['/api/matches/fb/1/detail?item=camera','/api/matches/fb/2/detail?item=camera']);
+  assert.match(h.node('match-detail').innerHTML,/2 of 2 loaded/);
+});
+
 test('group counts and re-check scope honor all filters without changing sidebar totals',async t=>{
   const listing=row('fb:1','camera',{state:{filed_under:[]},notified_users:[]});
   const h=viewHarness(t,{route:'#/monitor/matches?item=camera&min_score=4&status=shortlisted&include_dismissed=true&price_drop=true&q=lens&sort=price&group=search&cursor=old',matches:[listing],groups:[{item:'camera',count:9}],filteredGroups:[{item:'camera',count:1}]});

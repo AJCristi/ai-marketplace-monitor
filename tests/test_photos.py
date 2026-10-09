@@ -113,11 +113,29 @@ def test_gallery_schema_upgrade_preserves_listing_and_state(tmp_path: Path) -> N
     with MatchStore(path) as store:
         saved = store.listing("facebook", "1")
         assert saved is not None and saved["state"]["shortlisted"] is True
-        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 3
         assert store.photos("facebook", "1") == []
     with MatchStore(path) as store:
         saved = store.listing("facebook", "1")
         assert saved is not None and saved["title"] == "Existing"
+
+
+def test_photo_metadata_reads_skip_photo_blobs_after_upgrade(tmp_path: Path) -> None:
+    path = tmp_path / "matches.sqlite3"
+    with MatchStore(path) as store:
+        store.db.executescript("DROP INDEX photos_metadata; PRAGMA user_version=2;")
+    with MatchStore(path) as store:
+        plans = [
+            " ".join(str(row["detail"]) for row in store.db.execute(f"EXPLAIN QUERY PLAN {query}"))
+            for query in (
+                "SELECT marketplace,listing_id,digest,saved_at FROM photos ORDER BY position,digest",
+                (
+                    "SELECT digest,saved_at FROM photos WHERE marketplace='facebook' "
+                    "AND listing_id='1' ORDER BY position,digest"
+                ),
+            )
+        ]
+    assert all("COVERING INDEX photos_metadata" in plan for plan in plans)
 
 
 @pytest.mark.parametrize(
