@@ -209,49 +209,58 @@ Telegram Troubleshooting
 AI Prompt Customization
 =======================
 
-_ai-marketplace-monitor_ asks AI services to evaluate listings against the criteria that you specify with prompts in four parts:
+_ai-marketplace-monitor_ asks AI services to evaluate listings against the criteria that you specify. A fixed system prompt tells the AI that listing text was written by the seller and is evidence, not instructions. The request then has three sections, with the listing last:
 
-**Part 1: Buyer Intent**
-
-.. code-block:: text
-
-    A user wants to buy a ... with search phrase ... description ..., price range ...,
-    with keywords .... and exclude ...
-
-**Part 2: Listing Details**
+**Buyer search**
 
 .. code-block:: text
 
-    The user found a listing titled ... priced at ..., located ... posted at ...
-    with description ...
+    <buyer_search>
+    Item: ...
+    Search phrases: ...
+    Description: ...
+    Price range: ...
+    Exclude listings mentioning: ...
+    </buyer_search>
 
-**Part 3: Instruction to AI**
-
-.. code-block:: text
-
-    Evaluate how well this listing matches the user's criteria. Assess the description,
-    MSRP, model year, condition, and seller's credibility.
-
-**Part 4: Rating Instructions**
+**Instructions**
 
 .. code-block:: text
 
-    Rate from 1 to 5 based on the following:
+    <instructions>
+    Evaluate how well this listing matches the buyer's search. Assess the description,
+    model year, condition, price and seller credibility.
 
+    For each requirement in the buyer's search, write one short line: met, unmet or unknown.
+    Then rate from 1 to 5:
     1 - No match: Missing key details, wrong category/brand, or suspicious activity (e.g., external links).
     2 - Potential match: Lacks essential info (e.g., condition, brand, or model); needs clarification.
     3 - Poor match: Some mismatches or missing details; acceptable but not ideal.
     4 - Good match: Mostly meets criteria with clear, relevant details.
     5 - Great deal: Fully matches criteria, with excellent condition or price.
-
     Conclude with:
-    "Rating [1-5]: [summary]"
-    where [1-5] is the rating and [summary] is a brief recommendation (max 30 words)."
+    "Rating <1-5>: <summary>"
+    where <1-5> is the rating and <summary> is a brief recommendation (max 30 words).
+    </instructions>
+
+**Listing**
+
+.. code-block:: text
+
+    <listing>
+    Title: ...
+    Price: ...
+    Condition: ...
+    Location: ...
+    Description: ...
+    </listing>
+
+Angle brackets in listing text are escaped, and descriptions longer than 3,000 characters are truncated.
 
 Custom Prompts
 --------------
 
-Depending on your specific needs, you can replace part 3 and part 4 of the prompt with options `prompt` and `rating_prompt`, and add an extra prompt before rating prompt with option `extra_prompt`. These options can be specified at the `marketplace` and `item` levels, with the latter overriding the former.
+Depending on your specific needs, you can replace the evaluation instruction (the first paragraph of the instructions) and the rating instructions with options `prompt` and `rating_prompt`, and add an extra prompt before the rating instructions with option `extra_prompt`. A custom `rating_prompt` must still ask for a final ``Rating <1-5>: <summary>`` line. These options can be specified at the `marketplace` and `item` levels, with the latter overriding the former.
 
 For example, you can add:
 
