@@ -68,16 +68,17 @@ COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /uvx /bin/
 
 ENV UV_NO_CACHE=1 \
     UV_PYTHON_DOWNLOADS=never \
-    PATH="/app/.venv/bin:${PATH}"
+    UV_PROJECT_ENVIRONMENT=/usr/local
 
 # Install locked dependencies and Chromium from the project metadata alone, so this
-# layer stays cached when only application source changes.
+# layer stays cached when only application source changes. --inexact keeps the base
+# image's own packages, such as pip, in the system environment.
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --locked --no-dev --no-install-project \
+RUN uv sync --locked --no-dev --no-install-project --inexact \
     && playwright install --with-deps chromium
 
 COPY src ./src
-RUN uv sync --locked --no-dev --no-editable
+RUN uv sync --locked --no-dev --no-editable --inexact
 
 # Embed the immutable source revision; the installed package has no .git directory.
 ARG AIMM_BUILD_SHA
