@@ -295,6 +295,18 @@ Provider contracts: [image inputs](https://mimo.mi.com/docs/en-US/quick-start/us
 [JSON output](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/text-generation/structured-output),
 and [pricing](https://mimo.mi.com/docs/en-US/price/pay-as-you-go).
 
+## Chat about a match
+
+**Chat about this match** on the detail page asks the AI that rates the match's
+search (its `ai` setting, else the marketplace's, else the first enabled AI) about
+the listing. Manually added listings use the marketplace's AI. The chat sees the
+listing details, AI rating, seller credibility, sightings, your private note and
+the search's phrases, description and price range. Replies stream as they arrive.
+
+**Include photos** sends up to four saved photos with the first question. It costs
+more, and the model must accept image input. Chats are kept only while the page is
+open; nothing is saved. Chat calls are not counted toward the image matching budget.
+
 ## Storage and limitations
 
 The library lives in `~/.ai-marketplace-monitor/matches.sqlite3`, independently of the

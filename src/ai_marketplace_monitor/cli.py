@@ -275,6 +275,7 @@ def main(
                             search_progress=monitor.progress_snapshot,
                             rechecks=monitor.rechecks,
                             image_matcher=monitor.image_matcher,
+                            chat_backend=monitor.chat_backend,
                         ),
                         logger=logger,
                     )

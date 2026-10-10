@@ -53,7 +53,7 @@ do not copy Linux system-package commands into PowerShell.
 | Config editing/masked secrets | `tests/test_webui_config_api.py`, `tests/test_webui_secrets_redact.py`, Node form tests |
 | Credentials/sessions | `tests/test_webui_config_auth.py`, `tests/test_webui_auth.py` |
 | Monitor controls/events | `tests/test_webui_monitor_control.py`, `tests/test_webui_log_handler.py`, Node console tests |
-| Matches library, migration, sightings and history | `tests/test_matches.py`, `tests/test_seller.py`, `tests/test_webui_matches.mjs` |
+| Matches library, migration, sightings, history and chat | `tests/test_matches.py`, `tests/test_seller.py`, `tests/test_webui_matches.mjs`, `tests/test_webui_chat.mjs` |
 | CSV export | `tests/test_found_export.py` |
 | Shared utilities | `tests/test_utils.py` |
 

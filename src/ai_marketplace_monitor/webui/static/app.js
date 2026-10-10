@@ -939,7 +939,7 @@ function render() {
   renderSidebar();renderConflict();
 }
 async function bootstrap() {
-  matchesView ||= createMatchesView({state,json,pageHeader,exportCsv,toast,renderSidebar,searchSummary});
+  matchesView ||= createMatchesView({state,api,json,pageHeader,exportCsv,toast,renderSidebar,searchSummary});
   $('#sidebar').onclick=event=>matchesView.sidebarClick(event);
   state.status=await json('/api/status');state.open=state.status.open;$('#app').hidden=false;
   const build=state.status.build;

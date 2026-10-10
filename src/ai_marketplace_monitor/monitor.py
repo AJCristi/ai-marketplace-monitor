@@ -23,7 +23,7 @@ from .ai import AIBackend, AIResponse, AIUnavailableError, general_assessment_co
 from .config import Config, supported_ai_backends, supported_marketplaces
 from .image_matching import ImageMatcher
 from .listing import Listing
-from .marketplace import Marketplace, TItemConfig, TMarketplaceConfig
+from .marketplace import ItemConfig, Marketplace, TItemConfig, TMarketplaceConfig
 from .matches import (
     has_match,
     load_matches,
@@ -224,6 +224,26 @@ class MarketplaceMonitor:
                         f"""{hilight("[AI]", "fail")} Failed to connect to {hilight(ai_config.name, "fail")}: {e}"""
                     )
                 continue
+
+    def chat_backend(self: "MarketplaceMonitor", item: str) -> tuple[AIBackend, ItemConfig | None]:
+        """Pick the AI that rates this search; a new instance keeps web chats off the monitor's client."""
+        if self.config is None:
+            raise ValueError("The monitor has not loaded its configuration yet.")
+        item_config = self.config.item.get(item)
+        marketplace_config = self.config.marketplace.get(
+            (item_config.marketplace if item_config else None)
+            or next(iter(self.config.marketplace), "")
+        )
+        if item_config is not None and item_config.ai is not None:
+            names = item_config.ai
+        elif marketplace_config is not None:
+            names = marketplace_config.ai
+        else:
+            names = None
+        for agent in list(self.ai_agents):
+            if names is None or agent.config.name in names:
+                return type(agent)(config=agent.config, logger=self.logger), item_config
+        raise ValueError("No enabled AI service is configured for this search.")
 
     def search_item(
         self: "MarketplaceMonitor",
