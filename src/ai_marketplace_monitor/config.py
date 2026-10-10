@@ -13,6 +13,7 @@ else:
 
 from .ai import (
     AnthropicBackend,
+    CloudflareBackend,
     DeepSeekBackend,
     GeminiBackend,
     OllamaBackend,
@@ -33,6 +34,7 @@ supported_ai_backends = {
     "openai": OpenAIBackend,
     "anthropic": AnthropicBackend,
     "ollama": OllamaBackend,
+    "cloudflare": CloudflareBackend,
 }
 
 

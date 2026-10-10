@@ -19,11 +19,24 @@ from playwright.sync_api import Browser, Playwright, sync_playwright
 from rich.pretty import pretty_repr
 from rich.prompt import Prompt
 
-from .ai import AIBackend, AIResponse, AIUnavailableError, general_assessment_config
+from .ai import (
+    AIBackend,
+    AIConfig,
+    AIResponse,
+    AIUnavailableError,
+    CloudflareBackend,
+    general_assessment_config,
+)
 from .config import Config, supported_ai_backends, supported_marketplaces
 from .image_matching import ImageMatcher
 from .listing import Listing
-from .marketplace import ItemConfig, Marketplace, TItemConfig, TMarketplaceConfig
+from .marketplace import (
+    ItemConfig,
+    Marketplace,
+    MarketplaceConfig,
+    TItemConfig,
+    TMarketplaceConfig,
+)
 from .matches import (
     has_match,
     load_matches,
@@ -224,6 +237,49 @@ class MarketplaceMonitor:
                         f"""{hilight("[AI]", "fail")} Failed to connect to {hilight(ai_config.name, "fail")}: {e}"""
                     )
                 continue
+        for agent in self.ai_agents:
+            if isinstance(agent, CloudflareBackend) and agent.config.comment_ai:
+                agent.comment_backend = self.comment_backend_for(agent)
+
+    def comment_backend_for(
+        self: "MarketplaceMonitor", agent: CloudflareBackend
+    ) -> AIBackend | None:
+        name = agent.config.comment_ai
+        backend = next(
+            (other for other in self.ai_agents if other.config.name == name),
+            None,
+        )
+        if backend is None or isinstance(backend, CloudflareBackend):
+            if self.logger:
+                self.logger.error(
+                    f"""{hilight("[AI]", "fail")} {agent.config.name} comment_ai {hilight(str(name), "fail")} is not an enabled LLM AI section."""
+                )
+            return None
+        return backend
+
+    def saved_ai_config(self: "MarketplaceMonitor", name: str) -> AIConfig | None:
+        return (self.config.ai or {}).get(name) if self.config else None
+
+    def ai_test_backend(
+        self: "MarketplaceMonitor", name: str, item: str
+    ) -> tuple[AIBackend, ItemConfig, MarketplaceConfig]:
+        """A fresh backend and the configs to rate one saved match on the AI test page."""
+        if self.config is None:
+            raise ValueError("The monitor has not loaded its configuration yet.")
+        agent = next((agent for agent in self.ai_agents if agent.config.name == name), None)
+        if agent is None:
+            raise ValueError(f"AI section {name} is not enabled.")
+        backend = type(agent)(config=agent.config, logger=self.logger)
+        comment = getattr(agent, "comment_backend", None)
+        if isinstance(backend, CloudflareBackend) and comment is not None:
+            backend.comment_backend = type(comment)(config=comment.config, logger=self.logger)
+        item_config = self.config.item.get(item) or general_assessment_config()
+        marketplace_config = self.config.marketplace.get(
+            item_config.marketplace or next(iter(self.config.marketplace), "")
+        )
+        if marketplace_config is None:
+            raise ValueError("No marketplace is configured.")
+        return backend, item_config, marketplace_config
 
     def chat_backend(self: "MarketplaceMonitor", item: str) -> tuple[AIBackend, ItemConfig | None]:
         """Pick the AI that rates this search; a new instance keeps web chats off the monitor's client."""

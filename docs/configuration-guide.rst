@@ -462,6 +462,30 @@ If you have access to a decent machine and prefer not to pay for AI services fro
    1. Depending on your hardware configuration, you can choose any of the models listed at `ollama.com/library <https://ollama.com/library>`_. The default model is `deepseek-r1:14b` because it appears to work better than `llama-3.1:8b`.
    2. You need to `pull` the model before you can use it.
 
+Fast ratings with Cloudflare Clef
+=================================
+
+Cloudflare's Clef models answer typed questions instead of writing text, which makes them fast and inexpensive for rating listings. Create a Workers AI API token with *Workers AI Read* and *Workers AI Edit* permissions, then add:
+
+.. code-block:: toml
+
+    [ai.cloudflare]
+    api_key = "${CLOUDFLARE_API_KEY}"
+    account_id = "your-account-id"
+    model = "clef-flash"        # or "clef" for higher accuracy
+    comment_ai = "openai"       # optional LLM section that writes comments
+    comment_min_score = 4       # only listings rated 4 or 5 get an LLM comment
+    max_photos = 4              # listing photos sent with each rating, 0 to 4
+
+    [marketplace.facebook]
+    ai = ["cloudflare", "openai"]
+
+.. note::
+   1. Each listing gets one Clef request with a 1 to 5 rating rubric and yes/no checks for "is this the searched item" and scam risk. Without `comment_ai`, the comment summarises those answers, for example `Clef rated 4.3/5 · searched item 92% · scam risk 3%`.
+   2. Services are tried in the listed order, so put `cloudflare` first to rate with Clef and fall back to the LLM if Cloudflare fails.
+   3. `base_url` replaces the Workers AI URL, for example a self-hosted Clef served at `/v1/systemone`; `account_id` is then optional.
+   4. Use *Settings → AI test* in the web UI to try a backend on a saved match and inspect its decisions before relying on it.
+
 
 
 Anonymous Search with Proxy

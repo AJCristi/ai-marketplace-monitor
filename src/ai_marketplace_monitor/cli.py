@@ -276,6 +276,8 @@ def main(
                             rechecks=monitor.rechecks,
                             image_matcher=monitor.image_matcher,
                             chat_backend=monitor.chat_backend,
+                            ai_test_backend=monitor.ai_test_backend,
+                            saved_ai_config=monitor.saved_ai_config,
                         ),
                         logger=logger,
                     )

@@ -19,7 +19,14 @@ from diskcache import Cache  # type: ignore
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from ai_marketplace_monitor.ai import AIResponse, AIUnavailableError, OllamaBackend, OllamaConfig
+from ai_marketplace_monitor.ai import (
+    AIResponse,
+    AIUnavailableError,
+    CloudflareBackend,
+    CloudflareConfig,
+    OllamaBackend,
+    OllamaConfig,
+)
 from ai_marketplace_monitor.facebook import FacebookMarketplace
 from ai_marketplace_monitor.listing import Listing
 from ai_marketplace_monitor.matches import (
@@ -1388,3 +1395,149 @@ def test_chat_api_streams_match_context_and_hides_provider_errors(
         {"error": "fake failed to answer. See the log."},
     ]
     assert "synthetic outage" in backend.logger.error.call_args.args[0]
+
+
+def test_clef_comment_ai_links_to_an_enabled_llm_and_test_backends_are_fresh() -> None:
+    monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.logger = Mock()
+    llm = OllamaBackend(OllamaConfig(name="local", base_url="http://localhost:1/v1", model="m"))
+    clef_config = CloudflareConfig(
+        name="clef", api_key="synthetic-token", account_id="acct", comment_ai="local"
+    )
+    clef = CloudflareBackend(clef_config)
+    monitor.ai_agents = [clef, llm]
+    assert monitor.comment_backend_for(clef) is llm
+    clef_config.comment_ai = "clef"
+    assert monitor.comment_backend_for(clef) is None
+    assert "not an enabled LLM" in monitor.logger.error.call_args.args[0]
+
+    clef.comment_backend = llm
+    item = SimpleNamespace(marketplace=None)
+    marketplace = SimpleNamespace(ai=None)
+    monitor.config = SimpleNamespace(item={"test": item}, marketplace={"facebook": marketplace})
+    backend, item_config, marketplace_config = monitor.ai_test_backend("clef", "test")
+    assert isinstance(backend, CloudflareBackend) and backend is not clef
+    comment = backend.comment_backend
+    assert comment is not None and comment is not llm and comment.config is llm.config
+    assert item_config is item and marketplace_config is marketplace
+    _, general, _ = monitor.ai_test_backend("local", "")
+    assert general.name == "listed item"
+    with pytest.raises(ValueError, match="missing is not enabled"):
+        monitor.ai_test_backend("missing", "test")
+
+
+def test_ai_test_api_runs_a_dry_evaluation_of_a_saved_match(
+    match_cache: Cache, listing: Listing, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("ai_marketplace_monitor.webui.server.cache", match_cache)
+    record_match(match_cache, listing, "test", AIResponse(4, "good"))
+    with library(match_cache) as store:
+        store.save_photo("facebook", listing.id, "source", "a" * 64, b"synthetic photo")
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[marketplace.facebook]\nsearch_city="houston"\n[item.test]\nsearch_phrases="camera"\n[user.me]\n',
+        encoding="utf-8",
+    )
+    state = AuthState()
+    state.exposed = True
+    state.auth = AuthConfig("test", hash_password("synthetic-password"), "synthetic-secret")
+    config = WebUIConfig(config_files=[path])
+    client = TestClient(
+        create_app(config, state, ConfigFileService([path]), LogBroadcastHandler())
+    )
+    body = {
+        "backend": "clef",
+        "marketplace": "facebook",
+        "listing_id": listing.id,
+        "item": "test",
+        "photos": True,
+    }
+    assert client.post("/api/ai/test", json=body).status_code == 401
+    client.post("/api/login", data={"username": "test", "password": "synthetic-password"})
+    assert client.post("/api/ai/test", json=body).status_code == 403
+    headers = {CSRF_HEADER: client.cookies["aimm_csrf"]}
+    for invalid in ({**body, "photos": "yes"}, {**body, "extra": 1}, {**body, "backend": 1}):
+        assert client.post("/api/ai/test", json=invalid, headers=headers).status_code == 400
+    missing = {**body, "item": "other"}
+    assert client.post("/api/ai/test", json=missing, headers=headers).status_code == 404
+    assert client.post("/api/ai/test", json=body, headers=headers).status_code == 503
+
+    backend = Mock(config=SimpleNamespace(name="clef"), logger=Mock())
+    backend.debug.return_value = {"backend": "clef", "rating": 4, "steps": []}
+    item_config, marketplace_config = object(), object()
+    config.ai_test_backend = Mock(return_value=(backend, item_config, marketplace_config))
+    reply = client.post("/api/ai/test", json=body, headers=headers)
+    assert reply.status_code == 200 and reply.json()["rating"] == 4
+    config.ai_test_backend.assert_called_with("clef", "test")
+    tested, used_item, used_marketplace, photos = backend.debug.call_args.args
+    assert (tested.id, tested.title, tested.name) == (listing.id, listing.title, "test")
+    assert used_item is item_config and used_marketplace is marketplace_config
+    assert photos == [b"synthetic photo"]
+    client.post("/api/ai/test", json={**body, "photos": False}, headers=headers)
+    assert backend.debug.call_args.args[3] == []
+    config.ai_test_backend = Mock(side_effect=ValueError("AI section clef is not enabled."))
+    unavailable = client.post("/api/ai/test", json=body, headers=headers)
+    assert unavailable.status_code == 503 and "not enabled" in unavailable.json()["detail"]
+
+
+def test_ai_models_api_prefers_draft_values_and_hides_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('[marketplace.facebook]\nsearch_city="houston"\n[user.me]\n', encoding="utf-8")
+    state = AuthState()
+    state.exposed = True
+    state.auth = AuthConfig("test", hash_password("synthetic-password"), "synthetic-secret")
+    saved = OllamaConfig(
+        name="local", api_key="saved-key", base_url="http://saved:11434/v1", model="m"
+    )
+    config = WebUIConfig(config_files=[path], saved_ai_config={"local": saved}.get)
+    client = TestClient(
+        create_app(config, state, ConfigFileService([path]), LogBroadcastHandler())
+    )
+    seen: list[Any] = []
+    failure: list[Exception] = []
+
+    def list_models(self: Any) -> list[str]:
+        seen.append((self.config.api_key, self.config.base_url, self.config.timeout))
+        if failure:
+            raise failure[0]
+        return ["a", "b"]
+
+    monkeypatch.setattr("ai_marketplace_monitor.ai.OpenAIBackend.list_models", list_models)
+    url, body = "/api/ai/models", {"name": "local", "provider": "ollama"}
+    assert client.post(url, json=body).status_code == 401
+    client.post("/api/login", data={"username": "test", "password": "synthetic-password"})
+    assert client.post(url, json=body).status_code == 403
+    headers = {CSRF_HEADER: client.cookies["aimm_csrf"]}
+    for invalid in ({**body, "provider": "nope"}, {**body, "extra": 1}, {**body, "api_key": 1}):
+        assert client.post(url, json=invalid, headers=headers).status_code == 400
+
+    clef = client.post(url, json={"name": "clef", "provider": "cloudflare"}, headers=headers)
+    assert clef.json() == {"models": ["clef", "clef-flash"], "checked": False} and not seen
+
+    assert client.post(url, json=body, headers=headers).json() == {
+        "models": ["a", "b"],
+        "checked": True,
+    }
+    assert seen[-1] == ("saved-key", "http://saved:11434/v1", 15)
+    masked = {**body, "api_key": "<REDACTED>", "base_url": ""}
+    client.post(url, json=masked, headers=headers)
+    assert seen[-1][:2] == ("saved-key", None)
+    typed = {"name": "new", "provider": "ollama", "api_key": "typed", "base_url": "http://x/v1"}
+    client.post(url, json=typed, headers=headers)
+    assert seen[-1][:2] == ("typed", "http://x/v1")
+    client.post(url, json={"name": "new", "provider": "ollama"}, headers=headers)
+    assert seen[-1][0] == "ollama"
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    with pytest.warns(UserWarning):
+        missing = client.post(url, json={"name": "ds", "provider": "deepseek"}, headers=headers)
+    assert missing.status_code == 400 and "DEEPSEEK_API_KEY" in missing.json()["detail"]
+
+    failure.append(RuntimeError("Incorrect API key provided: typed"))
+    failed = client.post(url, json=typed, headers=headers)
+    assert failed.status_code == 502
+    assert failed.json()["detail"] == (
+        "ollama did not list models: Incorrect API key provided: <REDACTED>"
+    )

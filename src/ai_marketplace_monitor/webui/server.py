@@ -41,7 +41,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
-from ..ai import AIBackend, match_chat_prompt
+from ..ai import CLEF_MODELS, AIBackend, AIConfig, CloudflareBackend, match_chat_prompt
+from ..config import supported_ai_backends
 from ..image_matching import ImageMatcher
 from ..listing import Listing
 from ..match_store import source_hash
@@ -71,6 +72,7 @@ from .config_api import ConfigFileService
 from .config_auth import extract_credentials
 from .found_export import iter_found_csv, iter_found_rows, iter_match_rows
 from .log_handler import LogBroadcastHandler
+from .secrets_redact import MASK
 
 # Ensure the vendored toml-edit-js WASM bundle is served with the right
 # Content-Type. Python's mimetypes module learned .wasm in 3.10 but
@@ -81,6 +83,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 CHAT_MESSAGE_LIMIT = 40
 CHAT_MESSAGE_LENGTH = 20_000
 CHAT_PHOTO_LIMIT = 4
+MODEL_LIST_TIMEOUT = 15
 
 
 def _build_info() -> dict[str, Any]:
@@ -132,6 +135,8 @@ class WebUIConfig:
     rechecks: RecheckQueue | None = None
     image_matcher: ImageMatcher | None = None
     chat_backend: Callable[[str], tuple[AIBackend, Any]] | None = None
+    ai_test_backend: Callable[[str, str], tuple[AIBackend, Any, Any]] | None = None
+    saved_ai_config: Callable[[str], AIConfig | None] | None = None
 
 
 @dataclass
@@ -803,6 +808,121 @@ def create_app(
                 yield json.dumps({"error": failure}) + "\n"
 
         return StreamingResponse(reply(), media_type="application/x-ndjson")
+
+    @app.post("/api/ai/test")
+    def test_ai_backend(
+        body: Dict[str, Any],
+        _: str = Depends(require_session),
+        __: None = Depends(require_csrf),
+    ) -> Dict[str, Any]:
+        fields = ("backend", "marketplace", "listing_id", "item")
+        if (
+            body.keys() != {*fields, "photos"}
+            or not all(isinstance(body[key], str) for key in fields)
+            or type(body["photos"]) is not bool
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Supply backend, marketplace, listing_id and item names and a boolean photos flag",
+            )
+        row = next(
+            (
+                row
+                for row in require_match(body["marketplace"], body["listing_id"])
+                if row["item"] == body["item"]
+            ),
+            None,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Match not found for this search")
+        if config.ai_test_backend is None:
+            raise HTTPException(
+                status_code=503, detail="The monitor is not available for AI tests"
+            )
+        try:
+            backend, item_config, marketplace_config = config.ai_test_backend(
+                body["backend"], body["item"]
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from None
+        listing = Listing(
+            marketplace=row["marketplace"],
+            name=row["item"],
+            id=row["listing_id"],
+            title=row.get("title") or "",
+            image=row.get("image") or "",
+            price=row.get("current_price") or row.get("price") or "",
+            post_url=row.get("url") or "",
+            location=row.get("location") or "",
+            seller=row.get("seller") or "",
+            condition=row.get("condition") or "",
+            description=row.get("description") or "",
+        )
+        photos = (
+            [
+                read_photo(row["marketplace"], row["listing_id"], photo["digest"])
+                for photo in row["photos"][:CHAT_PHOTO_LIMIT]
+            ]
+            if body["photos"]
+            else []
+        )
+        trace = backend.debug(listing, item_config, marketplace_config, photos)
+        if backend.logger:
+            backend.logger.info(
+                f"[AI-Test] {backend.config.name} rated {listing.title or listing.id}: "
+                + (f"failed: {trace['error']}" if "error" in trace else f"{trace['rating']}/5")
+            )
+        return trace
+
+    @app.post("/api/ai/models")
+    def list_ai_models(
+        body: Dict[str, Any],
+        _: str = Depends(require_session),
+        __: None = Depends(require_csrf),
+    ) -> Dict[str, Any]:
+        name, provider = body.get("name"), str(body.get("provider", "")).lower()
+        if (
+            body.keys() - {"name", "provider", "api_key", "base_url"}
+            or not isinstance(name, str)
+            or provider not in supported_ai_backends
+            or any(not isinstance(body.get(key, ""), str) for key in ("api_key", "base_url"))
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Supply the AI section name, a supported provider, and optional api_key and base_url strings",
+            )
+        backend_class = supported_ai_backends[provider]
+        if issubclass(backend_class, CloudflareBackend):
+            return {"models": list(CLEF_MODELS), "checked": False}
+        saved = config.saved_ai_config(name) if config.saved_ai_config else None
+        typed_key = body.get("api_key", "").strip()
+        api_key = (
+            typed_key
+            if typed_key and typed_key != MASK
+            else (saved.api_key if saved else None)
+            or ("ollama" if provider == "ollama" else f"${{{provider.upper()}_API_KEY}}")
+        )
+        base_url = (
+            body["base_url"].strip() or None
+            if "base_url" in body
+            else (saved.base_url if saved else None)
+        )
+        ai_config = AIConfig(
+            name=name, api_key=api_key, base_url=base_url, timeout=MODEL_LIST_TIMEOUT
+        )
+        if ai_config.api_key is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No API key: paste one or set {api_key[2:-1]} for the monitor process",
+            )
+        try:
+            models = backend_class(config=ai_config).list_models()
+        except Exception as error:
+            message = str(error).replace(ai_config.api_key, MASK)[:300]
+            raise HTTPException(
+                status_code=502, detail=f"{provider} did not list models: {message}"
+            ) from None
+        return {"models": models, "checked": True}
 
     def recheck_queue() -> RecheckQueue:
         if config.rechecks is None:

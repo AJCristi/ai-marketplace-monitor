@@ -229,6 +229,14 @@ const FORM_SCHEMAS = {
     { key: "timeout", label: "Timeout (seconds)", type: "number", advanced: true },
     { key: "max_retries", label: "Max retries", type: "number", advanced: true,
       help: "Default: 10" },
+    { key: "account_id", label: "Cloudflare account ID", type: "text", advanced: true,
+      help: "Workers AI → Use REST API → Account ID. The API key is a token with Workers AI Read and Edit." },
+    { key: "comment_ai", label: "Comment AI", type: "text", advanced: true,
+      help: "Optional name of an LLM [ai.*] section that writes the comment for listings rated at least the comment minimum. Blank uses Clef's own summary." },
+    { key: "comment_min_score", label: "Comment minimum rating", type: "number", advanced: true,
+      help: "1 to 5. Default: 4." },
+    { key: "max_photos", label: "Photos per listing", type: "number", advanced: true,
+      help: "0 to 4 listing photos sent to Clef. Default: 4." },
   ],
 };
 
@@ -277,7 +285,7 @@ FORM_SCHEMAS['region.*'] = [
 ];
 for (const field of FORM_SCHEMAS['ai.*']) {
   if (field.key === 'api_key') field.help = 'Use an environment reference such as ${OPENAI_API_KEY}, or replace the saved key. Saving does not test the key.';
-  if (field.key === 'model') field.help = 'Blank uses the provider default, except Ollama which requires a model.';
+  if (field.key === 'model') field.help = 'Blank uses the provider default, except Ollama which requires a model. Cloudflare: clef-flash (default) or clef.';
 }
 for (const schema of Object.values(FORM_SCHEMAS)) {
   for (const field of schema) {
