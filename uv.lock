@@ -87,6 +87,7 @@ test = [
 ]
 typing = [
     { name = "mypy" },
+    { name = "types-requests" },
 ]
 
 [package.dev-dependencies]
@@ -141,6 +142,7 @@ requires-dist = [
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = "==2.2.1" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=5.0.0" },
     { name = "typer", specifier = ">=0.15.1,<0.28.0" },
+    { name = "types-requests", marker = "extra == 'typing'", specifier = ">=2.31.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27" },
     { name = "watchdog", specifier = ">=4.0.0" },
     { name = "watchdog", extras = ["watchmedo"], marker = "extra == 'dev'", specifier = ">=6.0.0" },
@@ -2964,6 +2966,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c5/8c/7d682431efca5fd290017663ea4588bf6f2c6aad085c7f108c5dbc316e70/typer-0.16.0.tar.gz", hash = "sha256:af377ffaee1dbe37ae9440cb4e8f11686ea5ce4e9bae01b84ae7c63b87f1dd3b", size = 102625, upload-time = "2025-05-26T14:30:31.824Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/76/42/3efaf858001d2c2913de7f354563e3a3a2f0decae3efe98427125a8f441e/typer-0.16.0-py3-none-any.whl", hash = "sha256:1f79bed11d4d02d4310e3c1b7ba594183bcedb0ac73b27a9e5f28f6fb5b98855", size = 46317, upload-time = "2025-05-26T14:30:30.523Z" },
+]
+
+[[package]]
+name = "types-requests"
+version = "2.33.0.20261006"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/57/15/9b7e2e2e7c87d01366185b198b3febc6bc0c973f2bf21a62da4ab7d3495e/types_requests-2.33.0.20261006.tar.gz", hash = "sha256:0652999e9306aea345f40732d58fa49a7f6cade6a0d74d92119c5c8d82eddaf0", size = 25316, upload-time = "2026-10-06T08:15:57.782Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4d/72/b82789207b3d360ce9f5a4372c790c52cc3dd928aeb7d4faeec652b651b2/types_requests-2.33.0.20261006-py3-none-any.whl", hash = "sha256:26cc8146505cab33cda9737991929e4144c559bebe05078ccc6998f27c4ca2c1", size = 21445, upload-time = "2026-10-06T08:15:56.658Z" },
 ]
 
 [[package]]

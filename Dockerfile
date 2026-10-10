@@ -64,19 +64,20 @@ RUN if [ ! -e /usr/share/novnc/vnc.html ] && [ -e /usr/share/novnc/vnc_lite.html
 
 WORKDIR /app
 
-# Install dependencies and Chromium from the package metadata alone, so this layer
-# stays cached when only application source changes. The empty package is a
-# placeholder that lets pip resolve dependencies before src is copied.
-COPY pyproject.toml README.md ./
-RUN mkdir -p src/ai_marketplace_monitor \
-    && touch src/ai_marketplace_monitor/__init__.py \
-    && pip install . \
-    && pip uninstall -y ai-marketplace-monitor \
-    && rm -rf src \
+COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /uvx /bin/
+
+ENV UV_NO_CACHE=1 \
+    UV_PYTHON_DOWNLOADS=never \
+    PATH="/app/.venv/bin:${PATH}"
+
+# Install locked dependencies and Chromium from the project metadata alone, so this
+# layer stays cached when only application source changes.
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --locked --no-dev --no-install-project \
     && playwright install --with-deps chromium
 
 COPY src ./src
-RUN pip install --no-deps .
+RUN uv sync --locked --no-dev --no-editable
 
 # Embed the immutable source revision; the installed package has no .git directory.
 ARG AIMM_BUILD_SHA

@@ -43,17 +43,22 @@ One of more sections to list the AI agent that can be used to judge if listings 
 | `model`       | Optional    | String   | Language model to be used.                                 |
 | `max_retries` | Optional    | Integer  | Max retry attempts if connection fails. Default to 10.     |
 | `timeout`     | Optional    | Integer  | Timeout (in seconds) waiting for response from AI service. |
+| `account_id`  | Cloudflare  | String   | Cloudflare account ID for Workers AI.                      |
+| `comment_ai`  | Cloudflare  | String   | LLM `[ai.*]` section that writes comments for good matches. |
+| `comment_min_score` | Cloudflare | Integer | Lowest rating that gets an LLM comment. Default to 4.   |
+| `max_photos`  | Cloudflare  | Integer  | Listing photos sent to Clef, 0 to 4. Default to 4.         |
 
 Note that:
 
 1. `provider` can be [OpenAI](https://openai.com/),
-   [DeepSeek](https://www.deepseek.com/), [Gemini](https://ai.google.dev/), [Anthropic](https://www.anthropic.com/), or [Ollama](https://ollama.com/). The name of the ai service will be used if this option is not specified so `OpenAI` will be used for section `ai.openai`.
+   [DeepSeek](https://www.deepseek.com/), [Gemini](https://ai.google.dev/), [Anthropic](https://www.anthropic.com/), [Ollama](https://ollama.com/), or [Cloudflare](https://developers.cloudflare.com/workers-ai/models/clef-flash/). The name of the ai service will be used if this option is not specified so `OpenAI` will be used for section `ai.openai`.
 2. [OpenAI](https://openai.com/), [DeepSeek](https://www.deepseek.com/), and [Gemini](https://ai.google.dev/) models sets default `base_url` and `model` for these providers.
 3. [Anthropic](https://www.anthropic.com/) uses the Anthropic SDK directly (not OpenAI-compatible). The default model is `claude-sonnet-4-20250514`. An `api_key` is required.
 4. [Gemini](https://ai.google.dev/) is accessed through Google's OpenAI-compatible endpoint. The default model is `gemini-2.5-flash`. An `api_key` is required and can be obtained from [Google AI Studio](https://aistudio.google.com/apikey).
 5. Ollama models require `base_url`. A default model is set to `deepseek-r1:14b`, which seems to be good enough for this application. You can of course try [other models](https://ollama.com/library) by setting the `model` option.
-6. Although only five providers are directly supported, you can use any other service provider with `OpenAI`-compatible API using customized `base_url`, `model`, and `api_key`.
+6. Although only six providers are directly supported, you can use any other service provider with `OpenAI`-compatible API using customized `base_url`, `model`, and `api_key`.
 7. You can use option `ai` to list the AI services for particular marketplaces or items.
+8. Cloudflare rates listings with the Clef decision models (`clef-flash` by default, or `clef`) instead of a chat model. It needs `account_id` and an `api_key` token with Workers AI Read and Edit permissions. Clef returns a rating and probabilities but no text, so the comment summarises its checks unless `comment_ai` names an LLM section to write one for listings rated at least `comment_min_score`. Chat about a match still uses an LLM section. See the [configuration guide](configuration-guide.rst) for an example.
 
 A typical section for OpenAI looks like
 

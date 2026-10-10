@@ -1,6 +1,8 @@
 import initToml, {parse, edit} from './vendor/toml-edit-js/shims.js';
 import {FORM_SCHEMAS, BUILT_IN_REGIONS} from './fields.js';
 import {createMatchesView, relativeDate} from './matches.js';
+import {createAiTestView} from './ai-test.js';
+import {aiProvider, aiUsageText, bindEndpointForm, endpointFieldHtml, endpointStatusHtml, listModels, resetEndpointForm} from './ai-endpoints.js';
 import {list, own, filled, mergeConfig, itemValue, marketplaceFor, scheduleLabel, CHANNELS, userChannels, resolvedUser, available, matchRecord, mergeRecords, searchActivity, searchStatusLabel, safeUrl, renameSection, esc} from './console-model.js';
 
 const $ = selector => document.querySelector(selector);
@@ -15,7 +17,8 @@ const state = {
   connected:false, announceCount:0, disconnectedAt:null, following:true, pending:0, frozen:[], expanded:new Set(),
   credentials:null, credentialsId:0, monitorIssue:null, incidentId:0, loginId:0, loginUntil:0, feedTimer:null, announceTimer:null, pollBusy:false,
 };
-let matchesView;
+let matchesView, aiTestView;
+const aiStatus = new Map();
 let theme=localStorage.getItem('aimm-theme')||'system';
 function applyTheme(){document.querySelectorAll('.c').forEach(el=>{el.classList.toggle('dark',theme==='dark');el.classList.toggle('light',theme==='light');});$('#theme').setAttribute('aria-label','Theme: '+theme);$('#theme').title='Theme: '+theme;}
 $('#theme').onclick=()=>{theme=['system','light','dark'][(['system','light','dark'].indexOf(theme)+1)%3];localStorage.setItem('aimm-theme',theme);applyTheme();};applyTheme();
@@ -236,7 +239,7 @@ function renderSidebar() {
     $('#sidebar').dataset.signature = signature;
     if (matches) $('#sidebar').innerHTML = matchesView.sidebarHtml();
     else if (settings) {
-      const rows = [['marketplace','Marketplace',Object.keys(state.config.marketplace || {}).join(' · ')],['ai','AI providers',Object.keys(state.config.ai || {}).join(' · ') || 'None'],['notifications','Notifications',Object.keys(state.config.user || {}).join(' · ')],['more','Image matching and more','Image matching, network and locale options'],['config','config.toml','Edit the file directly']];
+      const rows = [['marketplace','Marketplace',Object.keys(state.config.marketplace || {}).join(' · ')],['ai','AI providers',Object.keys(state.config.ai || {}).join(' · ') || 'None'],['ai-test','AI test','Try a backend on a saved match'],['notifications','Notifications',Object.keys(state.config.user || {}).join(' · ')],['more','Image matching and more','Image matching, network and locale options'],['config','config.toml','Edit the file directly']];
       $('#sidebar').innerHTML = '<div class="sh">Settings</div>' + rows.map(([key,title,summary]) => `<a class="it ${parts[1]===key?'on':''}" href="#/settings/${key}" ${parts[1]===key?'aria-current="page"':''}><div class="t">${title}</div><div class="s">${esc(summary)}</div></a>`).join('');
     } else {
       $('#sidebar').innerHTML = `<a class="it ${parts[1]==='all'?'on':''}" href="#/monitor/all"><span class="b">All activity</span><span class="m d" style="float:right">last ${state.capacity.toLocaleString()} events</span></a><div class="sh">Saved searches · ${Object.keys(state.config.item || {}).length}</div>` + Object.entries(state.config.item || {}).map(([name,item]) => `<a class="it ${parts[2]===name || decodeName(parts[2]||'')===name ? 'on':''}" href="${itemRoute(name)}"><div class="row sb"><span class="t m ${item.enabled===false?'d':''}">${esc(name)}</span><span data-item-badge="${esc(name)}" class="m xs d">${item.enabled===false?'disabled':state.form?.name===name?'editing':''}</span></div><div class="s">${esc(searchSummary(name))}</div><div class="s" data-item-last-searched="${esc(name)}">${esc(lastSearchedLabel(name))}</div></a>`).join('') + manualMatchesSidebarHtml() + '<p class="sidebar-note">* marks a Marketplace or built-in default. Earlier files also contribute values. “New” counts come from recent activity.</p>';
@@ -547,7 +550,8 @@ function fieldHtml(field) {
     let options=field.options;
     if (filled(value) && !options.some(option=>String(option.value)===String(value))) options=[{value,label:String(value)},...options];
     widget=`<span class="sel"><select id="${id}" data-value="${key}">${optionHtml(options,value)}</select></span>`;
-  } else if (type==='textarea') widget=`<textarea class="ta" id="${id}" data-value="${key}" rows="${key==='description'?3:2}">${esc(Array.isArray(value)?value.join('\n'):value)}</textarea>`;
+  } else if (form.prefix==='ai' && ['model','base_url'].includes(key)) widget=endpointFieldHtml({key,id,value:labelValue(value===undefined?'':value),provider:aiProvider({provider:form.changes.provider||form.fields.provider},form.name)});
+  else if (type==='textarea') widget=`<textarea class="ta" id="${id}" data-value="${key}" rows="${key==='description'?3:2}">${esc(Array.isArray(value)?value.join('\n'):value)}</textarea>`;
   else widget=`<input class="in ${type==='number'?'':'mono'}" id="${id}" data-value="${key}" type="${type==='number'?'number':'text'}" ${type==='number'?'step="any"':''} value="${esc(labelValue(value===undefined?'':value))}">`;
   const inheritable= ['item','marketplace'].includes(form.prefix) && !['search_phrases','description','enabled','username','password','login_wait_time','language'].includes(key);
   const mode=own(form.changes,key)?form.changes[key]!==null:own(form.fields,key);
@@ -599,7 +603,7 @@ function formHtml() {
     const primary=['search_city','search_region','radius','currency','search_interval','max_search_interval','ai','rating','notify'];
     content=`<section class="sect"><h2>Facebook account</h2>${nameHtml}${fieldsHtml(account)}<p class="hint">These credentials also protect remote dashboard access. Dashboard sign-in uses the credentials present when the process started; restart it after changing them.</p></section><section class="sect"><h2>Where to search and search defaults</h2>${fieldsHtml(primary)}<p class="hint">Regions replace cities. These defaults apply unless a saved search supplies its own value.</p></section><details><summary class="sm">More defaults</summary><div class="group-fields">${fieldsHtml(schemaFor('marketplace').filter(field=>![...account,...primary].includes(field.key)).map(field=>field.key))}</div></details>`;
   } else if (form.prefix==='ai') {
-    content=`<section class="sect"><h2>Provider</h2>${nameHtml}<div class="f"><label class="l" for="provider-choice">Provider</label><span class="sel"><select id="provider-choice">${['openai','anthropic','deepseek','gemini','ollama'].map(provider=>`<option value="${provider}" ${(form.fields.provider||form.name).toLowerCase()===provider?'selected':''}>${provider==='openai'?'OpenAI':provider[0].toUpperCase()+provider.slice(1)}</option>`).join('')}</select></span></div>${fieldsHtml(['model','api_key','enabled'])}<p class="hint">For a new provider, leaving the key blank uses its environment variable (for example OPENAI_API_KEY). Use Replace to paste a value or reference. Saving does not test the key.</p></section><details><summary class="sm">Connection</summary><div class="group-fields">${fieldsHtml(['base_url','timeout','max_retries'])}</div></details>`;
+    content=`<section class="sect"><h2>Provider</h2>${nameHtml}<div class="f"><label class="l" for="provider-choice">Provider</label><span class="sel"><select id="provider-choice">${['openai','anthropic','deepseek','gemini','ollama','cloudflare'].map(provider=>`<option value="${provider}" ${(form.fields.provider||form.name).toLowerCase()===provider?'selected':''}>${provider==='openai'?'OpenAI':provider[0].toUpperCase()+provider.slice(1)}</option>`).join('')}</select></span></div>${fieldsHtml(['model','api_key','enabled'])}<p class="hint">For a new provider, leaving the key blank uses its environment variable (for example OPENAI_API_KEY). Use Replace to paste a value or reference. Saving does not test the key.</p></section><details><summary class="sm">Connection</summary><div class="group-fields">${fieldsHtml(['base_url','timeout','max_retries'])}</div></details><details id="cloudflare-fields" ${(form.fields.provider||form.name).toLowerCase()==='cloudflare'?'open':'hidden'}><summary class="sm">Cloudflare Clef</summary><div class="group-fields">${fieldsHtml(['account_id','comment_ai','comment_min_score','max_photos'])}</div></details>`;
   } else if (['user','notification'].includes(form.prefix)) {
     const effective=form.new?form.fields:form.prefix==='user'?resolvedUser(state.config,form.name):state.config.notification?.[form.name]||{};
     const selected=Object.keys(CHANNELS).filter(channel=>CHANNELS[channel].some(key=>filled(effective[key])));
@@ -670,7 +674,8 @@ function bindForm() {
   document.querySelectorAll('[name="where"]').forEach(radio=>radio.onchange=()=>{ $('#city-editor').hidden=radio.value!=='cities';$('#region-editor').hidden=radio.value!=='region';updateLocation();});
   $('#add-city')?.addEventListener('click',()=>{$('#city-rows').insertAdjacentHTML('beforeend',cityRow('','',''));bindCityRows();updateLocation();});
   bindCityRows();$('#region-editor')?.addEventListener('change',updateLocation);
-  $('#provider-choice')?.addEventListener('change',event=>setChange('provider',event.target.value));
+  $('#provider-choice')?.addEventListener('change',event=>{setChange('provider',event.target.value);resetEndpointForm(document,event.target.value);const cloudflare=$('#cloudflare-fields');if(cloudflare){cloudflare.hidden=event.target.value!=='cloudflare';cloudflare.open=!cloudflare.hidden;}});
+  if(state.form.prefix==='ai')bindEndpointForm({root:document,json,form:state.form,onModels:(name,result)=>aiStatus.set(name,result)});
   document.querySelectorAll('[data-channel]').forEach(input=>input.onchange=()=>{
     if(state.form.prefix==='notification')document.querySelectorAll('[data-channel-fields]').forEach(section=>section.hidden=section.dataset.channelFields!==input.dataset.channel);
     else document.querySelector(`[data-channel-fields="${input.dataset.channel}"]`).hidden=!input.checked;
@@ -850,6 +855,7 @@ async function deleteSection(prefix,name) {
 function renderSettings() {
   const {parts,query}=routeParts();const section=parts[1]||'marketplace';
   if(section==='config'){renderConfig();return;}
+  if(section==='ai-test'){aiTestView||=createAiTestView({json,pageHeader,isActive:()=>routeParts().parts[0]==='settings'&&routeParts().parts[1]==='ai-test'});aiTestView.render($('#pane'),Object.entries(state.config.ai||{}).filter(([,config])=>config.enabled!==false).map(([name])=>name));return;}
   if(section==='marketplace'){
     const names=Object.keys(state.config.marketplace||{});const name=query.get('edit')||names[0]||'facebook';
     const isNew=query.has('new');
@@ -870,12 +876,20 @@ function renderSettings() {
     const channels=section==='ai'?null:userChannels(state.config,name,state.context.environment);
     const summary=section==='ai'?`${config.provider||name} · ${config.model||'provider default'} · ${config.api_key==='<REDACTED>'?'key saved (hidden)':typeof config.api_key==='string'&&config.api_key.startsWith('${')?'key from '+config.api_key.slice(2,-1):'key not configured'}`:channels.length?channels.join(' · ')+' · configured':'No channel set up';
     const failure=section==='notifications'?state.records.findLast(record=>record.levelno>=40&&record.message.endsWith(`Failed to push note to ${name}.`)):null;
-    return `<div class="settings-row"><div class="row sb"><div><div class="m b">${esc(name)} ${(section==='ai'?config:resolvedUser(state.config,name)).enabled===false?'<span class="tag">disabled</span>':''}</div><p class="m xs ${channels&&!channels.length?'warn':'d'}">${esc(summary)}</p>${failure?`<p class="err xs">Last send failed ${time(failure.time)}</p>`:''}</div><a class="btn sm" href="#/settings/${section}?edit=${encodeURIComponent(name)}">Edit</a></div></div>${query.get('edit')===name&&prefix!=='notification'?'<div id="settings-form-host"></div>':''}`;
+    return `<div class="settings-row"><div class="row sb"><div><div class="m b">${esc(name)} ${(section==='ai'?config:resolvedUser(state.config,name)).enabled===false?'<span class="tag">disabled</span>':''}</div><p class="m xs ${channels&&!channels.length?'warn':'d'}">${esc(summary)}</p>${section==='ai'?`<p class="xs d">${esc(aiUsageText(state.config,name))}</p><p class="xs" data-ai-status="${esc(name)}">${endpointStatusHtml(aiStatus.get(name))}</p>`:''}${failure?`<p class="err xs">Last send failed ${time(failure.time)}</p>`:''}</div><div class="row">${section==='ai'?`<button class="btn q sm" type="button" data-ai-check="${esc(name)}">Check</button>`:''}<a class="btn sm" href="#/settings/${section}?edit=${encodeURIComponent(name)}">Edit</a></div></div></div>${query.get('edit')===name&&prefix!=='notification'?'<div id="settings-form-host"></div>':''}`;
   }).join('')}</div>${section==='notifications'?`<section class="sect"><h2>Shared channel settings</h2><p class="hint">Gmail SMTP requires an app password. Delivery failures are shown against the user when the activity names one.</p><p class="hint">Applied to every user unless notify_with selects a different set. Shared values overwrite matching user fields.</p>${Object.keys(state.config.notification||{}).map(name=>`<div class="row sb"><span class="m b">${esc(name)}</span><a class="btn sm" href="#/settings/notifications?type=notification&edit=${encodeURIComponent(name)}">Edit</a></div>`).join('')}<a class="btn sm" href="#/settings/notifications?type=notification&new=1&edit=shared_email">+ Add shared settings</a></section>`:''}</div>`;
+  for(const button of document.querySelectorAll('[data-ai-check]'))button.onclick=()=>checkAiEndpoint(button.dataset.aiCheck);
   if(query.has('new')||prefix==='notification'){
     const host=document.createElement('div');host.id='settings-form-host';$('#pane').appendChild(host);
   }
   if(query.has('edit'))mountForm(prefix,query.get('edit'),query.has('new'),{},false);
+}
+async function checkAiEndpoint(name) {
+  const show=()=>{const target=[...document.querySelectorAll('[data-ai-status]')].find(element=>element.dataset.aiStatus===name);if(target)target.innerHTML=endpointStatusHtml(aiStatus.get(name));};
+  aiStatus.set(name,{busy:true});show();
+  try{aiStatus.set(name,await listModels(json,{name,provider:aiProvider(state.config.ai?.[name],name)}));}
+  catch(error){aiStatus.set(name,{error:error.message});}
+  show();
 }
 function renderConfig() {
   const sources=state.context.sources.map(source=>esc(source.path)+(source.editable?' (editable)':' (read-only)')).join(' · ');

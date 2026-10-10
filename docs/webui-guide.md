@@ -406,7 +406,7 @@ for dashboard sign-in.
 
 *Figure 9. Saving validates configuration, not AI-provider connectivity.*
 
-The selector offers OpenAI, Anthropic, DeepSeek, Gemini, and Ollama. A new non-Ollama
+The selector offers OpenAI, Anthropic, DeepSeek, Gemini, Ollama, and Cloudflare. A new non-Ollama
 provider with no pasted key uses an explicit environment reference such as
 `${OPENAI_API_KEY}`. Set it in the monitor process's environment before startup.
 A not-set label means the variable is unavailable to that process; the browser
@@ -424,6 +424,23 @@ Inside a container, localhost refers to that container. Connection fields includ
 Base URL, Timeout, and Max retries. The UI does not download models or start an
 external AI service. Disable a provider to retain its configuration while excluding
 it from the default enabled-provider selection.
+
+Cloudflare shows a **Cloudflare Clef** group for the account ID, the optional comment
+AI section, the comment minimum rating, and photos per listing.
+
+Each provider row shows which marketplaces, searches, and Clef comment duties use it.
+**Check** lists the provider's models with the saved key and base URL and reports
+`Connected · N models` or the provider's error; Cloudflare shows its fixed Clef models,
+so use AI test to confirm a Cloudflare token. In the form, Model and Base URL show the
+provider default as a hint, and **Fetch models** fills a picker from the endpoint
+using a key or base URL you have typed but not yet saved, or the saved values. Keys
+stay on the server and are hidden in error messages.
+
+**Settings → AI test** runs one enabled provider on a saved match without caching the
+result or notifying anyone. It shows the rating, the comment and which provider wrote
+it, latency, tokens, each Clef decision with its probabilities, a timed step log, and
+the raw request and response with image data replaced by sizes. A test makes a real,
+billed provider call.
 
 ## 13. Set up notification users
 

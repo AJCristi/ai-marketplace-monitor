@@ -18,7 +18,7 @@ Paths below are relative to `src/ai_marketplace_monitor/`.
 | Orchestration | `monitor.py` | Synchronous Playwright lifecycle, scheduling, config reload, search/evaluate/notify flow |
 | Configuration | `config.py`, `utils.py`, `config.toml` | TOML loading and merging, config dataclasses, validation, packaged defaults |
 | Marketplace | `marketplace.py`, `facebook.py`, `listing.py` | Base interfaces, Facebook search and parsing, listing data |
-| AI | `ai.py` | Provider configs, prompts, evaluation, response handling |
+| AI | `ai.py`, `webui/static/ai-test.js`, `webui/static/ai-endpoints.js` | Provider configs, prompts, evaluation, response handling; Cloudflare Clef decisions; the Settings → AI test dry run (`debug`); model listing (`list_models`, `/api/ai/models`) and provider defaults mirrored in `ai-endpoints.js` |
 | Notifications | `user.py`, `notification.py`, provider modules | User routing, notification status and delivery; providers include email, Telegram, ntfy, Pushbullet, and Pushover |
 | Shared state | `utils.py`, `region.py` | Disk cache, counters, events, waiting, keyword matching, regions |
 | HTTP and WebSocket API | `webui/server.py` | FastAPI routes, static assets, auth dependencies, log streaming, CSV export |
