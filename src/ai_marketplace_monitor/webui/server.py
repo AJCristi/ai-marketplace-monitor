@@ -8,6 +8,7 @@ from the main thread to that loop via ``loop.call_soon_threadsafe``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import mimetypes
 import os
@@ -21,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Any, Callable, Dict, List, Literal
+from typing import Annotated, Any, Callable, Dict, List, Literal, TypeGuard
 
 import uvicorn
 from fastapi import (
@@ -40,6 +41,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
+from ..ai import AIBackend, match_chat_prompt
 from ..image_matching import ImageMatcher
 from ..listing import Listing
 from ..match_store import source_hash
@@ -76,6 +78,9 @@ from .log_handler import LogBroadcastHandler
 mimetypes.add_type("application/wasm", ".wasm")
 
 STATIC_DIR = Path(__file__).parent / "static"
+CHAT_MESSAGE_LIMIT = 40
+CHAT_MESSAGE_LENGTH = 20_000
+CHAT_PHOTO_LIMIT = 4
 
 
 def _build_info() -> dict[str, Any]:
@@ -126,6 +131,7 @@ class WebUIConfig:
     search_progress: Callable[[], Dict[str, Any]] | None = None
     rechecks: RecheckQueue | None = None
     image_matcher: ImageMatcher | None = None
+    chat_backend: Callable[[str], tuple[AIBackend, Any]] | None = None
 
 
 @dataclass
@@ -745,6 +751,59 @@ def create_app(
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from None
 
+    @app.post("/api/matches/{marketplace}/{listing_id}/chat")
+    def chat_about_match(
+        marketplace: str,
+        listing_id: str,
+        body: Dict[str, Any],
+        _: str = Depends(require_session),
+        __: None = Depends(require_csrf),
+    ) -> StreamingResponse:
+        item, messages, include_photos = body.get("item"), body.get("messages"), body.get("photos")
+        if (
+            body.keys() - {"item", "messages", "photos"}
+            or not isinstance(item, str)
+            or type(include_photos) is not bool
+            or not valid_chat_messages(messages)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Supply the search name, a boolean photos flag, and alternating messages ending with a question",
+            )
+        row = next(
+            (row for row in require_match(marketplace, listing_id) if row["item"] == item), None
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Match not found for this search")
+        if config.chat_backend is None:
+            raise HTTPException(status_code=503, detail="The monitor is not available for chat")
+        try:
+            backend, item_config = config.chat_backend(item)
+        except ValueError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from None
+        photos = (
+            [
+                read_photo(marketplace, listing_id, photo["digest"])
+                for photo in row["photos"][:CHAT_PHOTO_LIMIT]
+            ]
+            if include_photos
+            else []
+        )
+        system = match_chat_prompt(row, item_config)
+
+        # Sync generator: Starlette iterates it in a threadpool, off the event loop.
+        def reply() -> Any:
+            try:
+                for text in backend.chat(system, messages, photos):
+                    yield json.dumps({"text": text}) + "\n"
+            except Exception as error:
+                if backend.logger:
+                    backend.logger.error(f"[AI] {backend.config.name} chat failed: {error}")
+                failure = f"{backend.config.name} failed to answer. See the log."
+                yield json.dumps({"error": failure}) + "\n"
+
+        return StreamingResponse(reply(), media_type="application/x-ndjson")
+
     def recheck_queue() -> RecheckQueue:
         if config.rechecks is None:
             raise HTTPException(
@@ -963,3 +1022,20 @@ def start_webui(
     server = WebUIServer(config, state, config_service)
     server.start()
     return server, info
+
+
+def valid_chat_messages(messages: Any) -> TypeGuard[list[dict[str, str]]]:
+    """Alternating user/assistant turns that start and end with the user."""
+    return (
+        isinstance(messages, list)
+        and 1 <= len(messages) <= CHAT_MESSAGE_LIMIT
+        and all(
+            isinstance(message, dict)
+            and message.keys() == {"role", "content"}
+            and message["role"] == ("user" if index % 2 == 0 else "assistant")
+            and isinstance(message["content"], str)
+            and 0 < len(message["content"].strip()) <= CHAT_MESSAGE_LENGTH
+            for index, message in enumerate(messages)
+        )
+        and messages[-1]["role"] == "user"
+    )

@@ -3,6 +3,7 @@
 import csv
 import dataclasses
 import io
+import json
 import sqlite3
 import threading
 import time
@@ -18,7 +19,7 @@ from diskcache import Cache  # type: ignore
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from ai_marketplace_monitor.ai import AIResponse, AIUnavailableError
+from ai_marketplace_monitor.ai import AIResponse, AIUnavailableError, OllamaBackend, OllamaConfig
 from ai_marketplace_monitor.facebook import FacebookMarketplace
 from ai_marketplace_monitor.listing import Listing
 from ai_marketplace_monitor.matches import (
@@ -1292,3 +1293,98 @@ def test_due_search_precedes_background_work(
     with pytest.raises(RuntimeError, match="safe point reached"):
         monitor.start_monitor()
     assert events == ["initial search", "due search", work_kind]
+
+
+def test_chat_uses_the_search_ai_in_a_fresh_backend() -> None:
+    monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.logger = None
+    first, second = (
+        OllamaBackend(OllamaConfig(name=name, base_url="http://localhost:1/v1", model="m"))
+        for name in ("local", "other")
+    )
+    item = SimpleNamespace(ai=["other"], marketplace=None)
+    monitor.config = SimpleNamespace(
+        item={"test": item}, marketplace={"facebook": SimpleNamespace(ai=None)}
+    )
+    monitor.ai_agents = [first, second]
+    backend, item_config = monitor.chat_backend("test")
+    assert backend.config is second.config and backend is not second and item_config is item
+    backend, item_config = monitor.chat_backend("")
+    assert backend.config is first.config and item_config is None
+    monitor.config.marketplace["facebook"].ai = ["missing"]
+    with pytest.raises(ValueError, match="No enabled AI"):
+        monitor.chat_backend("")
+
+
+def test_chat_api_streams_match_context_and_hides_provider_errors(
+    match_cache: Cache, listing: Listing, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("ai_marketplace_monitor.webui.server.cache", match_cache)
+    record_match(match_cache, listing, "test", AIResponse(4, "good"))
+    with library(match_cache) as store:
+        store.save_photo("facebook", listing.id, "source", "a" * 64, b"synthetic photo")
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[marketplace.facebook]\nsearch_city="houston"\n[item.test]\nsearch_phrases="camera"\n[user.me]\n',
+        encoding="utf-8",
+    )
+    state = AuthState()
+    state.exposed = True
+    state.auth = AuthConfig("test", hash_password("synthetic-password"), "synthetic-secret")
+    config = WebUIConfig(config_files=[path])
+    client = TestClient(
+        create_app(config, state, ConfigFileService([path]), LogBroadcastHandler())
+    )
+    url = f"/api/matches/facebook/{listing.id}/chat"
+    question = [{"role": "user", "content": "Is the price fair?"}]
+    body = {"item": "test", "messages": question, "photos": True}
+    calls: list[Any] = []
+    backend = SimpleNamespace(config=SimpleNamespace(name="fake"), logger=Mock(), fail=False)
+
+    def chat(system: str, messages: list[dict[str, str]], photos: list[bytes]) -> Any:
+        calls.append((system, messages, photos))
+        yield "Fair "
+        if backend.fail:
+            raise RuntimeError("synthetic outage")
+        yield "price."
+
+    backend.chat = chat
+    assert client.post(url, json=body).status_code == 401
+    client.post("/api/login", data={"username": "test", "password": "synthetic-password"})
+    assert client.post(url, json=body).status_code == 403
+    headers = {CSRF_HEADER: client.cookies["aimm_csrf"]}
+    for invalid in (
+        {**body, "photos": "yes"},
+        {**body, "extra": 1},
+        {**body, "messages": []},
+        {**body, "messages": [*question, {"role": "assistant", "content": "Yes"}]},
+        {**body, "messages": [*question, *question]},
+        {**body, "messages": [{"role": "user", "content": " "}]},
+    ):
+        assert client.post(url, json=invalid, headers=headers).status_code == 400
+    missing = f"/api/matches/facebook/{listing.id}0/chat"
+    assert client.post(missing, json=body, headers=headers).status_code == 404
+    assert client.post(url, json={**body, "item": "other"}, headers=headers).status_code == 404
+    assert client.post(url, json=body, headers=headers).status_code == 503
+    config.chat_backend = Mock(side_effect=ValueError("No enabled AI service"))
+    unavailable = client.post(url, json=body, headers=headers)
+    assert unavailable.status_code == 503 and "No enabled AI" in unavailable.json()["detail"]
+    config.chat_backend = Mock(return_value=(backend, None))
+    reply = client.post(url, json=body, headers=headers)
+    assert reply.headers["content-type"] == "application/x-ndjson"
+    assert [json.loads(line) for line in reply.text.splitlines()] == [
+        {"text": "Fair "},
+        {"text": "price."},
+    ]
+    system, messages, photos = calls[-1]
+    assert listing.title in system and messages == question and photos == [b"synthetic photo"]
+    config.chat_backend.assert_called_with("test")
+    client.post(url, json={**body, "photos": False}, headers=headers)
+    assert calls[-1][2] == []
+    backend.fail = True
+    failed = client.post(url, json=body, headers=headers).text.splitlines()
+    assert [json.loads(line) for line in failed] == [
+        {"text": "Fair "},
+        {"error": "fake failed to answer. See the log."},
+    ]
+    assert "synthetic outage" in backend.logger.error.call_args.args[0]

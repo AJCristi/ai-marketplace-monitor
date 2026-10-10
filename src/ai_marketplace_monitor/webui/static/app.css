@@ -134,6 +134,10 @@
 .match-big-price{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px}.match-big-price strong{font-size:24px;font-weight:600;line-height:1.15}
 .match-comment{font-size:14px;line-height:1.55}
 .match-description{white-space:pre-wrap;font-size:14px;line-height:1.55}
+.chat-log{display:flex;flex-direction:column;gap:10px;max-height:420px;overflow-y:auto}
+.chat-msg{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border-radius:8px;background:var(--s2)}.chat-msg.user{background:var(--accs);margin-left:15%}.chat-msg.assistant{margin-right:15%}
+.chat-msg p{white-space:pre-wrap;font-size:14px;line-height:1.55}
+.chat-form{display:flex;flex-direction:column;gap:8px}
 .match-facts{display:grid;grid-template-columns:110px minmax(0,1fr);gap:5px 12px;font-size:13px}.match-facts dt{color:var(--fg3)}
 .match-decisions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.match-decisions .btn{width:100%;padding:0 6px}
 .match-links{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px}
