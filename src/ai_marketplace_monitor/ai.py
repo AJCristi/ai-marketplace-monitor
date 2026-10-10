@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from logging import Logger
 from typing import Any, Callable, ClassVar, Generic, Iterator, Optional, Type, TypeVar
+from urllib.parse import urlparse
 
 import requests
 from diskcache import Cache  # type: ignore
@@ -295,18 +296,21 @@ def buyer_search_block(item_config: ItemConfig) -> str:
 
 
 def listing_block(listing: dict[str, Any]) -> str:
-    """Seller-written fields with the description capped; empty fields are left out."""
-    details = {**listing, "Description": capped_description(listing.get("Description") or "")}
+    """Seller-written fields, escaped; empty fields are left out."""
     lines = [
-        f"{label}: {escape_seller_text(str(value))}" for label, value in details.items() if value
+        f"{label}: {escape_seller_text(str(value))}" for label, value in listing.items() if value
     ]
     return "<listing>\n" + "\n".join(lines) + "\n</listing>"
 
 
+def is_retryable_error(error: Exception) -> bool:
+    """A rejected request, such as an unsupported parameter, fails the same way on every attempt."""
+    status = getattr(error, "status_code", None)
+    return not (isinstance(status, int) and 400 <= status < 500 and status not in (408, 429))
+
+
 def parse_rating_answer(answer: str) -> tuple[int, str] | None:
     """Find "Rating <1-5>: <summary>" in a free-text answer; None when it is missing."""
-    if not answer.strip() or re.search(r"Rating[^1-5]*[1-5]", answer, re.DOTALL) is None:
-        return None
     lines = answer.split("\n")
     score: int = 1
     comment = ""
@@ -321,8 +325,10 @@ def parse_rating_answer(answer: str) -> tuple[int, str] | None:
         if rating_line is not None:
             # if the AI puts comment after Rating, we need to include them
             comment += " " + line
+    if rating_line is None:
+        return None
     # if the AI puts the rating at the end, let us try to use the line before the Rating line
-    if len(comment.strip()) < 5 and rating_line is not None and rating_line > 0:
+    if len(comment.strip()) < 5 and rating_line > 0:
         comment = lines[rating_line - 1]
     return score, " ".join(comment.split())
 
@@ -451,7 +457,7 @@ class AIBackend(Generic[TAIConfig]):
                         "Price": listing.price,
                         "Condition": listing.condition,
                         "Location": listing.location,
-                        "Description": listing.description,
+                        "Description": capped_description(listing.description),
                     }
                 ),
             ]
@@ -547,8 +553,6 @@ class OpenAIBackend(AIBackend):
     default_model = "gpt-4o"
     # the default is f"https://api.openai.com/v1"
     base_url: str | None = None
-    # OpenAI's reasoning models reject max_tokens; other compatible APIs document only max_tokens.
-    max_tokens_param = "max_completion_tokens"
 
     @classmethod
     def get_config(cls: Type["OpenAIBackend"], **kwargs: Any) -> OpenAIConfig:
@@ -557,7 +561,10 @@ class OpenAIBackend(AIBackend):
     def reply_options(self: "OpenAIBackend", max_tokens: int | None) -> dict[str, Any]:
         options: dict[str, Any] = {}
         if max_tokens:
-            options[self.max_tokens_param] = max_tokens
+            url = self.config.base_url or self.base_url
+            # OpenAI's reasoning models reject max_tokens; other compatible APIs document only max_tokens.
+            uses_openai_api = url is None or urlparse(url).hostname == "api.openai.com"
+            options["max_completion_tokens" if uses_openai_api else "max_tokens"] = max_tokens
         if self.config.reasoning_effort:
             options["reasoning_effort"] = self.config.reasoning_effort
         return options
@@ -596,7 +603,7 @@ class OpenAIBackend(AIBackend):
         self.connect()
 
         retries = 0
-        while retries < self.config.max_retries:
+        while True:
             self.connect()
             assert self.client is not None
             try:
@@ -618,6 +625,8 @@ class OpenAIBackend(AIBackend):
                         f"""{hilight("[AI-Error]", "fail")} {self.config.name} failed to evaluate {hilight(listing.title)}: {e}"""
                     )
                 retries += 1
+                if retries >= self.config.max_retries or not is_retryable_error(e):
+                    raise
                 # try to initiate a connection
                 self.client = None
                 time.sleep(5)
@@ -677,7 +686,6 @@ class OpenAIBackend(AIBackend):
 class DeepSeekBackend(OpenAIBackend):
     default_model = "deepseek-chat"
     base_url = "https://api.deepseek.com"
-    max_tokens_param = "max_tokens"
 
     @classmethod
     def get_config(cls: Type["DeepSeekBackend"], **kwargs: Any) -> DeekSeekConfig:
@@ -689,7 +697,6 @@ class GeminiBackend(OpenAIBackend):
 
     default_model = "gemini-2.5-flash"
     base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-    max_tokens_param = "max_tokens"
 
     @classmethod
     def get_config(cls: Type["GeminiBackend"], **kwargs: Any) -> GeminiConfig:
@@ -702,7 +709,6 @@ class GeminiBackend(OpenAIBackend):
 
 class OllamaBackend(OpenAIBackend):
     default_model = "deepseek-r1:14b"
-    max_tokens_param = "max_tokens"
 
     @classmethod
     def get_config(cls: Type["OllamaBackend"], **kwargs: Any) -> OllamaConfig:
@@ -746,7 +752,7 @@ class AnthropicBackend(AIBackend):
         self.connect()
 
         retries = 0
-        while retries < self.config.max_retries:
+        while True:
             self.connect()
             assert self.client is not None
             try:
@@ -767,6 +773,8 @@ class AnthropicBackend(AIBackend):
                         f"""{hilight("[AI-Error]", "fail")} {self.config.name} failed to evaluate {hilight(listing.title)}: {e}"""
                     )
                 retries += 1
+                if retries >= self.config.max_retries or not is_retryable_error(e):
+                    raise
                 self.client = None
                 time.sleep(5)
 
@@ -1034,7 +1042,10 @@ class CloudflareBackend(AIBackend):
         try:
             text = "".join(
                 self.comment_backend.chat(
-                    CLEF_COMMENT_SYSTEM_PROMPT, [{"role": "user", "content": prompt}], []
+                    CLEF_COMMENT_SYSTEM_PROMPT,
+                    [{"role": "user", "content": prompt}],
+                    [],
+                    max_tokens=self.comment_backend.config.max_tokens,
                 )
             )
         except Exception as error:
