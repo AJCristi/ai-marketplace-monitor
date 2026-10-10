@@ -14,12 +14,14 @@ Python requirements and dependency sets live in [pyproject.toml](../../pyproject
 [the CI matrix](../../.github/workflows/tests.yml) defining tested versions.
 
 ```powershell
-uv sync --all-extras
+uv sync --locked --python 3.12 --all-extras
 uv run inv --list
 ```
 
 Check each command's result before continuing. Do not regenerate the lockfile merely
-to inspect the project. If `uv` is unavailable, check the existing environment before
+to inspect the project. Build `.venv` only with `uv sync --locked`; a venv made with
+`python -m venv` and `pip install` resolves the newest versions allowed by
+`pyproject.toml` and drifts from `uv.lock`, CI, and the Docker image. If `uv` is unavailable, check the existing environment before
 installing anything. For an already-provisioned Windows environment:
 
 ```powershell

@@ -22,9 +22,12 @@ pip install uv
 To install the local development requirements inside a virtual environment run:
 
 ```
-$ uv sync --all-extras
+$ uv sync --locked --all-extras
 $ uv run inv install-hooks
 ```
+
+Use `uv sync --locked` rather than `pip install` so the environment matches `uv.lock`;
+pip installs the newest versions `pyproject.toml` allows and drifts from CI.
 
 > For more information about `uv` check the [docs](https://docs.astral.sh/uv/).
 
