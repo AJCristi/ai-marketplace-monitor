@@ -101,7 +101,7 @@ One or more sections `marketplace.name` show the options for interacting with va
 2. `username` and `password` can be provided in three ways (in order of priority): directly in the config file, via the `${ENV_VAR}` syntax (e.g. `password = '${MY_FB_PASS}'`), or automatically from the `FACEBOOK_USERNAME` and `FACEBOOK_PASSWORD` environment variables. If none are set, the monitor runs in anonymous mode.
 3. If `language="LAN"` is specified, it must match to one of `translation` sections, defined by yourself or in the system configuration file. The system will try exact match (e.g. `es` to `es` or `zh_CN` to `zh_CN`), then partial match (e.g. `es` to `es_CO` or `es_CO` to `es`).
 4. Please see [Support for non-English languages](../README.md#support-for-non-english-languages) on how to set this option and define your own translations.
-5. After a successful login, the Facebook session is saved to `~/.ai-marketplace-monitor/facebook-session-<marketplace>.json` and reused on the next start, so credentials are not re-entered and `login_wait_time` is skipped. Delete this file to log out or switch accounts. It grants access to your Facebook account, so treat it like a password and never share or commit it.
+5. After a successful login, the Facebook session is saved to `~/.ai-marketplace-monitor/facebook-session-<marketplace>.json` and reused on the next start, so credentials are not re-entered and `login_wait_time` is skipped. Changing `username` starts a fresh login, and the web UI header shows whether the monitor is logged in. Delete this file to log out. It grants access to your Facebook account, so treat it like a password and never share or commit it.
 
 ### Users
 

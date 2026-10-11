@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import os
 import re
 import time
@@ -23,6 +24,7 @@ from .utils import (
     CounterItem,
     KeyboardMonitor,
     Translator,
+    aimm_event,
     amm_home,
     convert_to_seconds,
     counter,
@@ -287,6 +289,9 @@ class FacebookItemConfig(ItemConfig, FacebookMarketItemCommonConfig):
 
 class FacebookMarketplace(Marketplace):
     initial_url = "https://www.facebook.com/login/device-based/regular/login/"
+    # Facebook keeps the c_user cookie while it asks for a code or approval on these pages.
+    verification_paths = ("/checkpoint", "/auth_platform")
+    logged_in: bool | None = None
 
     name = "facebook"
 
@@ -344,10 +349,7 @@ class FacebookMarketplace(Marketplace):
 
         self.config: FacebookMarketplaceConfig
         if self.is_logged_in():
-            if self.logger:
-                self.logger.info(
-                    f"""{hilight("[Login]", "succ")} Reusing saved Facebook session."""
-                )
+            self.report_login_status(True, reused=True)
             self.save_session()
             return
 
@@ -388,21 +390,51 @@ class FacebookMarketplace(Marketplace):
                 )
             doze(login_wait_time, keyboard_monitor=self.keyboard_monitor)
 
-        if self.is_logged_in():
+        logged_in = self.is_logged_in()
+        if logged_in:
             self.save_session()
-        elif self.logger:
+        self.report_login_status(logged_in)
+
+    def report_login_status(
+        self: "FacebookMarketplace", logged_in: bool, reused: bool = False
+    ) -> None:
+        self.logged_in = logged_in
+        if not self.logger:
+            return
+        event = aimm_event(
+            "facebook_login",
+            status="logged_in" if logged_in else "logged_out",
+            marketplace=self.name,
+        )
+        if reused:
+            self.logger.info(
+                f"""{hilight("[Login]", "succ")} Reusing saved Facebook session.""", extra=event
+            )
+        elif logged_in:
+            self.logger.info(
+                f"""{hilight("[Login]", "succ")} Logged into Facebook.""", extra=event
+            )
+        else:
             self.logger.warning(
                 f"""{hilight("[Login]", "fail")} Not logged into Facebook. Seller names, seller """
-                "checks and exclude_sellers will not work until you log in through the browser window."
+                "checks and exclude_sellers will not work until you log in through the browser window.",
+                extra=event,
             )
 
     def session_file(self: "FacebookMarketplace") -> Path:
         safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", self.name)
         return amm_home / f"facebook-session-{safe_name}.json"
 
+    def session_account(self: "FacebookMarketplace") -> str | None:
+        if not self.config.username:
+            return None
+        return hashlib.sha256(self.config.username.encode("utf-8")).hexdigest()
+
     def is_logged_in(self: "FacebookMarketplace") -> bool:
         try:
             assert self.page is not None
+            if urlsplit(self.page.url).path.startswith(self.verification_paths):
+                return False
             return any(
                 cookie.get("name") == "c_user"
                 for cookie in self.page.context.cookies("https://www.facebook.com")
@@ -420,8 +452,11 @@ class FacebookMarketplace(Marketplace):
         try:
             yield from self._search_listings(item_config, on_listing, should_stop, on_results)
         finally:
-            if self.is_logged_in():
+            logged_in = self.is_logged_in()
+            if logged_in:
                 self.save_session()
+            if logged_in != self.logged_in:
+                self.report_login_status(logged_in)
 
     def _search_listings(
         self: "FacebookMarketplace",

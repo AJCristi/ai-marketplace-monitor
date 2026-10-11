@@ -210,7 +210,7 @@ def test_login_warns_when_facebook_session_is_missing(
     monkeypatch.setattr("ai_marketplace_monitor.facebook.amm_home", tmp_path)
     market: Any = object.__new__(FacebookMarketplace)
     market.name = "facebook"
-    page = Mock()
+    page = Mock(url="https://www.facebook.com/")
     page.context.cookies.return_value = cookies
     page.context.storage_state.return_value = {"cookies": cookies}
     market.browser, market.page, market.logger = Mock(), None, Mock()
