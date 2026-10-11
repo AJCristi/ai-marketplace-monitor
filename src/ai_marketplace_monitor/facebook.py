@@ -291,7 +291,6 @@ class FacebookMarketplace(Marketplace):
     initial_url = "https://www.facebook.com/login/device-based/regular/login/"
     # Facebook keeps the c_user cookie while it asks for a code or approval on these pages.
     verification_paths = ("/checkpoint", "/auth_platform")
-    logged_in: bool | None = None
 
     name = "facebook"
 

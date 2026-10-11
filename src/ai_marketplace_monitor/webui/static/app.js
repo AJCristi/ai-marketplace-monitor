@@ -190,11 +190,12 @@ function updateStatus() {
   el.className = `m ${waiting || !state.connected ? 'warn' : 'ok'}`;
   el.textContent = waiting ? '● waiting for Facebook login' : state.connected ? `● live${recent ? ' · last activity '+time(recent.time) : ''}` : '◌ reconnecting…';
   $('#setup-count').textContent = setupIssues() ? '· ' + setupIssues() : '';
+  const loginPlace = state.status.vnc_enabled ? 'the Browser view' : 'the browser window on the computer running the monitor';
   const facebook = $('#facebook-status');
   facebook.hidden = !state.facebookLogin;
   facebook.className = `m ${state.facebookLogin === 'logged_in' ? 'ok' : 'warn'}`;
   facebook.textContent = state.facebookLogin === 'logged_in' ? '● Facebook: logged in' : '● Facebook: not logged in';
-  facebook.title = state.facebookLogin === 'logged_in' ? '' : `Log in through ${state.status.vnc_enabled ? 'the Browser view' : 'the browser window on the computer running the monitor'}.`;
+  facebook.title = state.facebookLogin === 'logged_in' ? '' : `Log in through ${loginPlace}.`;
   $('#browser-link').hidden = !state.status.vnc_enabled;
   $('#browser-link').href = '/vnc/vnc.html?path=ws/vnc&autoconnect=1&resize=scale';
   $('#logout').hidden = state.open;
@@ -203,7 +204,8 @@ function updateStatus() {
   if(state.monitorIssue)notice=`<span>${esc(state.monitorIssue)}</span><a class="btn sm" href="#/settings/config">Check config.toml</a><a class="btn sm" href="#/monitor/all?level=ERROR">View errors</a>`;
   else if (waiting) notice = '<span>Waiting for Facebook credentials.</span><a class="btn sm" href="#/settings/marketplace">Add login</a>';
   else if (!state.connected && state.disconnectedAt && Date.now()-state.disconnectedAt > 10000) notice = '<span>Live updates stopped. The monitor may still be running; activity reloads when it reconnects.</span><button class="btn sm" id="retry-stream">Retry</button>';
-  else if (Date.now() < state.loginUntil) notice = `<span>Logging in to Facebook. If it asks for a code or CAPTCHA, finish it in ${state.status.vnc_enabled ? 'the Browser view' : 'the browser window on the computer running the monitor'}.</span>`;
+  else if (Date.now() < state.loginUntil) notice = `<span>Logging in to Facebook. If it asks for a code or CAPTCHA, finish it in ${loginPlace}.</span>`;
+  else if (state.facebookLogin === 'logged_out') notice = `<span>Not logged into Facebook. Seller names, seller checks and excluded sellers will not work until you log in through ${loginPlace}.</span>${state.status.vnc_enabled ? `<a class="btn sm" href="${$('#browser-link').href}" target="_blank" rel="noopener">Open Browser</a>` : ''}`;
   const cancelled = state.cancelNotice;
   const html = notice ? `<div class="nt warn">${notice}</div>` : cancelled ? `<div class="nt"><span class="gr">Cancelled ${esc(cancelled.item)}${cancelled.checked != null ? ` after checking ${cancelled.checked} ${cancelled.checked === 1 ? 'listing' : 'listings'}` : ''} · ${cancelled.found} new ${cancelled.found === 1 ? 'match' : 'matches'} saved. Other searches return to their schedule.</span><button class="btn sm q" id="dismiss-cancel">Dismiss</button></div>` : '';
   if ($('#global-notice').innerHTML !== html) {$('#global-notice').innerHTML = html; $('#retry-stream')?.addEventListener('click',connectStream); $('#dismiss-cancel')?.addEventListener('click',()=>{state.cancelNotice=null;updateStatus();});}
@@ -418,7 +420,7 @@ function acceptRecords(records, reset = false) {
       if(record.extra?.kind==='browser_ready'){state.incidentId=record.id;state.monitorIssue=null;}
     }
     if (record.extra?.kind==='credentials_wait'&&record.id>state.credentialsId){state.credentialsId=record.id;state.credentials=record.extra.status;}
-    if (record.extra?.kind==='facebook_login'&&record.id>state.facebookLoginId){state.facebookLoginId=record.id;state.facebookLogin=record.extra.status;}
+    if (record.extra?.kind==='facebook_login'&&record.id>state.facebookLoginId){state.facebookLoginId=record.id;state.facebookLogin=record.extra.status;if(record.id>state.loginId)state.loginUntil=0;}
     if (record.id>state.loginId && record.location?.startsWith('facebook:') && /^\s*Waiting \S+/.test(record.message)){state.loginId=record.id;state.loginUntil=Date.now()+60000;}
   }
   if (!state.following) state.pending += newCount;
@@ -962,7 +964,7 @@ function render() {
 async function bootstrap() {
   matchesView ||= createMatchesView({state,api,json,pageHeader,exportCsv,toast,renderSidebar,searchSummary});
   $('#sidebar').onclick=event=>matchesView.sidebarClick(event);
-  state.status=await json('/api/status');state.open=state.status.open;$('#app').hidden=false;
+  state.status=await json('/api/status');state.open=state.status.open;state.facebookLogin=state.status.facebook_login;$('#app').hidden=false;
   const build=state.status.build;
   $('#build-version').textContent=build?.sha?build.sha.slice(0,7)+(build.dirty?' · modified':''):'Build unknown';
   $('#build-version').title=`Version ${build?.version||'unknown'} · Commit ${build?.sha||'unavailable'}${build?.dirty?' · uncommitted source changes at startup':''}`;

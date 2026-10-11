@@ -456,6 +456,8 @@ TItemConfig = TypeVar("TItemConfig", bound=ItemConfig)
 
 
 class Marketplace(Generic[TMarketplaceConfig, TItemConfig]):
+    logged_in: bool | None = None
+
     def __init__(
         self: "Marketplace",
         name: str,

@@ -273,6 +273,7 @@ def main(
                             request_item_search=monitor.request_item_search,
                             cancel_search=monitor.cancel_search,
                             search_progress=monitor.progress_snapshot,
+                            facebook_login=monitor.facebook_login_status,
                             rechecks=monitor.rechecks,
                             image_matcher=monitor.image_matcher,
                             chat_backend=monitor.chat_backend,
