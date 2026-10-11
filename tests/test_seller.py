@@ -205,11 +205,14 @@ def test_optional_scrape_failure_does_not_fail_listing() -> None:
     ("cookies", "warned"), [([{"name": "c_user"}], False), ([{"name": "datr"}], True)]
 )
 def test_login_warns_when_facebook_session_is_missing(
-    cookies: list[dict[str, str]], warned: bool
+    cookies: list[dict[str, str]], warned: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr("ai_marketplace_monitor.facebook.amm_home", tmp_path)
     market: Any = object.__new__(FacebookMarketplace)
+    market.name = "facebook"
     page = Mock()
     page.context.cookies.return_value = cookies
+    page.context.storage_state.return_value = {"cookies": cookies}
     market.browser, market.page, market.logger = Mock(), None, Mock()
     market.create_page, market.goto_url = Mock(return_value=page), Mock()
     market.keyboard_monitor = None

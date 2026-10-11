@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from itertools import repeat
 from logging import Logger
+from pathlib import Path
 from typing import Any, Callable, Generator, List, Tuple, Type, cast
 from urllib.parse import quote, urlsplit
 
@@ -22,6 +23,7 @@ from .utils import (
     CounterItem,
     KeyboardMonitor,
     Translator,
+    amm_home,
     convert_to_seconds,
     counter,
     doze,
@@ -341,6 +343,14 @@ class FacebookMarketplace(Marketplace):
                 )
 
         self.config: FacebookMarketplaceConfig
+        if self.is_logged_in():
+            if self.logger:
+                self.logger.info(
+                    f"""{hilight("[Login]", "succ")} Reusing saved Facebook session."""
+                )
+            self.save_session()
+            return
+
         try:
             if self.config.username:
                 time.sleep(2)
@@ -378,11 +388,17 @@ class FacebookMarketplace(Marketplace):
                 )
             doze(login_wait_time, keyboard_monitor=self.keyboard_monitor)
 
-        if not self.is_logged_in() and self.logger:
+        if self.is_logged_in():
+            self.save_session()
+        elif self.logger:
             self.logger.warning(
                 f"""{hilight("[Login]", "fail")} Not logged into Facebook. Seller names, seller """
                 "checks and exclude_sellers will not work until you log in through the browser window."
             )
+
+    def session_file(self: "FacebookMarketplace") -> Path:
+        safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", self.name)
+        return amm_home / f"facebook-session-{safe_name}.json"
 
     def is_logged_in(self: "FacebookMarketplace") -> bool:
         try:
@@ -395,6 +411,19 @@ class FacebookMarketplace(Marketplace):
             return False
 
     def search(
+        self: "FacebookMarketplace",
+        item_config: FacebookItemConfig,
+        on_listing: Callable[[Listing], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+        on_results: Callable[[int], None] | None = None,
+    ) -> Generator[Listing, None, None]:
+        try:
+            yield from self._search_listings(item_config, on_listing, should_stop, on_results)
+        finally:
+            if self.is_logged_in():
+                self.save_session()
+
+    def _search_listings(
         self: "FacebookMarketplace",
         item_config: FacebookItemConfig,
         on_listing: Callable[[Listing], None] | None = None,
