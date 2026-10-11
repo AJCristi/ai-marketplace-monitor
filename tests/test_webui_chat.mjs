@@ -54,6 +54,29 @@ test('a refused question is removed and kept as the draft; a broken stream keeps
   assert.match(node.innerHTML,/fake failed to answer/);
 });
 
+test('a note proposal is hidden from the reply and saved only when the buyer confirms',async()=>{
+  const saved=[], requests=[], node=container(), outcomes=[new Error('Your note would exceed 2000 characters.'),null];
+  const view=createChatView({
+    api:async(url,options)=>{requests.push(JSON.parse(options.body));return new Response(streamOf(['{"text":"Ask for the receipt.\\n<note>Battery replaced "}\n','{"text":"2024</note>"}\n']));},
+    appendNote:async(target,text)=>{const outcome=outcomes.shift();if(outcome)throw outcome;saved.push([target.listing_id,text]);},
+  });
+  view.mount(node,row);
+  await view.send('Seller says the battery was replaced in 2024');
+  assert.match(node.innerHTML,/data-chat-reply>Ask for the receipt\.</);
+  assert.match(node.innerHTML,/<p>Battery replaced 2024<\/p>/);
+  assert.ok(!node.innerHTML.includes('&lt;note'));
+  const click=()=>node.onclick({target:{closest:()=>({disabled:false,dataset:{chatSaveNote:'1'},hasAttribute:()=>false})}});
+  click();await new Promise(resolve=>setTimeout(resolve));
+  assert.match(node.innerHTML,/exceed 2000 characters/);
+  assert.match(node.innerHTML,/data-chat-save-note="1"/);
+  click();click();await new Promise(resolve=>setTimeout(resolve));
+  assert.deepEqual(saved,[['one','Battery replaced 2024']]);
+  assert.match(node.innerHTML,/Added to your note\./);
+  assert.ok(!node.innerHTML.includes('data-chat-save-note'));
+  await view.send('Anything else?');
+  assert.ok(requests[1].messages.every(message=>Object.keys(message).join()==='role,content'));
+});
+
 test('each match keeps its own conversation',async()=>{
   const node=container();
   const view=createChatView({api:async()=>new Response(streamOf(['{"text":"Yes"}\n']))});

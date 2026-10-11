@@ -143,7 +143,7 @@ export function createMatchesView({state, api, json, pageHeader, exportCsv, toas
   let data=null, rows=[], selected=null, request=0, cutoff='', error='', loading=false, cursorKey=null, lastUndo=null, previewKey=null, previewPhoto=0;
   const collapsed=new Set(), jobs=new Map();
   const relatedView=createRelatedView({json,toast});
-  const chatView=createChatView({api});
+  const chatView=createChatView({api,appendNote:appendToNote});
   let busy=false, refreshTimer=null, filterTimer=null, noteTimer=null, detailRow=null, photoIndex=0, photoSelection=null, listScroll=0, listWindowScroll=0;
   const dismissedRows=new Map(), pendingStates=new Set(), selectedKeys=new Set();
   let selectionAnchor=null, arrivals=0, keepList=false, reloadTimer=null, reloadWaiters=[];
@@ -532,8 +532,16 @@ export function createMatchesView({state, api, json, pageHeader, exportCsv, toas
   }
   async function saveNote(row,input){
     const value=input.value;
-    try{const updated=await json(`/api/matches/${encodeURIComponent(row.marketplace)}/${encodeURIComponent(row.listing_id)}/state`,{method:'PUT',body:JSON.stringify({note:value})});Object.assign(row.state,updated);for(const other of rows)if(other.key===row.key)other.state.note=updated.note;if($('#match-note-status'))$('#match-note-status').textContent='Saved.';}
-    catch(err){if($('#match-note-status'))$('#match-note-status').textContent='Not saved: '+err.message;}
+    try{const updated=await json(`/api/matches/${encodeURIComponent(row.marketplace)}/${encodeURIComponent(row.listing_id)}/state`,{method:'PUT',body:JSON.stringify({note:value})});Object.assign(row.state,updated);for(const other of rows)if(other.key===row.key)other.state.note=updated.note;if($('#match-note-status'))$('#match-note-status').textContent='Saved.';return true;}
+    catch(err){if($('#match-note-status'))$('#match-note-status').textContent='Not saved: '+err.message;return false;}
+  }
+  async function appendToNote(row,addition){
+    const input=$('#match-note');
+    if(!input)throw new Error('Open the match page to update its note.');
+    const value=[input.value.trimEnd(),addition].filter(Boolean).join('\n');
+    if(value.length>2000)throw new Error('Your note would exceed 2000 characters.');
+    clearTimeout(noteTimer);input.value=value;
+    if(!await saveNote(row,input))throw new Error('Your note was not saved.');
   }
   function renderArrivals(){
     const target=$('#matches-arrivals');if(!target)return;

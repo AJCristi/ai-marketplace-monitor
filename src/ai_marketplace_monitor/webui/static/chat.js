@@ -17,9 +17,20 @@ export async function* chatEvents(body) {
   }
 }
 
+export function splitNoteProposal(content) {
+  const match=content.match(/<note>([\s\S]*?)(?:<\/note>|$)/);
+  if(!match)return {text:content,proposal:''};
+  return {text:(content.slice(0,match.index)+content.slice(match.index+match[0].length)).trim(),proposal:match[1].trim()};
+}
+
 export function chatHtml(row, {messages=[], busy=false, error='', draft='', photos=false}={}) {
   const photoCount=(row.photos||[]).length;
-  const log=messages.map((message,index)=>`<div class="chat-msg ${message.role}"><span class="xs d">${message.role==='user'?'You':'AI'}</span><p${index===messages.length-1&&message.role==='assistant'?' data-chat-reply':''}>${esc(message.content.replaceAll('**',''))||'…'}</p></div>`).join('');
+  const log=messages.map((message,index)=>{
+    const isLast=index===messages.length-1, {text,proposal}=splitNoteProposal(message.content);
+    const showProposal=message.role==='assistant'&&proposal&&!(busy&&isLast);
+    const proposalHtml=showProposal?`<div class="chat-note"><span class="xs d">Suggested addition to your note</span><p>${esc(proposal)}</p>${message.noteStatus==='saved'?'<span class="xs d">Added to your note.</span>':`<button class="btn sm" type="button" data-chat-save-note="${index}" ${busy||message.noteStatus==='saving'?'disabled':''}>Add to note</button>`}</div>`:'';
+    return `<div class="chat-msg ${message.role}"><span class="xs d">${message.role==='user'?'You':'AI'}</span><p${isLast&&message.role==='assistant'?' data-chat-reply':''}>${esc(text.replaceAll('**',''))||'…'}</p>${proposalHtml}</div>`;
+  }).join('');
   return `<h2 class="match-h">Chat about this match</h2>`+
     (messages.length?`<div class="chat-log" aria-live="polite">${log}</div>`:`<p class="sm d">Ask the search’s AI about this listing. Chats are not saved.</p><div class="row wr">${CHAT_STARTERS.map(starter=>`<button class="btn sm" type="button" data-chat-starter="${esc(starter)}" ${busy?'disabled':''}>${esc(starter)}</button>`).join('')}</div>`)+
     (error?`<p class="sm warn" role="alert">${esc(error)}</p>`:'')+
@@ -28,7 +39,7 @@ export function chatHtml(row, {messages=[], busy=false, error='', draft='', phot
     `${messages.length&&!busy?'<button class="btn q" type="button" data-chat-clear>Clear</button>':''}${busy?'<button class="btn" type="button" data-chat-stop>Stop</button>':'<button class="btn p" type="submit">Send</button>'}</div></form>`;
 }
 
-export function createChatView({api}) {
+export function createChatView({api, appendNote}) {
   const conversations=new Map();
   let current=null, controller=null, busyKey=null, photos=false;
   const conversation=key=>{if(!conversations.has(key))conversations.set(key,{messages:[],error:'',draft:''});return conversations.get(key);};
@@ -44,7 +55,7 @@ export function createChatView({api}) {
   function showReply(text){
     const node=current?.container.querySelector?.('[data-chat-reply]');
     if(!node){draw();return;}
-    node.textContent=text.replaceAll('**','');
+    node.textContent=splitNoteProposal(text).text.replaceAll('**','');
     const log=current.container.querySelector('.chat-log');if(log)log.scrollTop=log.scrollHeight;
   }
   async function send(text){
@@ -52,7 +63,7 @@ export function createChatView({api}) {
     if(!text||busyKey!==null||!current)return;
     const {row,key}=current, chat=conversation(key);
     chat.messages.push({role:'user',content:text});
-    const payload=chat.messages.slice(-HISTORY_LIMIT), reply={role:'assistant',content:''};
+    const payload=chat.messages.slice(-HISTORY_LIMIT).map(({role,content})=>({role,content})), reply={role:'assistant',content:''};
     chat.messages.push(reply);chat.draft='';chat.error='';
     const own=controller=new AbortController();busyKey=key;
     draw();
@@ -73,6 +84,16 @@ export function createChatView({api}) {
       if(current?.key===key)draw();
     }
   }
+  async function saveProposal(index){
+    if(!current)return;
+    const {row,key}=current, chat=conversation(key), message=chat.messages[index];
+    const proposal=message&&splitNoteProposal(message.content).proposal;
+    if(!proposal||message.noteStatus)return;
+    message.noteStatus='saving';draw();
+    try{await appendNote(row,proposal);message.noteStatus='saved';chat.error='';}
+    catch(error){delete message.noteStatus;chat.error=error.message;}
+    if(current?.key===key)draw();
+  }
   function mount(container,row){
     if(!container)return;
     const key=JSON.stringify([row.marketplace,row.listing_id,row.item]);
@@ -86,6 +107,7 @@ export function createChatView({api}) {
     container.onclick=event=>{
       const button=event.target.closest?.('button');if(!button||button.disabled)return;
       if(button.dataset.chatStarter)send(button.dataset.chatStarter);
+      else if(button.dataset.chatSaveNote!==undefined)saveProposal(Number(button.dataset.chatSaveNote));
       else if(button.hasAttribute('data-chat-stop'))controller?.abort();
       else if(button.hasAttribute('data-chat-clear')){conversations.delete(key);draw();}
     };
