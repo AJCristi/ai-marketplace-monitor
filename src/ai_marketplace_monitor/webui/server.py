@@ -132,6 +132,7 @@ class WebUIConfig:
     request_item_search: Callable[[str], None] | None = None
     cancel_search: Callable[[], None] | None = None
     search_progress: Callable[[], Dict[str, Any]] | None = None
+    facebook_login: Callable[[], str | None] | None = None
     rechecks: RecheckQueue | None = None
     image_matcher: ImageMatcher | None = None
     chat_backend: Callable[[str], tuple[AIBackend, Any]] | None = None
@@ -349,6 +350,7 @@ def create_app(
             "open": is_open(),
             "vnc_enabled": os.environ.get("AIMM_ENABLE_VNC") == "1"
             and Path(os.environ.get("AIMM_NOVNC_DIR", "/usr/share/novnc")).is_dir(),
+            "facebook_login": config.facebook_login() if config.facebook_login else None,
         }
 
     @app.get("/api/config/files")

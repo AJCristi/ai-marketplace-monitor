@@ -135,6 +135,17 @@ class MarketplaceMonitor:
         """Listing counts for the running search, read by the web UI thread."""
         return {**self.search_progress, "cancelling": self.search_cancelled.is_set()}
 
+    def facebook_login_status(self: "MarketplaceMonitor") -> str | None:
+        """Latest login state of the active marketplaces, read by the web UI thread."""
+        known = [
+            marketplace.logged_in
+            for marketplace in list(self.active_marketplaces.values())
+            if marketplace.logged_in is not None
+        ]
+        if not known:
+            return None
+        return "logged_in" if all(known) else "logged_out"
+
     def cancel_search(self: "MarketplaceMonitor") -> None:
         """Stop the running search at its next listing and skip the rest of a requested run."""
         self.search_requested.clear()

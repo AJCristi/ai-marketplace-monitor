@@ -15,7 +15,7 @@ const state = {
   route:location.hash || '#/monitor', form:null, saving:false, editor:null, editorSetting:false,
   conflict:null, error:'', saved:'', rawInvalid:false, records:[], lastSearches:new Map(), searchRequestedAfter:null, progress:{}, cancelNotice:null, capacity:2000, streamId:null, ws:null,
   connected:false, announceCount:0, disconnectedAt:null, following:true, pending:0, frozen:[], expanded:new Set(),
-  credentials:null, credentialsId:0, monitorIssue:null, incidentId:0, loginId:0, loginUntil:0, feedTimer:null, announceTimer:null, pollBusy:false,
+  credentials:null, credentialsId:0, monitorIssue:null, incidentId:0, loginId:0, loginUntil:0, facebookLogin:null, facebookLoginId:0, feedTimer:null, announceTimer:null, pollBusy:false,
 };
 let matchesView, aiTestView;
 const aiStatus = new Map();
@@ -190,6 +190,12 @@ function updateStatus() {
   el.className = `m ${waiting || !state.connected ? 'warn' : 'ok'}`;
   el.textContent = waiting ? '● waiting for Facebook login' : state.connected ? `● live${recent ? ' · last activity '+time(recent.time) : ''}` : '◌ reconnecting…';
   $('#setup-count').textContent = setupIssues() ? '· ' + setupIssues() : '';
+  const loginPlace = state.status.vnc_enabled ? 'the Browser view' : 'the browser window on the computer running the monitor';
+  const facebook = $('#facebook-status');
+  facebook.hidden = !state.facebookLogin;
+  facebook.className = `m ${state.facebookLogin === 'logged_in' ? 'ok' : 'warn'}`;
+  facebook.textContent = state.facebookLogin === 'logged_in' ? '● Facebook: logged in' : '● Facebook: not logged in';
+  facebook.title = state.facebookLogin === 'logged_in' ? '' : `Log in through ${loginPlace}.`;
   $('#browser-link').hidden = !state.status.vnc_enabled;
   $('#browser-link').href = '/vnc/vnc.html?path=ws/vnc&autoconnect=1&resize=scale';
   $('#logout').hidden = state.open;
@@ -198,7 +204,8 @@ function updateStatus() {
   if(state.monitorIssue)notice=`<span>${esc(state.monitorIssue)}</span><a class="btn sm" href="#/settings/config">Check config.toml</a><a class="btn sm" href="#/monitor/all?level=ERROR">View errors</a>`;
   else if (waiting) notice = '<span>Waiting for Facebook credentials.</span><a class="btn sm" href="#/settings/marketplace">Add login</a>';
   else if (!state.connected && state.disconnectedAt && Date.now()-state.disconnectedAt > 10000) notice = '<span>Live updates stopped. The monitor may still be running; activity reloads when it reconnects.</span><button class="btn sm" id="retry-stream">Retry</button>';
-  else if (Date.now() < state.loginUntil) notice = `<span>Logging in to Facebook. If it asks for a code or CAPTCHA, finish it in ${state.status.vnc_enabled ? 'the Browser view' : 'the browser window on the computer running the monitor'}.</span>`;
+  else if (Date.now() < state.loginUntil) notice = `<span>Logging in to Facebook. If it asks for a code or CAPTCHA, finish it in ${loginPlace}.</span>`;
+  else if (state.facebookLogin === 'logged_out') notice = `<span>Not logged into Facebook. Seller names, seller checks and excluded sellers will not work until you log in through ${loginPlace}.</span>${state.status.vnc_enabled ? `<a class="btn sm" href="${$('#browser-link').href}" target="_blank" rel="noopener">Open Browser</a>` : ''}`;
   const cancelled = state.cancelNotice;
   const html = notice ? `<div class="nt warn">${notice}</div>` : cancelled ? `<div class="nt"><span class="gr">Cancelled ${esc(cancelled.item)}${cancelled.checked != null ? ` after checking ${cancelled.checked} ${cancelled.checked === 1 ? 'listing' : 'listings'}` : ''} · ${cancelled.found} new ${cancelled.found === 1 ? 'match' : 'matches'} saved. Other searches return to their schedule.</span><button class="btn sm q" id="dismiss-cancel">Dismiss</button></div>` : '';
   if ($('#global-notice').innerHTML !== html) {$('#global-notice').innerHTML = html; $('#retry-stream')?.addEventListener('click',connectStream); $('#dismiss-cancel')?.addEventListener('click',()=>{state.cancelNotice=null;updateStatus();});}
@@ -356,6 +363,7 @@ function rowHtml(record) {
   else if (e.kind === 'listing_skip') {body = `Skipped <b>${esc(e.title)}</b> — ${e.reason==='below_threshold'?`rated ${esc(e.score)}, below ${esc(e.threshold)}`:'already notified'}`; type='skip';}
   else if (e.kind === 'credentials_wait') {body = e.status==='found'?'Facebook credentials found — launching browser':'Waiting for Facebook credentials'; type='login';}
   else if (e.kind === 'browser_ready') {body = `Launched ${esc(e.engine)} browser`; type='browser';}
+  else if (e.kind === 'facebook_login') {body = `<span class="message">${esc(record.message)}</span>`; type='login';}
   else {body = `<span class="message">${esc(record.message)}</span>`;}
   const failure = String(record.message).match(/Max retries reached\. Failed to push note to (.+)\.$/);
   if (failure && own(state.config.user,failure[1])) body += ` <a href="#/settings/notifications?edit=${encodeURIComponent(failure[1])}">Check user settings</a>`;
@@ -412,6 +420,7 @@ function acceptRecords(records, reset = false) {
       if(record.extra?.kind==='browser_ready'){state.incidentId=record.id;state.monitorIssue=null;}
     }
     if (record.extra?.kind==='credentials_wait'&&record.id>state.credentialsId){state.credentialsId=record.id;state.credentials=record.extra.status;}
+    if (record.extra?.kind==='facebook_login'&&record.id>state.facebookLoginId){state.facebookLoginId=record.id;state.facebookLogin=record.extra.status;if(record.id>state.loginId)state.loginUntil=0;}
     if (record.id>state.loginId && record.location?.startsWith('facebook:') && /^\s*Waiting \S+/.test(record.message)){state.loginId=record.id;state.loginUntil=Date.now()+60000;}
   }
   if (!state.following) state.pending += newCount;
@@ -424,7 +433,7 @@ async function snapshot() {
   const reset = state.streamId != null && state.streamId !== data.stream_id;
   state.streamId=data.stream_id;const previousCapacity=state.capacity;state.capacity=data.capacity || 2000;
   if(previousCapacity!==state.capacity&&$('#feed'))renderActivity(routeParts().parts[1]==='item'?decodeName(routeParts().parts[2]):null);
-  if (reset) {state.searchRequestedAfter=null;state.progress={};state.cancelNotice=null;state.credentials=null;state.credentialsId=0;state.monitorIssue=null;state.incidentId=0;state.loginId=0;state.loginUntil=0;state.following=true;state.pending=0;state.expanded.clear();}
+  if (reset) {state.searchRequestedAfter=null;state.progress={};state.cancelNotice=null;state.credentials=null;state.credentialsId=0;state.monitorIssue=null;state.incidentId=0;state.loginId=0;state.loginUntil=0;state.facebookLogin=null;state.facebookLoginId=0;state.following=true;state.pending=0;state.expanded.clear();}
   acceptRecords(data.records,reset); return data;
 }
 function announceSearch(record) {
@@ -452,7 +461,7 @@ function connectStream() {
   socket.onmessage = async event => {
     let data; try {data=JSON.parse(event.data);} catch {return;}
     if (data.type==='hello') {
-      if(state.streamId && state.streamId!==data.stream_id){state.searchRequestedAfter=null;state.progress={};state.cancelNotice=null;state.records=[];state.lastSearches.clear();state.credentials=null;state.credentialsId=0;state.monitorIssue=null;state.incidentId=0;state.loginId=0;state.loginUntil=0;state.following=true;state.pending=0;state.expanded.clear();renderFeed(true);renderSidebar();}state.streamId=data.stream_id;
+      if(state.streamId && state.streamId!==data.stream_id){state.searchRequestedAfter=null;state.progress={};state.cancelNotice=null;state.records=[];state.lastSearches.clear();state.credentials=null;state.credentialsId=0;state.monitorIssue=null;state.incidentId=0;state.loginId=0;state.loginUntil=0;state.facebookLogin=null;state.facebookLoginId=0;state.following=true;state.pending=0;state.expanded.clear();renderFeed(true);renderSidebar();}state.streamId=data.stream_id;
       state.connected=true;state.disconnectedAt=null; updateStatus();
       try {await snapshot();} catch(error) {toast(error.message);} return;
     }
@@ -955,7 +964,7 @@ function render() {
 async function bootstrap() {
   matchesView ||= createMatchesView({state,api,json,pageHeader,exportCsv,toast,renderSidebar,searchSummary});
   $('#sidebar').onclick=event=>matchesView.sidebarClick(event);
-  state.status=await json('/api/status');state.open=state.status.open;$('#app').hidden=false;
+  state.status=await json('/api/status');state.open=state.status.open;state.facebookLogin=state.status.facebook_login;$('#app').hidden=false;
   const build=state.status.build;
   $('#build-version').textContent=build?.sha?build.sha.slice(0,7)+(build.dirty?' · modified':''):'Build unknown';
   $('#build-version').title=`Version ${build?.version||'unknown'} · Commit ${build?.sha||'unavailable'}${build?.dirty?' · uncommitted source changes at startup':''}`;

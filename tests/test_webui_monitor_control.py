@@ -45,6 +45,35 @@ def test_status_captures_build_revision_at_startup(
     assert client.get("/api/status").status_code == 401
 
 
+@pytest.mark.parametrize(
+    ("states", "expected"),
+    [
+        ([], None),
+        ([None], None),
+        ([True, None], "logged_in"),
+        ([True, False], "logged_out"),
+    ],
+)
+def test_facebook_login_status_summarizes_active_marketplaces(
+    states: list[bool | None], expected: str | None
+) -> None:
+    monitor: Any = object.__new__(MarketplaceMonitor)
+    monitor.active_marketplaces = {
+        str(index): SimpleNamespace(logged_in=state) for index, state in enumerate(states)
+    }
+    assert monitor.facebook_login_status() == expected
+
+
+def test_status_reports_facebook_login_state(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("", encoding="utf-8")
+    config = WebUIConfig(config_files=[path], facebook_login=lambda: "logged_out")
+    client = TestClient(
+        create_app(config, AuthState(), ConfigFileService([path]), LogBroadcastHandler())
+    )
+    assert client.get("/api/status").json()["facebook_login"] == "logged_out"
+
+
 def test_build_revision_uses_source_checkout_and_handles_missing_git(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

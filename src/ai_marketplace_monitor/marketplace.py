@@ -1,10 +1,14 @@
+import json
+import os
+import tempfile
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from logging import Logger
+from pathlib import Path
 from typing import Any, Callable, Generator, Generic, List, Type, TypeVar
 
-from playwright.sync_api import Browser, ElementHandle, Locator, Page  # type: ignore
+from playwright.sync_api import Browser, ElementHandle, Locator, Page, StorageState  # type: ignore
 
 from .listing import Listing
 from .utils import (
@@ -452,6 +456,8 @@ TItemConfig = TypeVar("TItemConfig", bound=ItemConfig)
 
 
 class Marketplace(Generic[TMarketplaceConfig, TItemConfig]):
+    logged_in: bool | None = None
+
     def __init__(
         self: "Marketplace",
         name: str,
@@ -513,15 +519,91 @@ class Marketplace(Generic[TMarketplaceConfig, TItemConfig]):
             self.page = None
 
         if self.page is None:
-            context = self.browser.new_context(
-                proxy=(
-                    None
-                    if self.config.monitor_config is None
-                    else self.config.monitor_config.get_proxy_options()
-                )
+            proxy = (
+                None
+                if self.config.monitor_config is None
+                else self.config.monitor_config.get_proxy_options()
             )
+            storage_state = self.load_session()
+            context = None
+            if storage_state is not None:
+                try:
+                    context = self.browser.new_context(proxy=proxy, storage_state=storage_state)
+                except Exception as e:
+                    self.warn_unreadable_session(e)
+            if context is None:
+                context = self.browser.new_context(proxy=proxy)
             self.page = context.new_page()
         return self.page
+
+    def session_file(self: "Marketplace") -> Path | None:
+        return None
+
+    def session_account(self: "Marketplace") -> str | None:
+        return None
+
+    def load_session(self: "Marketplace") -> StorageState | None:
+        session_file = self.session_file()
+        if session_file is None or not session_file.exists():
+            return None
+        try:
+            saved = json.loads(session_file.read_text(encoding="utf-8"))
+            storage_state: StorageState = saved["storage_state"]
+            if saved.get("account") != self.session_account():
+                if self.logger:
+                    self.logger.info(
+                        f"{hilight('[Login]', 'info')} Saved session belongs to a different "
+                        "account. Logging in again."
+                    )
+                return None
+            return storage_state
+        except Exception as e:
+            self.warn_unreadable_session(e)
+            return None
+
+    def warn_unreadable_session(self: "Marketplace", error: Exception) -> None:
+        if self.logger:
+            self.logger.warning(
+                f"{hilight('[Login]', 'fail')} Ignoring unreadable saved session "
+                f"{self.session_file()}: {type(error).__name__}"
+            )
+
+    def save_session(self: "Marketplace") -> None:
+        session_file = self.session_file()
+        if session_file is None or self.page is None:
+            return
+        tmp_name = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=str(session_file.parent),
+                prefix=f".{session_file.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp:
+                tmp_name = tmp.name
+                json.dump(
+                    {
+                        "account": self.session_account(),
+                        "storage_state": self.page.context.storage_state(),
+                    },
+                    tmp,
+                )
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_name, session_file)
+        except Exception as e:
+            if tmp_name is not None:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+            if self.logger:
+                self.logger.warning(
+                    f"{hilight('[Login]', 'fail')} Could not save session to {session_file}: "
+                    f"{type(e).__name__}"
+                )
 
     def goto_url(self: "Marketplace", url: str, attempt: int = 0) -> None:
         try:
