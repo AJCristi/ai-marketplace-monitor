@@ -568,7 +568,7 @@ function fieldHtml(field) {
   const source=state.context.inherited[form.prefix]?.[form.name]?.[key];
   const sourceNote=filled(source)?`<p class="hint">Earlier file: ${esc(labelValue(source))}${Array.isArray(source)?'. Lists are combined across files; edit the source file to remove earlier entries.':''}</p>`:'';
   const modeHtml=inheritable?`<span class="sel field-mode"><select data-mode="${key}" aria-label="${esc(field.label)} source"><option value="default" ${!mode?'selected':''}>Use default — ${esc(labelValue(defaultValue))}</option><option value="custom" ${mode?'selected':''}>Custom</option></select></span>`:'';
-  return `<label class="l" for="${id}">${esc(field.label)}</label><div class="field" data-field="${key}">${modeHtml}<div class="field-value">${widget}</div>${sourceNote}${field.help?`<p class="hint">${esc(field.help)}</p>`:''}<p class="ferr" id="error-${key}" hidden></p></div>`;
+  return `<label class="l" for="${id}">${esc(field.label)}</label><div class="field${form.aiFilled?.has(key)?' ai-filled':''}" data-field="${key}">${modeHtml}<div class="field-value">${widget}</div>${sourceNote}${field.help?`<p class="hint">${esc(field.help)}</p>`:''}<p class="ferr" id="error-${key}" hidden></p></div>`;
 }
 function locationHtml() {
   const form=state.form;
@@ -603,7 +603,7 @@ function formHtml() {
   let content='';
   if (form.prefix==='item') {
     const included=itemGroups.flatMap(group=>group[1]).filter(key=>key!=='location');
-    content=itemGroups.map(([title,keys],index)=>`<section class="sect"><h2>${title}</h2>${index===0?nameHtml:''}${fieldsHtml(keys)}${title==='AI rating'?'<p class="hint">Fit with your description. With no working AI, every listing that passes your filters meets the rating threshold.</p>':''}</section>`).join('');
+    content=itemGroups.map(([title,keys],index)=>`<section class="sect"><h2>${title}</h2>${index===0?nameHtml+(form.new?fillHtml():''):''}${fieldsHtml(keys)}${title==='AI rating'?'<p class="hint">Fit with your description. With no working AI, every listing that passes your filters meets the rating threshold.</p>':''}</section>`).join('');
     const advanced=schemaFor('item').filter(field=>!included.includes(field.key)&&!['search_city','search_region','radius','currency'].includes(field.key));
     const count=advanced.filter(field=>own(form.fields,field.key)).length;
     content+=`<details><summary class="sm">Advanced options · ${count} customized</summary><div class="group-fields">${fieldsHtml(advanced.map(field=>field.key))}</div></details>`;
@@ -627,6 +627,35 @@ function formHtml() {
     content+=fieldsHtml(['enabled']);
   } else content=nameHtml+fieldsHtml(schemaFor(form.prefix).map(field=>field.key));
   return `<form id="section-form" class="form-content" autocomplete="off"><div class="body">${content}</div></form>${saveBarHtml()}`;
+}
+const SEARCH_SUGGESTION_KEYS=['search_phrases','description','keywords','antikeywords','category','condition','min_price','max_price'];
+function fillHtml() {
+  return `<div class="f"><label class="l" for="fill-request">Fill with AI</label><div class="field"><div class="row"><input class="in" id="fill-request" value="${esc(state.form.fillRequest||'')}" maxlength="500" placeholder="e.g. iphone 13 pro, good battery, under 600" style="flex:1"><button class="btn sm" id="fill-ai" type="button">Fill with AI</button></div><p class="hint" id="fill-status" role="status">Suggests search phrases, keywords and a description. Only empty fields are filled; review them before saving.</p></div></div>`;
+}
+async function fillWithAi() {
+  const form=state.form,request=$('#fill-request').value.trim(),status=$('#fill-status'),button=$('#fill-ai');
+  if(!request){status.textContent='Describe what you want to find first.';$('#fill-request').focus();return;}
+  form.fillRequest=request;button.disabled=true;button.textContent='Filling…';status.textContent='Asking the AI…';
+  try {
+    const data=await json('/api/items/suggest',{method:'POST',body:JSON.stringify({request})});
+    if(state.form!==form)return;
+    const filledKeys=applySearchSuggestion(data.fields);
+    $('#pane').innerHTML=pageHeader('New search')+formHtml();bindForm();renderSidebar();updateSaveBar();
+    const visible=itemGroups.flatMap(group=>group[1]);
+    if(filledKeys.some(key=>!visible.includes(key)))$('#section-form details').open=true;
+    $('#fill-status').textContent=filledKeys.length?`${data.backend} filled ${filledKeys.length} field${filledKeys.length===1?'':'s'}. Review them before saving.`:`${data.backend} had nothing to add to your filled fields.`;
+  } catch(error) {
+    if(state.form===form)status.textContent=error.message;
+  } finally {
+    button.disabled=false;button.textContent='Fill with AI';
+  }
+}
+function applySearchSuggestion(fields) {
+  const form=state.form;
+  const filledKeys=Object.keys(fields||{}).filter(key=>SEARCH_SUGGESTION_KEYS.includes(key)&&filled(fields[key])&&!filled(own(form.changes,key)?form.changes[key]:form.fields[key]));
+  for(const key of filledKeys)setChange(key,fields[key]);
+  form.aiFilled=new Set(filledKeys);
+  return filledKeys;
 }
 function mountForm(prefix,name,isNew = false,preset = {},standalone = true) {
   prepareForm(prefix,name,isNew,preset);
@@ -697,6 +726,9 @@ function bindForm() {
   });
   $('#user-smtp')?.addEventListener('click',()=>{if(excludeSharedChannels(['Email'])===false)return;toast('Shared email settings excluded. Fill in the SMTP fields for this user.');});
   $('#section-form').onsubmit=event=>{event.preventDefault();saveForm();};
+  $('#fill-ai')?.addEventListener('click',fillWithAi);
+  $('#fill-request')?.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();fillWithAi();}});
+  for(const type of ['input','change'])$('#section-form').addEventListener(type,event=>{const field=event.target.closest?.('.ai-filled');if(field){field.classList.remove('ai-filled');state.form.aiFilled?.delete(field.dataset.field);}});
   $('#form-cancel').onclick=async()=>{if(dirty()&&!await confirmAction('Discard draft?','Unsaved changes will be lost.','Discard'))return;const prefix=state.form.prefix,name=state.form.name,returnRoute=state.form.returnRoute;state.content=state.base;state.form=null;state.error='';state.conflict=null;if(prefix==='item'){await navigate(returnRoute||itemRoute(name));}else{state.route='#'+routeParts().path;history.replaceState(null,'',state.route);refreshData();render();}};
 }
 function bindChips(widget) {

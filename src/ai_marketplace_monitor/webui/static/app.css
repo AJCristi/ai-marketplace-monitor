@@ -279,6 +279,7 @@ html,body{height:100%;margin:0}
 .field{min-width:0}
 .field .in,.field .ta,.field .sel{max-width:660px}
 .field-mode{margin-bottom:6px;max-width:420px}
+.field.ai-filled{border-left:3px solid var(--acc);padding-left:9px}
 .f .field:has(.field-mode) .field-value{margin-top:6px}
 .secret input{min-width:0}
 .group-fields{margin-top:14px}
