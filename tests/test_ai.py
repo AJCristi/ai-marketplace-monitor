@@ -21,6 +21,7 @@ from ai_marketplace_monitor.ai import (
     general_assessment_config,
     match_chat_prompt,
     parse_rating_answer,
+    parse_search_suggestion,
 )
 from ai_marketplace_monitor.facebook import FacebookItemConfig, FacebookMarketplaceConfig
 from ai_marketplace_monitor.listing import Listing
@@ -224,6 +225,38 @@ def test_rating_answer_parsing_keeps_comment_after_or_before_the_rating_line() -
     assert parse_rating_answer("No verdict here") is None
     assert parse_rating_answer("  ") is None
     assert parse_rating_answer("- Seller Rating: unknown\n- Max price 300: met") is None
+
+
+def test_search_suggestion_keeps_only_valid_form_fields() -> None:
+    answer = (
+        "<think>{draft}</think>```json\n"
+        '{"search_phrases": ["iphone 13 pro", " iphone  13 pro ", "", 7], '
+        '"description": "Unlocked  phone\\nwith good battery.", "keywords": "iphone", '
+        '"antikeywords": ["case", "parts"], "category": "electronics", '
+        '"condition": ["used_good", "mint"], "min_price": true, "max_price": "600", '
+        '"notify": ["everyone"]}\n```'
+    )
+    assert parse_search_suggestion(answer) == {
+        "search_phrases": ["iphone 13 pro"],
+        "description": "Unlocked phone with good battery.",
+        "keywords": ["iphone"],
+        "antikeywords": ["case", "parts"],
+        "category": "electronics",
+        "condition": ["used_good"],
+        "max_price": "600",
+    }
+    assert parse_search_suggestion(
+        '{"search_phrases": ["bike"], "category": "bikes", "min_price": 0, "max_price": 99.6}'
+    ) == {"search_phrases": ["bike"], "max_price": "100"}
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["Sorry, I cannot help.", "{not json}", '["bike"]', '{"description": "A bike"}'],
+)
+def test_search_suggestion_rejects_unusable_replies(answer: str) -> None:
+    with pytest.raises(ValueError):
+        parse_search_suggestion(answer)
 
 
 CLEF_RESULT = {

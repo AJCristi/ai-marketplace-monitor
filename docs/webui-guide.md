@@ -137,6 +137,13 @@ to create one chip per phrase, and use its x button to remove it. Moving away fr
 an unfinished chip input can also add the text; Enter makes the intended list
 explicit.
 
+To start faster, type a short request such as `gopro hero 11 under 300` into
+**Fill with AI** on a new search and select the button. The configured AI suggests
+search phrases, a description, keywords, anti-keywords and category; it adds prices
+or condition only when your request states them. Only empty fields are filled, and
+filled fields are marked until you edit them. Nothing is saved until you select
+**Save search**. Filling needs an enabled AI that supports chat; Cloudflare Clef does not.
+
 Saving validates the configuration. The monitor reloads it at its next safe point
 and may restart searches. A successful save is not a promise of immediate results
 or delivered alerts.

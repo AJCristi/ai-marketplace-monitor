@@ -20,7 +20,7 @@ function consoleUnderTest() {
   const document={querySelector:control,querySelectorAll:()=>[],addEventListener(){},cookie:''};
   const sandbox={...model,parse,edit:(content,path,value)=>edit(content,path,structuredClone(value)),FORM_SCHEMAS,BUILT_IN_REGIONS,document,location:{hash:'#/monitor'},history:{replaceState(){}},window:{addEventListener(){}},localStorage:{getItem:()=>null},structuredClone,URLSearchParams,URL,console,setTimeout:()=>0,clearTimeout(){}};
   const context=vm.createContext(sandbox);
-  vm.runInContext(source.slice(0,source.lastIndexOf('try{await initToml')).replace(/^import .*;\r?\n/gm,'')+'\nresult={state,prepareForm,candidateFromForm,fieldDefault,refreshData,locationHtml,renderFeed,acceptRecords,renderConflict,deleteSection,showLogin,bindChips,saveRaw,toggleSearch,renderActivity,exportCsv};',context);
+  vm.runInContext(source.slice(0,source.lastIndexOf('try{await initToml')).replace(/^import .*;\r?\n/gm,'')+'\nresult={state,prepareForm,candidateFromForm,fieldDefault,refreshData,locationHtml,renderFeed,acceptRecords,renderConflict,deleteSection,showLogin,bindChips,saveRaw,toggleSearch,renderActivity,exportCsv,applySearchSuggestion};',context);
   sandbox.result.control=control;
   sandbox.result.run=(code,values={})=>{Object.assign(sandbox,values);return vm.runInContext(code,context);};
   return sandbox.result;
@@ -33,6 +33,17 @@ test('notification form defaults include normalized shared values',()=>{
   app.refreshData();app.prepareForm('user','me');
   assert.equal(app.fieldDefault(app.state.form,'rate_limit_enabled'),false);
   assert.equal(app.fieldDefault(app.state.form,'global_rate_limit'),10);
+});
+
+test('AI search suggestion fills only empty item fields and saves them as TOML',()=>{
+  const app=consoleUnderTest();app.state.context={inherited:{}};app.state.content='';app.state.local={};app.state.config={};
+  app.prepareForm('item','phone',true,{description:'My own words'});
+  app.state.form.changes={max_price:'500',min_price:null};
+  const filledKeys=app.applySearchSuggestion({search_phrases:['iphone 13 pro'],description:'AI words',max_price:'600',min_price:'200',antikeywords:['case'],notify:['everyone'],keywords:[]});
+  assert.deepEqual([...filledKeys],['search_phrases','min_price','antikeywords']);
+  assert.deepEqual([...app.state.form.aiFilled],['search_phrases','min_price','antikeywords']);
+  const item=parse(app.candidateFromForm().content).item.phone;
+  assert.deepEqual(item,{description:'My own words',max_price:'500',search_phrases:['iphone 13 pro'],min_price:'200',antikeywords:['case']});
 });
 
 test('one currency chip applies to every region city',()=>{

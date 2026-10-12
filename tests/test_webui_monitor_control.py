@@ -442,3 +442,49 @@ def test_cancel_drops_requested_item_searches() -> None:
     assert monitor.rechecks.wake.is_set()
     monitor.cancel_search()
     assert not monitor.run_requested_item_search()
+
+
+def test_suggest_search_fills_fields_from_the_default_ai(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("", encoding="utf-8")
+    state = AuthState()
+    state.exposed = True
+    state.auth = AuthConfig("test", hash_password("synthetic-password"), "synthetic-secret")
+    config = WebUIConfig(config_files=[path])
+    client = TestClient(
+        create_app(config, state, ConfigFileService([path]), LogBroadcastHandler())
+    )
+    url, body = "/api/items/suggest", {"request": "iphone 13 pro under 600"}
+    calls: list[Any] = []
+    backend = SimpleNamespace(config=SimpleNamespace(name="mimo"), logger=Mock())
+
+    def chat(system: str, messages: list[dict[str, str]], photos: list[bytes], limit: int) -> Any:
+        calls.append((system, messages, photos))
+        yield '{"search_phrases": ["iphone 13 pro"], '
+        yield '"max_price": 600, "notify": ["everyone"]}'
+
+    backend.chat = chat
+    assert client.post(url, json=body).status_code == 401
+    client.post("/api/login", data={"username": "test", "password": "synthetic-password"})
+    assert client.post(url, json=body).status_code == 403
+    headers = {CSRF_HEADER: client.cookies["aimm_csrf"]}
+    for invalid in ({}, {"request": " "}, {"request": "x" * 501}, {**body, "extra": 1}):
+        assert client.post(url, json=invalid, headers=headers).status_code == 400
+    assert client.post(url, json=body, headers=headers).status_code == 503
+    config.chat_backend = Mock(return_value=(backend, None))
+    reply = client.post(url, json=body, headers=headers)
+    assert reply.json() == {
+        "fields": {"search_phrases": ["iphone 13 pro"], "max_price": "600"},
+        "backend": "mimo",
+    }
+    config.chat_backend.assert_called_with("")
+    assert calls[-1][1] == [{"role": "user", "content": "iphone 13 pro under 600"}]
+
+    backend.chat = Mock(return_value=iter(["I cannot help with that."]))
+    unusable = client.post(url, json=body, headers=headers)
+    assert unusable.status_code == 502 and "JSON" in unusable.json()["detail"]
+    backend.chat = Mock(side_effect=NotImplementedError)
+    assert client.post(url, json=body, headers=headers).status_code == 503
+    backend.chat = Mock(side_effect=RuntimeError("synthetic outage"))
+    failed = client.post(url, json=body, headers=headers)
+    assert failed.status_code == 502 and "outage" not in failed.json()["detail"]
