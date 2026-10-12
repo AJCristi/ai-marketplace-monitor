@@ -1,5 +1,6 @@
 """Regression checks for manual searches with unchanged config content."""
 
+import json
 import logging
 import socketserver
 import subprocess
@@ -444,7 +445,7 @@ def test_cancel_drops_requested_item_searches() -> None:
     assert not monitor.run_requested_item_search()
 
 
-def test_suggest_search_fills_fields_from_the_default_ai(tmp_path: Path) -> None:
+def test_search_chat_streams_reply_then_validated_fields(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text("", encoding="utf-8")
     state = AuthState()
@@ -454,37 +455,79 @@ def test_suggest_search_fills_fields_from_the_default_ai(tmp_path: Path) -> None
     client = TestClient(
         create_app(config, state, ConfigFileService([path]), LogBroadcastHandler())
     )
-    url, body = "/api/items/suggest", {"request": "iphone 13 pro under 600"}
+    url = "/api/items/suggest"
+    messages = [{"role": "user", "content": "iphone 13 pro under 600"}]
+    body = {
+        "item": "phone",
+        "messages": messages,
+        "fields": {"max_price": "700"},
+        "web_search": False,
+    }
     calls: list[Any] = []
-    backend = SimpleNamespace(config=SimpleNamespace(name="mimo"), logger=Mock())
+    backend = SimpleNamespace(
+        config=SimpleNamespace(name="mimo"), logger=Mock(), supports_web_search=lambda: False
+    )
 
-    def chat(system: str, messages: list[dict[str, str]], photos: list[bytes], limit: int) -> Any:
-        calls.append((system, messages, photos))
-        yield '{"search_phrases": ["iphone 13 pro"], '
-        yield '"max_price": 600, "notify": ["everyone"]}'
+    def chat(
+        system: str,
+        messages: list[dict[str, str]],
+        photos: list[bytes],
+        limit: int,
+        **options: Any,
+    ) -> Any:
+        calls.append((system, messages, photos, options))
+        yield 'Done. <search>{"search_phrases": ["iphone 13 pro"], '
+        yield '"max_price": 600, "notify": ["everyone"]}</search>'
+
+    def events(reply: Any) -> list[dict[str, Any]]:
+        return [json.loads(line) for line in reply.text.splitlines()]
 
     backend.chat = chat
+    assert client.get(url).status_code == 401
     assert client.post(url, json=body).status_code == 401
     client.post("/api/login", data={"username": "test", "password": "synthetic-password"})
     assert client.post(url, json=body).status_code == 403
     headers = {CSRF_HEADER: client.cookies["aimm_csrf"]}
-    for invalid in ({}, {"request": " "}, {"request": "x" * 501}, {**body, "extra": 1}):
+    for invalid in (
+        {},
+        {**body, "extra": 1},
+        {**body, "messages": [{"role": "assistant", "content": "Hi"}]},
+        {**body, "fields": {"notify": ["everyone"]}},
+        {**body, "fields": {"description": "x" * 20_001}},
+        {**body, "web_search": "yes"},
+    ):
         assert client.post(url, json=invalid, headers=headers).status_code == 400
+    assert client.get(url).status_code == 503
     assert client.post(url, json=body, headers=headers).status_code == 503
     config.chat_backend = Mock(return_value=(backend, None))
-    reply = client.post(url, json=body, headers=headers)
-    assert reply.json() == {
-        "fields": {"search_phrases": ["iphone 13 pro"], "max_price": "600"},
+    assert client.get(url, params={"item": "phone"}).json() == {
         "backend": "mimo",
+        "web_search": False,
     }
-    config.chat_backend.assert_called_with("")
-    assert calls[-1][1] == [{"role": "user", "content": "iphone 13 pro under 600"}]
+    reply = client.post(url, json=body, headers=headers)
+    assert events(reply)[-1] == {
+        "fields": {"search_phrases": ["iphone 13 pro"], "max_price": "600"}
+    }
+    assert "".join(event.get("text", "") for event in events(reply)).startswith("Done.")
+    config.chat_backend.assert_called_with("phone")
+    system, sent, _photos, options = calls[-1]
+    assert sent == messages and options == {"web_search": False}
+    assert '{"max_price": "700"}' in system
+    assert client.post(url, json={**body, "web_search": True}, headers=headers).status_code == 400
 
-    backend.chat = Mock(return_value=iter(["I cannot help with that."]))
-    unusable = client.post(url, json=body, headers=headers)
-    assert unusable.status_code == 502 and "JSON" in unusable.json()["detail"]
+    backend.chat = Mock(return_value=iter(["Which storage size?"]))
+    assert events(client.post(url, json=body, headers=headers)) == [
+        {"text": "Which storage size?"}
+    ]
+    backend.chat = Mock(return_value=iter(["<search>{broken</search>"]))
+    assert "warning" in events(client.post(url, json=body, headers=headers))[-1]
     backend.chat = Mock(side_effect=NotImplementedError)
     assert client.post(url, json=body, headers=headers).status_code == 503
-    backend.chat = Mock(side_effect=RuntimeError("synthetic outage"))
-    failed = client.post(url, json=body, headers=headers)
-    assert failed.status_code == 502 and "outage" not in failed.json()["detail"]
+
+    def outage(*_args: Any, **_options: Any) -> Any:
+        yield "Partial"
+        raise RuntimeError("synthetic outage")
+
+    backend.chat = outage
+    failed = events(client.post(url, json=body, headers=headers))
+    assert failed[-1] == {"error": "mimo failed to answer. See the log."}

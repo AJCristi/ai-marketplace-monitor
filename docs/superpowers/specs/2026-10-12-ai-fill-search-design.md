@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-12
 **Branch:** `feat/ai-fill-search`
-**Status:** v1 implemented
+**Status:** Superseded by [Search assistant chat](2026-10-12-ai-search-chat-design.md)
 
 ## Summary
 

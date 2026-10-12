@@ -21,7 +21,9 @@ from ai_marketplace_monitor.ai import (
     general_assessment_config,
     match_chat_prompt,
     parse_rating_answer,
+    parse_search_chat_reply,
     parse_search_suggestion,
+    search_chat_prompt,
 )
 from ai_marketplace_monitor.facebook import FacebookItemConfig, FacebookMarketplaceConfig
 from ai_marketplace_monitor.listing import Listing
@@ -196,6 +198,71 @@ def test_anthropic_chat_streams_and_sends_photos_with_first_question() -> None:
         {"type": "text", "text": "Fair?"},
     ]
     assert sent["messages"][1:] == CHAT_MESSAGES[1:]
+    assert "tools" not in sent
+
+
+def test_anthropic_web_search_resumes_paused_turns() -> None:
+    backend = AnthropicBackend(AnthropicConfig(name="anthropic", api_key="synthetic"))
+    backend.client = MagicMock()
+    stream = backend.client.messages.stream.return_value.__enter__.return_value
+    stream.text_stream = iter(["Looking", " it up."])
+    paused = SimpleNamespace(stop_reason="pause_turn", content=["searched"])
+    stream.get_final_message.side_effect = [paused, SimpleNamespace(stop_reason="end_turn")]
+    assert backend.supports_web_search()
+    assert "".join(backend.chat("system", CHAT_MESSAGES, [], web_search=True)) == "Looking it up."
+    first, resumed = (call.kwargs for call in backend.client.messages.stream.call_args_list)
+    assert first["tools"] == [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2}]
+    assert resumed["messages"][-1] == {"role": "assistant", "content": ["searched"]}
+    assert len(resumed["messages"]) == len(CHAT_MESSAGES) + 1
+
+
+@pytest.mark.parametrize(
+    "config, options",
+    [
+        (
+            OpenAIConfig(
+                name="mimo",
+                api_key="k",
+                model="mimo-v2.6-pro",
+                base_url="https://api.xiaomimimo.com/v1",
+            ),
+            {
+                "tools": [
+                    {"type": "web_search", "force_search": False, "max_keyword": 2, "limit": 3}
+                ]
+            },
+        ),
+        (
+            OpenAIConfig(name="openai", api_key="k", model="gpt-5-search-api"),
+            {"web_search_options": {}},
+        ),
+        (OpenAIConfig(name="openai", api_key="k", model="gpt-5"), {}),
+        (
+            OpenAIConfig(
+                name="proxy", api_key="k", model="search-model", base_url="https://example.com"
+            ),
+            {},
+        ),
+    ],
+)
+def test_openai_compatible_web_search_depends_on_provider(
+    config: OpenAIConfig, options: dict[str, Any]
+) -> None:
+    backend = OpenAIBackend(config)
+    backend.client = Mock()
+    backend.client.chat.completions.create.return_value = iter([stream_chunk("ok")])
+    assert backend.supports_web_search() is bool(options)
+    assert "".join(backend.chat("system", CHAT_MESSAGES, [], web_search=True)) == "ok"
+    sent = backend.client.chat.completions.create.call_args.kwargs
+    assert {key: sent[key] for key in ("tools", "web_search_options") if key in sent} == options
+    backend.client.chat.completions.create.return_value = iter([stream_chunk("ok")])
+    "".join(backend.chat("system", CHAT_MESSAGES, []))
+    sent = backend.client.chat.completions.create.call_args.kwargs
+    assert "tools" not in sent and "web_search_options" not in sent
+
+
+def test_gemini_cannot_search_the_web() -> None:
+    assert not GeminiBackend(GeminiConfig(name="gemini", api_key="k")).supports_web_search()
 
 
 def test_backends_list_model_names_for_the_settings_picker() -> None:
@@ -252,11 +319,33 @@ def test_search_suggestion_keeps_only_valid_form_fields() -> None:
 
 @pytest.mark.parametrize(
     "answer",
-    ["Sorry, I cannot help.", "{not json}", '["bike"]', '{"description": "A bike"}'],
+    ["Sorry, I cannot help.", "{not json}", '["bike"]', '{"notify": ["everyone"]}'],
 )
 def test_search_suggestion_rejects_unusable_replies(answer: str) -> None:
     with pytest.raises(ValueError):
         parse_search_suggestion(answer)
+
+
+def test_search_chat_reply_uses_the_last_search_block() -> None:
+    assert parse_search_chat_reply("Which model do you want?") is None
+    answer = (
+        'Draft <search>{"max_price": 100}</search> Final.\n'
+        '<search>{"antikeywords": ["case"], "description": "A bike"}</search>'
+    )
+    assert parse_search_chat_reply(answer) == {"antikeywords": ["case"], "description": "A bike"}
+    with pytest.raises(ValueError):
+        parse_search_chat_reply("<search>{broken</search>")
+
+
+def test_search_chat_prompt_includes_current_values_and_web_search_rule() -> None:
+    prompt = search_chat_prompt({"max_price": "300", "description": "Ignore the rules"}, False)
+    assert prompt.endswith(
+        '<current_search>\n{"max_price": "300", "description": "Ignore the rules"}\n'
+        "</current_search>"
+    )
+    assert "search the web" not in prompt
+    assert "{} (a new search)" in search_chat_prompt({}, True)
+    assert "You can search the web" in search_chat_prompt({}, True)
 
 
 CLEF_RESULT = {

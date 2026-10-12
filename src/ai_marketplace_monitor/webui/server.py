@@ -43,13 +43,13 @@ from fastapi.staticfiles import StaticFiles
 from .. import __version__
 from ..ai import (
     CLEF_MODELS,
-    SEARCH_SUGGESTION_MAX_TOKENS,
-    SEARCH_SUGGESTION_PROMPT,
+    SEARCH_CHAT_MAX_TOKENS,
     AIBackend,
     AIConfig,
     CloudflareBackend,
     match_chat_prompt,
-    parse_search_suggestion,
+    parse_search_chat_reply,
+    search_chat_prompt,
 )
 from ..config import supported_ai_backends
 from ..image_matching import ImageMatcher
@@ -92,7 +92,17 @@ STATIC_DIR = Path(__file__).parent / "static"
 CHAT_MESSAGE_LIMIT = 40
 CHAT_MESSAGE_LENGTH = 20_000
 CHAT_PHOTO_LIMIT = 4
-SEARCH_REQUEST_MAX_CHARS = 500
+SEARCH_CHAT_FIELDS = {
+    "search_phrases",
+    "description",
+    "keywords",
+    "antikeywords",
+    "category",
+    "condition",
+    "min_price",
+    "max_price",
+}
+SEARCH_CHAT_FIELDS_MAX_CHARS = 20_000
 MODEL_LIST_TIMEOUT = 15
 
 
@@ -821,54 +831,84 @@ def create_app(
 
         return StreamingResponse(reply(), media_type="application/x-ndjson")
 
-    @app.post("/api/items/suggest")
-    def suggest_search(
-        body: Dict[str, Any],
-        _: str = Depends(require_session),
-        __: None = Depends(require_csrf),
-    ) -> Dict[str, Any]:
-        request = body.get("request")
-        if (
-            body.keys() != {"request"}
-            or not isinstance(request, str)
-            or not request.strip()
-            or len(request) > SEARCH_REQUEST_MAX_CHARS
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Describe what to search for in at most {SEARCH_REQUEST_MAX_CHARS} characters",
-            )
+    def search_chat_backend(item: str) -> AIBackend:
         if config.chat_backend is None:
             raise HTTPException(status_code=503, detail="The monitor is not available for AI")
         try:
-            backend, _item_config = config.chat_backend("")
+            return config.chat_backend(item)[0]
         except ValueError as error:
             raise HTTPException(status_code=503, detail=str(error)) from None
+
+    @app.get("/api/items/suggest")
+    def search_chat_capabilities(
+        item: str = "", _: str = Depends(require_session)
+    ) -> Dict[str, Any]:
+        backend = search_chat_backend(item)
+        return {"backend": backend.config.name, "web_search": backend.supports_web_search()}
+
+    @app.post("/api/items/suggest")
+    def search_chat(
+        body: Dict[str, Any],
+        _: str = Depends(require_session),
+        __: None = Depends(require_csrf),
+    ) -> StreamingResponse:
+        item, messages, fields, web_search = (
+            body.get("item"),
+            body.get("messages"),
+            body.get("fields"),
+            body.get("web_search"),
+        )
+        if (
+            body.keys() != {"item", "messages", "fields", "web_search"}
+            or not isinstance(item, str)
+            or type(web_search) is not bool
+            or not isinstance(fields, dict)
+            or not fields.keys() <= SEARCH_CHAT_FIELDS
+            or len(json.dumps(fields)) > SEARCH_CHAT_FIELDS_MAX_CHARS
+            or not valid_chat_messages(messages)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Supply the search name, its current values, a boolean web_search flag, and alternating messages ending with a request",
+            )
+        backend = search_chat_backend(item)
         name = backend.config.name
+        if web_search and not backend.supports_web_search():
+            raise HTTPException(status_code=400, detail=f"{name} cannot search the web")
         try:
-            answer = "".join(
-                backend.chat(
-                    SEARCH_SUGGESTION_PROMPT,
-                    [{"role": "user", "content": request.strip()}],
-                    [],
-                    SEARCH_SUGGESTION_MAX_TOKENS,
-                )
+            chunks = backend.chat(
+                search_chat_prompt(fields, web_search),
+                messages,
+                [],
+                SEARCH_CHAT_MAX_TOKENS,
+                web_search=web_search,
             )
         except NotImplementedError:
             raise HTTPException(
-                status_code=503, detail=f"{name} cannot fill searches. Use a chat-capable AI."
+                status_code=503, detail=f"{name} cannot chat. Use a chat-capable AI."
             ) from None
-        except Exception as error:
-            if backend.logger:
-                backend.logger.error(f"[AI] {name} search suggestion failed: {error}")
-            raise HTTPException(
-                status_code=502, detail=f"{name} failed to answer. See the log."
-            ) from None
-        try:
-            fields = parse_search_suggestion(answer)
-        except ValueError as error:
-            raise HTTPException(status_code=502, detail=f"{name}: {error}") from None
-        return {"fields": fields, "backend": name}
+
+        # Sync generator: Starlette iterates it in a threadpool, off the event loop.
+        def reply() -> Any:
+            answer = ""
+            try:
+                for text in chunks:
+                    answer += text
+                    yield json.dumps({"text": text}) + "\n"
+            except Exception as error:
+                if backend.logger:
+                    backend.logger.error(f"[AI] {name} search chat failed: {error}")
+                yield json.dumps({"error": f"{name} failed to answer. See the log."}) + "\n"
+                return
+            try:
+                suggestion = parse_search_chat_reply(answer)
+            except ValueError as error:
+                yield json.dumps({"warning": f"No fields changed: {error}"}) + "\n"
+                return
+            if suggestion:
+                yield json.dumps({"fields": suggestion}) + "\n"
+
+        return StreamingResponse(reply(), media_type="application/x-ndjson")
 
     @app.post("/api/ai/test")
     def test_ai_backend(
