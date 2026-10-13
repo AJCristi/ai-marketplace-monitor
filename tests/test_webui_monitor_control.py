@@ -574,7 +574,9 @@ def test_search_chat_streams_reply_then_validated_fields(tmp_path: Path) -> None
         {"text": "Which storage size?"}
     ]
     backend.chat = Mock(return_value=iter(["<search>{broken</search>"]))
-    assert "warning" in events(client.post(url, json=body, headers=headers))[-1]
+    assert events(client.post(url, json=body, headers=headers))[-1] == {
+        "warning": "No fields changed: the AI's suggested values could not be read."
+    }
     backend.chat = Mock(side_effect=NotImplementedError)
     assert client.post(url, json=body, headers=headers).status_code == 503
 

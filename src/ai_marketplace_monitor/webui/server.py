@@ -904,8 +904,9 @@ def create_app(
                 return
             try:
                 suggestion = parse_search_chat_reply(answer)
-            except ValueError as error:
-                yield json.dumps({"warning": f"No fields changed: {error}"}) + "\n"
+            except ValueError:
+                warning = "No fields changed: the AI's suggested values could not be read."
+                yield json.dumps({"warning": warning}) + "\n"
                 return
             if suggestion:
                 yield json.dumps({"fields": suggestion}) + "\n"
