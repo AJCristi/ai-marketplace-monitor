@@ -43,13 +43,13 @@ from fastapi.staticfiles import StaticFiles
 from .. import __version__
 from ..ai import (
     CLEF_MODELS,
-    SEARCH_SUGGESTION_MAX_TOKENS,
-    SEARCH_SUGGESTION_PROMPT,
+    SEARCH_CHAT_MAX_TOKENS,
     AIBackend,
     AIConfig,
     CloudflareBackend,
     match_chat_prompt,
-    parse_search_suggestion,
+    parse_search_chat_reply,
+    search_chat_prompt,
 )
 from ..config import supported_ai_backends
 from ..image_matching import ImageMatcher
@@ -64,6 +64,7 @@ from ..matches import (
     update_state,
 )
 from ..photos import THUMBNAIL_CACHE_SIZE, thumbnail_webp
+from ..price_check import PriceCheckQueue, price_check_context
 from ..recheck import RecheckQueue, facebook_listing_id
 from ..utils import cache
 from .auth import (
@@ -92,7 +93,17 @@ STATIC_DIR = Path(__file__).parent / "static"
 CHAT_MESSAGE_LIMIT = 40
 CHAT_MESSAGE_LENGTH = 20_000
 CHAT_PHOTO_LIMIT = 4
-SEARCH_REQUEST_MAX_CHARS = 500
+SEARCH_CHAT_FIELDS = {
+    "search_phrases",
+    "description",
+    "keywords",
+    "antikeywords",
+    "category",
+    "condition",
+    "min_price",
+    "max_price",
+}
+SEARCH_CHAT_FIELDS_MAX_CHARS = 20_000
 MODEL_LIST_TIMEOUT = 15
 
 
@@ -145,6 +156,7 @@ class WebUIConfig:
     facebook_login: Callable[[], str | None] | None = None
     rechecks: RecheckQueue | None = None
     image_matcher: ImageMatcher | None = None
+    price_checks: PriceCheckQueue | None = None
     chat_backend: Callable[[str], tuple[AIBackend, Any]] | None = None
     ai_test_backend: Callable[[str, str], tuple[AIBackend, Any, Any]] | None = None
     saved_ai_config: Callable[[str], AIConfig | None] | None = None
@@ -821,54 +833,152 @@ def create_app(
 
         return StreamingResponse(reply(), media_type="application/x-ndjson")
 
-    @app.post("/api/items/suggest")
-    def suggest_search(
-        body: Dict[str, Any],
-        _: str = Depends(require_session),
-        __: None = Depends(require_csrf),
-    ) -> Dict[str, Any]:
-        request = body.get("request")
-        if (
-            body.keys() != {"request"}
-            or not isinstance(request, str)
-            or not request.strip()
-            or len(request) > SEARCH_REQUEST_MAX_CHARS
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Describe what to search for in at most {SEARCH_REQUEST_MAX_CHARS} characters",
-            )
+    def search_chat_backend(item: str) -> AIBackend:
         if config.chat_backend is None:
             raise HTTPException(status_code=503, detail="The monitor is not available for AI")
         try:
-            backend, _item_config = config.chat_backend("")
+            return config.chat_backend(item)[0]
         except ValueError as error:
             raise HTTPException(status_code=503, detail=str(error)) from None
+
+    @app.get("/api/items/suggest")
+    def search_chat_capabilities(
+        item: str = "", _: str = Depends(require_session)
+    ) -> Dict[str, Any]:
+        backend = search_chat_backend(item)
+        return {"backend": backend.config.name, "web_search": backend.supports_web_search()}
+
+    @app.post("/api/items/suggest")
+    def search_chat(
+        body: Dict[str, Any],
+        _: str = Depends(require_session),
+        __: None = Depends(require_csrf),
+    ) -> StreamingResponse:
+        item, messages, fields, web_search = (
+            body.get("item"),
+            body.get("messages"),
+            body.get("fields"),
+            body.get("web_search"),
+        )
+        if (
+            body.keys() != {"item", "messages", "fields", "web_search"}
+            or not isinstance(item, str)
+            or type(web_search) is not bool
+            or not isinstance(fields, dict)
+            or not fields.keys() <= SEARCH_CHAT_FIELDS
+            or len(json.dumps(fields)) > SEARCH_CHAT_FIELDS_MAX_CHARS
+            or not valid_chat_messages(messages)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Supply the search name, its current values, a boolean web_search flag, and alternating messages ending with a request",
+            )
+        backend = search_chat_backend(item)
         name = backend.config.name
+        if web_search and not backend.supports_web_search():
+            raise HTTPException(status_code=400, detail=f"{name} cannot search the web")
         try:
-            answer = "".join(
-                backend.chat(
-                    SEARCH_SUGGESTION_PROMPT,
-                    [{"role": "user", "content": request.strip()}],
-                    [],
-                    SEARCH_SUGGESTION_MAX_TOKENS,
-                )
+            chunks = backend.chat(
+                search_chat_prompt(fields, web_search),
+                messages,
+                [],
+                SEARCH_CHAT_MAX_TOKENS,
+                web_search=web_search,
             )
         except NotImplementedError:
             raise HTTPException(
-                status_code=503, detail=f"{name} cannot fill searches. Use a chat-capable AI."
+                status_code=503, detail=f"{name} cannot chat. Use a chat-capable AI."
             ) from None
-        except Exception as error:
-            if backend.logger:
-                backend.logger.error(f"[AI] {name} search suggestion failed: {error}")
+
+        # Sync generator: Starlette iterates it in a threadpool, off the event loop.
+        def reply() -> Any:
+            answer = ""
+            try:
+                for text in chunks:
+                    answer += text
+                    yield json.dumps({"text": text}) + "\n"
+            except Exception as error:
+                if backend.logger:
+                    backend.logger.error(f"[AI] {name} search chat failed: {error}")
+                yield json.dumps({"error": f"{name} failed to answer. See the log."}) + "\n"
+                return
+            try:
+                suggestion = parse_search_chat_reply(answer)
+            except ValueError:
+                warning = "No fields changed: the AI's suggested values could not be read."
+                yield json.dumps({"warning": warning}) + "\n"
+                return
+            if suggestion:
+                yield json.dumps({"fields": suggestion}) + "\n"
+
+        return StreamingResponse(reply(), media_type="application/x-ndjson")
+
+    def price_check_queue() -> PriceCheckQueue:
+        if config.price_checks is None:
             raise HTTPException(
-                status_code=502, detail=f"{name} failed to answer. See the log."
-            ) from None
+                status_code=503, detail="The monitor is not available for price checks"
+            )
+        return config.price_checks
+
+    def price_check_job(job: Dict[str, Any]) -> Dict[str, Any]:
+        if job["result"] is not None:
+            job["result"]["context"] = price_check_context(job["result"])
+        return job
+
+    @app.post("/api/items/price-check")
+    def start_price_check(
+        body: Dict[str, Any], _: str = Depends(require_session), __: None = Depends(require_csrf)
+    ) -> Dict[str, Any]:
+        item, phrases, antikeywords = (
+            body.get("item"),
+            body.get("search_phrases"),
+            body.get("antikeywords"),
+        )
+
+        def terms(value: Any, minimum: int) -> TypeGuard[list[str]]:
+            return (
+                isinstance(value, list)
+                and minimum <= len(value) <= 50
+                and all(isinstance(term, str) and 0 < len(term.strip()) <= 200 for term in value)
+            )
+
+        if (
+            body.keys() != {"item", "search_phrases", "antikeywords"}
+            or not isinstance(item, str)
+            or len(item) > 200
+            or not terms(phrases, 1)
+            or not terms(antikeywords, 0)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Supply the search name, at least one search phrase, and anti-keywords",
+            )
         try:
-            fields = parse_search_suggestion(answer)
+            return price_check_queue().enqueue(
+                {
+                    "item": item,
+                    "search_phrases": [phrase.strip() for phrase in phrases],
+                    "antikeywords": antikeywords,
+                }
+            )
         except ValueError as error:
-            raise HTTPException(status_code=502, detail=f"{name}: {error}") from None
-        return {"fields": fields, "backend": name}
+            raise HTTPException(status_code=409, detail=str(error)) from None
+
+    @app.get("/api/items/price-check/{job_id}")
+    def price_check_status(job_id: str, _: str = Depends(require_session)) -> Dict[str, Any]:
+        try:
+            return price_check_job(price_check_queue().get(job_id))
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Price check not found") from None
+
+    @app.delete("/api/items/price-check/{job_id}")
+    def stop_price_check(
+        job_id: str, _: str = Depends(require_session), __: None = Depends(require_csrf)
+    ) -> Dict[str, Any]:
+        try:
+            return price_check_job(price_check_queue().stop(job_id))
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Price check not found") from None
 
     @app.post("/api/ai/test")
     def test_ai_backend(

@@ -137,12 +137,32 @@ to create one chip per phrase, and use its x button to remove it. Moving away fr
 an unfinished chip input can also add the text; Enter makes the intended list
 explicit.
 
-To start faster, type a short request such as `gopro hero 11 under 300` into
-**Fill with AI** on a new search and select the button. The configured AI suggests
-search phrases, a description, keywords, anti-keywords and category; it adds prices
-or condition only when your request states them. Only empty fields are filled, and
-filled fields are marked until you edit them. Nothing is saved until you select
-**Save search**. Filling needs an enabled AI that supports chat; Cloudflare Clef does not.
+To start faster, use **Set up with AI** beside the search form. Describe what you
+want, such as `gopro hero 11 under 300`. A specific request fills the form straight
+away; a vague one gets a few short questions first. The AI can set search phrases,
+the description, keywords, anti-keywords, category, condition and prices. It sets
+prices or condition only when you state or agree to them. On an existing search, ask
+for changes such as "make it stricter"; the AI sees the current values. Each reply
+applies its changes to the form at once and marks the changed fields until you edit
+them. Nothing is saved until you select **Save search**, and the conversation is
+dropped when you leave the form. The chat needs an enabled AI that supports chat;
+Cloudflare Clef does not.
+
+**Search the web** appears when the search's AI has its own web search: Anthropic,
+OpenAI `*-search-*` models (these search on every message), and Xiaomi MiMo. With it
+ticked, the AI searches only when it cannot place the item itself. Your AI provider
+bills each search. MiMo needs a pay-as-you-go key and its Web Search plugin turned
+on in the MiMo console.
+
+**Check Facebook prices** searches Facebook Marketplace results pages for the form's
+first three search phrases in the search's first two cities (or the marketplace
+default), without price filters, and summarizes the asking prices. Listings whose
+titles match your anti-keywords are left out. The card shows the typical range (the
+middle half of prices), the median, the full range and a few example listings.
+**Use typical range** sets the minimum and maximum price; nothing else changes until
+you choose. The AI sees the results with your next chat message. The check uses the
+monitor's browser and waits for a running search; it takes up to about a minute.
+Unsaved location changes are not used.
 
 Saving validates the configuration. The monitor reloads it at its next safe point
 and may restart searches. A successful save is not a promise of immediate results

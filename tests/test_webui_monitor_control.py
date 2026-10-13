@@ -1,5 +1,6 @@
 """Regression checks for manual searches with unchanged config content."""
 
+import json
 import logging
 import socketserver
 import subprocess
@@ -13,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ai_marketplace_monitor.monitor import MarketplaceMonitor
+from ai_marketplace_monitor.price_check import PriceCheckQueue
 from ai_marketplace_monitor.recheck import RecheckQueue
 from ai_marketplace_monitor.utils import SleepStatus
 from ai_marketplace_monitor.webui.auth import CSRF_HEADER, AuthConfig, hash_password
@@ -111,6 +113,7 @@ def test_request_runs_again_with_unchanged_config(
     monitor.requested_item_searches = set()
     monitor.requested_item_searches_lock = threading.Lock()
     monitor.rechecks = RecheckQueue()
+    monitor.price_checks = PriceCheckQueue()
     pending_image: list[bool] = []
     monitor.image_matcher = SimpleNamespace(
         automatic=False, queue=SimpleNamespace(pending=lambda: bool(pending_image))
@@ -339,6 +342,7 @@ def test_fixed_times_do_not_repeat_initial_search(monkeypatch: pytest.MonkeyPatc
     monitor.requested_item_searches = set()
     monitor.requested_item_searches_lock = threading.Lock()
     monitor.rechecks = RecheckQueue()
+    monitor.price_checks = PriceCheckQueue()
     monitor.image_matcher = SimpleNamespace(
         automatic=False, queue=SimpleNamespace(pending=lambda: False)
     )
@@ -383,6 +387,7 @@ def test_item_search_request_runs_only_that_search(monkeypatch: pytest.MonkeyPat
     monitor.requested_item_searches = set()
     monitor.requested_item_searches_lock = threading.Lock()
     monitor.rechecks = RecheckQueue()
+    monitor.price_checks = PriceCheckQueue()
     monitor.image_matcher = SimpleNamespace(
         automatic=False, queue=SimpleNamespace(pending=lambda: False)
     )
@@ -438,13 +443,14 @@ def test_cancel_drops_requested_item_searches() -> None:
     monitor.requested_item_searches = set()
     monitor.requested_item_searches_lock = threading.Lock()
     monitor.rechecks = RecheckQueue()
+    monitor.price_checks = PriceCheckQueue()
     monitor.request_item_search("bike")
     assert monitor.rechecks.wake.is_set()
     monitor.cancel_search()
     assert not monitor.run_requested_item_search()
 
 
-def test_suggest_search_fills_fields_from_the_default_ai(tmp_path: Path) -> None:
+def test_price_check_endpoints_queue_one_check_and_report_its_summary(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text("", encoding="utf-8")
     state = AuthState()
@@ -454,37 +460,130 @@ def test_suggest_search_fills_fields_from_the_default_ai(tmp_path: Path) -> None
     client = TestClient(
         create_app(config, state, ConfigFileService([path]), LogBroadcastHandler())
     )
-    url, body = "/api/items/suggest", {"request": "iphone 13 pro under 600"}
-    calls: list[Any] = []
-    backend = SimpleNamespace(config=SimpleNamespace(name="mimo"), logger=Mock())
+    url = "/api/items/price-check"
+    body = {"item": "gopro", "search_phrases": [" gopro hero 12 "], "antikeywords": ["case"]}
+    assert client.post(url, json=body).status_code == 401
+    client.post("/api/login", data={"username": "test", "password": "synthetic-password"})
+    headers = {CSRF_HEADER: client.cookies["aimm_csrf"]}
+    assert client.post(url, json=body).status_code == 403
+    assert client.post(url, json=body, headers=headers).status_code == 503
+    config.price_checks = PriceCheckQueue()
+    for invalid in (
+        {},
+        {**body, "extra": 1},
+        {**body, "search_phrases": []},
+        {**body, "search_phrases": [" "]},
+        {**body, "antikeywords": "case"},
+        {**body, "item": 3},
+    ):
+        assert client.post(url, json=invalid, headers=headers).status_code == 400
+    job = client.post(url, json=body, headers=headers).json()
+    assert job["state"] == "queued"
+    assert client.post(url, json=body, headers=headers).status_code == 409
+    job_id, request = config.price_checks.take() or ("", {})
+    assert request == {
+        "item": "gopro",
+        "search_phrases": ["gopro hero 12"],
+        "antikeywords": ["case"],
+    }
+    config.price_checks.finish(
+        job_id, result={"count": 0, "excluded": 2, "unpriced": 0, "searched": {}}
+    )
+    done = client.get(f"{url}/{job_id}").json()
+    assert done["state"] == "done" and done["result"]["context"].startswith(
+        "<facebook_price_check>"
+    )
+    assert client.get(f"{url}/missing").status_code == 404
+    second = client.post(url, json=body, headers=headers).json()["job_id"]
+    assert client.delete(f"{url}/{second}").status_code == 403
+    assert client.delete(f"{url}/{second}", headers=headers).json()["state"] == "stopped"
 
-    def chat(system: str, messages: list[dict[str, str]], photos: list[bytes], limit: int) -> Any:
-        calls.append((system, messages, photos))
-        yield '{"search_phrases": ["iphone 13 pro"], '
-        yield '"max_price": 600, "notify": ["everyone"]}'
+
+def test_search_chat_streams_reply_then_validated_fields(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("", encoding="utf-8")
+    state = AuthState()
+    state.exposed = True
+    state.auth = AuthConfig("test", hash_password("synthetic-password"), "synthetic-secret")
+    config = WebUIConfig(config_files=[path])
+    client = TestClient(
+        create_app(config, state, ConfigFileService([path]), LogBroadcastHandler())
+    )
+    url = "/api/items/suggest"
+    messages = [{"role": "user", "content": "iphone 13 pro under 600"}]
+    body = {
+        "item": "phone",
+        "messages": messages,
+        "fields": {"max_price": "700"},
+        "web_search": False,
+    }
+    calls: list[Any] = []
+    backend = SimpleNamespace(
+        config=SimpleNamespace(name="mimo"), logger=Mock(), supports_web_search=lambda: False
+    )
+
+    def chat(
+        system: str,
+        messages: list[dict[str, str]],
+        photos: list[bytes],
+        limit: int,
+        **options: Any,
+    ) -> Any:
+        calls.append((system, messages, photos, options))
+        yield 'Done. <search>{"search_phrases": ["iphone 13 pro"], '
+        yield '"max_price": 600, "notify": ["everyone"]}</search>'
+
+    def events(reply: Any) -> list[dict[str, Any]]:
+        return [json.loads(line) for line in reply.text.splitlines()]
 
     backend.chat = chat
+    assert client.get(url).status_code == 401
     assert client.post(url, json=body).status_code == 401
     client.post("/api/login", data={"username": "test", "password": "synthetic-password"})
     assert client.post(url, json=body).status_code == 403
     headers = {CSRF_HEADER: client.cookies["aimm_csrf"]}
-    for invalid in ({}, {"request": " "}, {"request": "x" * 501}, {**body, "extra": 1}):
+    for invalid in (
+        {},
+        {**body, "extra": 1},
+        {**body, "messages": [{"role": "assistant", "content": "Hi"}]},
+        {**body, "fields": {"notify": ["everyone"]}},
+        {**body, "fields": {"description": "x" * 20_001}},
+        {**body, "web_search": "yes"},
+    ):
         assert client.post(url, json=invalid, headers=headers).status_code == 400
+    assert client.get(url).status_code == 503
     assert client.post(url, json=body, headers=headers).status_code == 503
     config.chat_backend = Mock(return_value=(backend, None))
-    reply = client.post(url, json=body, headers=headers)
-    assert reply.json() == {
-        "fields": {"search_phrases": ["iphone 13 pro"], "max_price": "600"},
+    assert client.get(url, params={"item": "phone"}).json() == {
         "backend": "mimo",
+        "web_search": False,
     }
-    config.chat_backend.assert_called_with("")
-    assert calls[-1][1] == [{"role": "user", "content": "iphone 13 pro under 600"}]
+    reply = client.post(url, json=body, headers=headers)
+    assert events(reply)[-1] == {
+        "fields": {"search_phrases": ["iphone 13 pro"], "max_price": "600"}
+    }
+    assert "".join(event.get("text", "") for event in events(reply)).startswith("Done.")
+    config.chat_backend.assert_called_with("phone")
+    system, sent, _photos, options = calls[-1]
+    assert sent == messages and options == {"web_search": False}
+    assert '{"max_price": "700"}' in system
+    assert client.post(url, json={**body, "web_search": True}, headers=headers).status_code == 400
 
-    backend.chat = Mock(return_value=iter(["I cannot help with that."]))
-    unusable = client.post(url, json=body, headers=headers)
-    assert unusable.status_code == 502 and "JSON" in unusable.json()["detail"]
+    backend.chat = Mock(return_value=iter(["Which storage size?"]))
+    assert events(client.post(url, json=body, headers=headers)) == [
+        {"text": "Which storage size?"}
+    ]
+    backend.chat = Mock(return_value=iter(["<search>{broken</search>"]))
+    assert events(client.post(url, json=body, headers=headers))[-1] == {
+        "warning": "No fields changed: the AI's suggested values could not be read."
+    }
     backend.chat = Mock(side_effect=NotImplementedError)
     assert client.post(url, json=body, headers=headers).status_code == 503
-    backend.chat = Mock(side_effect=RuntimeError("synthetic outage"))
-    failed = client.post(url, json=body, headers=headers)
-    assert failed.status_code == 502 and "outage" not in failed.json()["detail"]
+
+    def outage(*_args: Any, **_options: Any) -> Any:
+        yield "Partial"
+        raise RuntimeError("synthetic outage")
+
+    backend.chat = outage
+    failed = events(client.post(url, json=body, headers=headers))
+    assert failed[-1] == {"error": "mimo failed to answer. See the log."}

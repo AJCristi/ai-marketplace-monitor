@@ -35,15 +35,16 @@ test('notification form defaults include normalized shared values',()=>{
   assert.equal(app.fieldDefault(app.state.form,'global_rate_limit'),10);
 });
 
-test('AI search suggestion fills only empty item fields and saves them as TOML',()=>{
+test('AI search chat changes only differing search fields, marks them across turns and saves them as TOML',()=>{
   const app=consoleUnderTest();app.state.context={inherited:{}};app.state.content='';app.state.local={};app.state.config={};
   app.prepareForm('item','phone',true,{description:'My own words'});
   app.state.form.changes={max_price:'500',min_price:null};
-  const filledKeys=app.applySearchSuggestion({search_phrases:['iphone 13 pro'],description:'AI words',max_price:'600',min_price:'200',antikeywords:['case'],notify:['everyone'],keywords:[]});
-  assert.deepEqual([...filledKeys],['search_phrases','min_price','antikeywords']);
-  assert.deepEqual([...app.state.form.aiFilled],['search_phrases','min_price','antikeywords']);
+  const changedKeys=app.applySearchSuggestion({search_phrases:['iphone 13 pro'],description:'My own words',max_price:'600',antikeywords:['case'],notify:['everyone'],keywords:[]});
+  assert.deepEqual([...changedKeys],['search_phrases','max_price','antikeywords']);
+  app.applySearchSuggestion({min_price:'200'});
+  assert.deepEqual([...app.state.form.aiFilled],['search_phrases','max_price','antikeywords','min_price']);
   const item=parse(app.candidateFromForm().content).item.phone;
-  assert.deepEqual(item,{description:'My own words',max_price:'500',search_phrases:['iphone 13 pro'],min_price:'200',antikeywords:['case']});
+  assert.deepEqual(item,{description:'My own words',max_price:'600',search_phrases:['iphone 13 pro'],antikeywords:['case'],min_price:'200'});
 });
 
 test('one currency chip applies to every region city',()=>{

@@ -276,6 +276,7 @@ def main(
                             facebook_login=monitor.facebook_login_status,
                             rechecks=monitor.rechecks,
                             image_matcher=monitor.image_matcher,
+                            price_checks=monitor.price_checks,
                             chat_backend=monitor.chat_backend,
                             ai_test_backend=monitor.ai_test_backend,
                             saved_ai_config=monitor.saved_ai_config,

@@ -2,6 +2,7 @@ import initToml, {parse, edit} from './vendor/toml-edit-js/shims.js';
 import {FORM_SCHEMAS, BUILT_IN_REGIONS} from './fields.js';
 import {createMatchesView, relativeDate} from './matches.js';
 import {createAiTestView} from './ai-test.js';
+import {createSearchChatView} from './search-chat.js';
 import {aiProvider, aiUsageText, bindEndpointForm, endpointFieldHtml, endpointStatusHtml, listModels, resetEndpointForm} from './ai-endpoints.js';
 import {list, own, filled, mergeConfig, itemValue, marketplaceFor, scheduleLabel, CHANNELS, userChannels, resolvedUser, available, matchRecord, mergeRecords, searchActivity, searchStatusLabel, safeUrl, renameSection, esc} from './console-model.js';
 
@@ -17,7 +18,7 @@ const state = {
   connected:false, announceCount:0, disconnectedAt:null, following:true, pending:0, frozen:[], expanded:new Set(),
   credentials:null, credentialsId:0, monitorIssue:null, incidentId:0, loginId:0, loginUntil:0, facebookLogin:null, facebookLoginId:0, feedTimer:null, announceTimer:null, pollBusy:false,
 };
-let matchesView, aiTestView;
+let matchesView, aiTestView, searchChatView;
 const aiStatus = new Map();
 let theme=localStorage.getItem('aimm-theme')||'system';
 function applyTheme(){document.querySelectorAll('.c').forEach(el=>{el.classList.toggle('dark',theme==='dark');el.classList.toggle('light',theme==='light');});$('#theme').setAttribute('aria-label','Theme: '+theme);$('#theme').title='Theme: '+theme;}
@@ -597,13 +598,13 @@ function prepareForm(prefix,name,isNew = false,preset = {}) {
   state.form={prefix,name,new:isNew,fields:structuredClone(isNew?preset:local),changes:{},newName:name,returnRoute:isNew&&prefix==='item'?(state.newReturn||'#/monitor'):null};
   state.saved='';
 }
-function formHtml() {
+function sectionFormHtml() {
   const form=state.form;
   const nameHtml=form.prefix==='monitor'?'':`<div class="f"><label class="l" for="section-name">Name</label><div class="field"><input class="in mono" id="section-name" value="${esc(form.newName)}" style="max-width:320px"><p class="hint" id="section-hint">Saved as [${esc(form.prefix)}.${esc(form.newName)}]. Letters, numbers and underscores for new names.</p><p class="ferr" id="error-name" hidden></p></div></div>`;
   let content='';
   if (form.prefix==='item') {
     const included=itemGroups.flatMap(group=>group[1]).filter(key=>key!=='location');
-    content=itemGroups.map(([title,keys],index)=>`<section class="sect"><h2>${title}</h2>${index===0?nameHtml+(form.new?fillHtml():''):''}${fieldsHtml(keys)}${title==='AI rating'?'<p class="hint">Fit with your description. With no working AI, every listing that passes your filters meets the rating threshold.</p>':''}</section>`).join('');
+    content=itemGroups.map(([title,keys],index)=>`<section class="sect"><h2>${title}</h2>${index===0?nameHtml:''}${fieldsHtml(keys)}${title==='AI rating'?'<p class="hint">Fit with your description. With no working AI, every listing that passes your filters meets the rating threshold.</p>':''}</section>`).join('');
     const advanced=schemaFor('item').filter(field=>!included.includes(field.key)&&!['search_city','search_region','radius','currency'].includes(field.key));
     const count=advanced.filter(field=>own(form.fields,field.key)).length;
     content+=`<details><summary class="sm">Advanced options · ${count} customized</summary><div class="group-fields">${fieldsHtml(advanced.map(field=>field.key))}</div></details>`;
@@ -626,36 +627,32 @@ function formHtml() {
     // Status remains accessible even before expanding the optional settings.
     content+=fieldsHtml(['enabled']);
   } else content=nameHtml+fieldsHtml(schemaFor(form.prefix).map(field=>field.key));
-  return `<form id="section-form" class="form-content" autocomplete="off"><div class="body">${content}</div></form>${saveBarHtml()}`;
+  return `<form id="section-form" class="form-content" autocomplete="off"><div class="body">${content}</div></form>`;
+}
+function formHtml() {
+  if(state.form.prefix!=='item')return sectionFormHtml()+saveBarHtml();
+  return `<div class="form-chat">${sectionFormHtml()}<aside class="match-card search-chat" id="search-chat" aria-label="Set up with AI"></aside></div>${saveBarHtml()}`;
 }
 const SEARCH_SUGGESTION_KEYS=['search_phrases','description','keywords','antikeywords','category','condition','min_price','max_price'];
-function fillHtml() {
-  return `<div class="f"><label class="l" for="fill-request">Fill with AI</label><div class="field"><div class="row"><input class="in" id="fill-request" value="${esc(state.form.fillRequest||'')}" maxlength="500" placeholder="e.g. iphone 13 pro, good battery, under 600" style="flex:1"><button class="btn sm" id="fill-ai" type="button">Fill with AI</button></div><p class="hint" id="fill-status" role="status">Suggests search phrases, keywords and a description. Only empty fields are filled; review them before saving.</p></div></div>`;
-}
-async function fillWithAi() {
-  const form=state.form,request=$('#fill-request').value.trim(),status=$('#fill-status'),button=$('#fill-ai');
-  if(!request){status.textContent='Describe what you want to find first.';$('#fill-request').focus();return;}
-  form.fillRequest=request;button.disabled=true;button.textContent='Filling…';status.textContent='Asking the AI…';
-  try {
-    const data=await json('/api/items/suggest',{method:'POST',body:JSON.stringify({request})});
-    if(state.form!==form)return;
-    const filledKeys=applySearchSuggestion(data.fields);
-    $('#pane').innerHTML=pageHeader('New search')+formHtml();bindForm();renderSidebar();updateSaveBar();
-    const visible=itemGroups.flatMap(group=>group[1]);
-    if(filledKeys.some(key=>!visible.includes(key)))$('#section-form details').open=true;
-    $('#fill-status').textContent=filledKeys.length?`${data.backend} filled ${filledKeys.length} field${filledKeys.length===1?'':'s'}. Review them before saving.`:`${data.backend} had nothing to add to your filled fields.`;
-  } catch(error) {
-    if(state.form===form)status.textContent=error.message;
-  } finally {
-    button.disabled=false;button.textContent='Fill with AI';
-  }
+function searchChatFields() {
+  return Object.fromEntries(SEARCH_SUGGESTION_KEYS.map(key=>[key,formValue(key)]).filter(([,value])=>filled(value)));
 }
 function applySearchSuggestion(fields) {
   const form=state.form;
-  const filledKeys=Object.keys(fields||{}).filter(key=>SEARCH_SUGGESTION_KEYS.includes(key)&&filled(fields[key])&&!filled(own(form.changes,key)?form.changes[key]:form.fields[key]));
-  for(const key of filledKeys)setChange(key,fields[key]);
-  form.aiFilled=new Set(filledKeys);
-  return filledKeys;
+  const changedKeys=Object.keys(fields||{}).filter(key=>SEARCH_SUGGESTION_KEYS.includes(key)&&filled(fields[key])&&JSON.stringify(fields[key])!==JSON.stringify(formValue(key)));
+  for(const key of changedKeys)setChange(key,fields[key]);
+  form.aiFilled=new Set([...(form.aiFilled||[]),...changedKeys]);
+  return changedKeys;
+}
+function applySearchChatFields(fields) {
+  const changedKeys=applySearchSuggestion(fields);
+  if(!changedKeys.length)return [];
+  const template=document.createElement('template');template.innerHTML=sectionFormHtml();
+  $('#section-form').replaceWith(template.content.firstElementChild);bindForm();updateSaveBar();
+  const visible=itemGroups.flatMap(group=>group[1]);
+  if(changedKeys.some(key=>!visible.includes(key)))$('#section-form details').open=true;
+  const schema=schemaFor('item');
+  return changedKeys.map(key=>(schema.find(field=>field.key===key)?.label||key).replace(/\s*\(.*\)$/,''));
 }
 function mountForm(prefix,name,isNew = false,preset = {},standalone = true) {
   prepareForm(prefix,name,isNew,preset);
@@ -664,6 +661,8 @@ function mountForm(prefix,name,isNew = false,preset = {},standalone = true) {
   if(standalone)$('#pane').innerHTML=pageHeader(title,'',actions)+formHtml();
   else $('#settings-form-host').innerHTML=(actions?`<div class="bar">${actions}</div>`:'')+formHtml();
   bindForm();
+  const searchChatHost=$('#search-chat');
+  if(searchChatHost){searchChatView||=createSearchChatView({api,currentFields:searchChatFields,applyFields:applySearchChatFields});searchChatView.mount(searchChatHost,state.form);}
   $('#delete-section')?.addEventListener('click',()=>deleteSection(prefix,name));
   renderSidebar(); updateSaveBar();
 }
@@ -726,8 +725,6 @@ function bindForm() {
   });
   $('#user-smtp')?.addEventListener('click',()=>{if(excludeSharedChannels(['Email'])===false)return;toast('Shared email settings excluded. Fill in the SMTP fields for this user.');});
   $('#section-form').onsubmit=event=>{event.preventDefault();saveForm();};
-  $('#fill-ai')?.addEventListener('click',fillWithAi);
-  $('#fill-request')?.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();fillWithAi();}});
   for(const type of ['input','change'])$('#section-form').addEventListener(type,event=>{const field=event.target.closest?.('.ai-filled');if(field){field.classList.remove('ai-filled');state.form.aiFilled?.delete(field.dataset.field);}});
   $('#form-cancel').onclick=async()=>{if(dirty()&&!await confirmAction('Discard draft?','Unsaved changes will be lost.','Discard'))return;const prefix=state.form.prefix,name=state.form.name,returnRoute=state.form.returnRoute;state.content=state.base;state.form=null;state.error='';state.conflict=null;if(prefix==='item'){await navigate(returnRoute||itemRoute(name));}else{state.route='#'+routeParts().path;history.replaceState(null,'',state.route);refreshData();render();}};
 }
@@ -871,7 +868,7 @@ function renderConflict() {
       await loadConfig();state.conflict=null;host.remove();state.error='';state.saving=false;
       if(!state.form){render();return;}
       const form=state.form;form.fields=structuredClone(form.prefix==='monitor'?state.local.monitor||{}:state.local[form.prefix]?.[form.name]||{});
-      $('#section-form').outerHTML=formHtml().replace(saveBarHtml(),'');bindForm();updateSaveBar();toast('Current file loaded. Your field edits are kept; review and save again.');
+      $('#section-form').outerHTML=sectionFormHtml();bindForm();updateSaveBar();toast('Current file loaded. Your field edits are kept; review and save again.');
     }catch(error){state.saving=false;state.error=error.message;updateSaveBar();}
   };
   $('#overwrite-config').onclick=async()=>{

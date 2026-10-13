@@ -46,6 +46,7 @@ from ai_marketplace_monitor.matches import (
 )
 from ai_marketplace_monitor.monitor import MarketplaceMonitor
 from ai_marketplace_monitor.notification import NotificationStatus
+from ai_marketplace_monitor.price_check import PriceCheckQueue
 from ai_marketplace_monitor.recheck import RecheckQueue, facebook_listing_id, price_filter_reason
 from ai_marketplace_monitor.utils import CacheType, SleepStatus, doze
 from ai_marketplace_monitor.webui.auth import CSRF_HEADER, AuthConfig, hash_password
@@ -616,6 +617,7 @@ def make_monitor(match_cache: Cache, listing: Listing, monkeypatch: pytest.Monke
     monitor: Any = object.__new__(MarketplaceMonitor)
     monitor.photo_attempts = set()
     monitor.rechecks = RecheckQueue()
+    monitor.price_checks = PriceCheckQueue()
     monitor.logger = Mock()
     monitor.config = SimpleNamespace(
         item={
@@ -1245,6 +1247,7 @@ def test_due_search_precedes_background_work(
     monitor.requested_item_searches = set()
     monitor.requested_item_searches_lock = threading.Lock()
     monitor.rechecks = RecheckQueue()
+    monitor.price_checks = PriceCheckQueue()
     if work_kind == "recheck":
         monitor.rechecks.enqueue([{"marketplace": "facebook", "listing_id": "1"}], None, True)
     monitor.image_matcher = SimpleNamespace(
