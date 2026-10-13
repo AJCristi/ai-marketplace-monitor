@@ -27,6 +27,7 @@ Paths below are relative to `src/ai_marketplace_monitor/`.
 | Console | `webui/static/app.js`, `console-model.js`, `fields.js`, `index.html`, `app.css` | UI, event model, form schemas and defaults, layout and styling |
 | Log and export data | `webui/log_handler.py`, `webui/found_export.py` | Thread-to-event-loop log bridge, redacted records, cached-listing CSV serialization |
 | Matches library | `matches.py`, `match_store.py`, `photos.py`, `recheck.py`, `webui/static/matches.js`, `webui/static/chat.js` | Durable SQLite matches and WebP galleries, exact-ID sightings/history, shared personal state, and monitor-thread re-check jobs; see [Matches](../matches.md) |
+| Price checks | `price_check.py`, `facebook.py` (`search_result_listings`), `webui/static/search-chat.js` | Monitor-thread Facebook results-page price summaries for the search chat (`/api/items/price-check`) |
 | Image matching | `image_matching.py`, `webui/static/related.js` | Budgeted MiMo photo comparisons, monitor-thread jobs, saved connection evidence and reviews; settings live in `MonitorConfig` |
 
 ## Configuration is shared across layers

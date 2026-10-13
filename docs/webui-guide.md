@@ -154,6 +154,16 @@ ticked, the AI searches only when it cannot place the item itself. Your AI provi
 bills each search. MiMo needs a pay-as-you-go key and its Web Search plugin turned
 on in the MiMo console.
 
+**Check Facebook prices** searches Facebook Marketplace results pages for the form's
+first three search phrases in the search's first two cities (or the marketplace
+default), without price filters, and summarizes the asking prices. Listings whose
+titles match your anti-keywords are left out. The card shows the typical range (the
+middle half of prices), the median, the full range and a few example listings.
+**Use typical range** sets the minimum and maximum price; nothing else changes until
+you choose. The AI sees the results with your next chat message. The check uses the
+monitor's browser and waits for a running search; it takes up to about a minute.
+Unsaved location changes are not used.
+
 Saving validates the configuration. The monitor reloads it at its next safe point
 and may restart searches. A successful save is not a promise of immediate results
 or delivered alerts.

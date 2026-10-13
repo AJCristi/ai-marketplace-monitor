@@ -64,6 +64,7 @@ from ..matches import (
     update_state,
 )
 from ..photos import THUMBNAIL_CACHE_SIZE, thumbnail_webp
+from ..price_check import PriceCheckQueue, price_check_context
 from ..recheck import RecheckQueue, facebook_listing_id
 from ..utils import cache
 from .auth import (
@@ -155,6 +156,7 @@ class WebUIConfig:
     facebook_login: Callable[[], str | None] | None = None
     rechecks: RecheckQueue | None = None
     image_matcher: ImageMatcher | None = None
+    price_checks: PriceCheckQueue | None = None
     chat_backend: Callable[[str], tuple[AIBackend, Any]] | None = None
     ai_test_backend: Callable[[str, str], tuple[AIBackend, Any, Any]] | None = None
     saved_ai_config: Callable[[str], AIConfig | None] | None = None
@@ -909,6 +911,73 @@ def create_app(
                 yield json.dumps({"fields": suggestion}) + "\n"
 
         return StreamingResponse(reply(), media_type="application/x-ndjson")
+
+    def price_check_queue() -> PriceCheckQueue:
+        if config.price_checks is None:
+            raise HTTPException(
+                status_code=503, detail="The monitor is not available for price checks"
+            )
+        return config.price_checks
+
+    def price_check_job(job: Dict[str, Any]) -> Dict[str, Any]:
+        if job["result"] is not None:
+            job["result"]["context"] = price_check_context(job["result"])
+        return job
+
+    @app.post("/api/items/price-check")
+    def start_price_check(
+        body: Dict[str, Any], _: str = Depends(require_session), __: None = Depends(require_csrf)
+    ) -> Dict[str, Any]:
+        item, phrases, antikeywords = (
+            body.get("item"),
+            body.get("search_phrases"),
+            body.get("antikeywords"),
+        )
+
+        def terms(value: Any, minimum: int) -> TypeGuard[list[str]]:
+            return (
+                isinstance(value, list)
+                and minimum <= len(value) <= 50
+                and all(isinstance(term, str) and 0 < len(term.strip()) <= 200 for term in value)
+            )
+
+        if (
+            body.keys() != {"item", "search_phrases", "antikeywords"}
+            or not isinstance(item, str)
+            or len(item) > 200
+            or not terms(phrases, 1)
+            or not terms(antikeywords, 0)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Supply the search name, at least one search phrase, and anti-keywords",
+            )
+        try:
+            return price_check_queue().enqueue(
+                {
+                    "item": item,
+                    "search_phrases": [phrase.strip() for phrase in phrases],
+                    "antikeywords": antikeywords,
+                }
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from None
+
+    @app.get("/api/items/price-check/{job_id}")
+    def price_check_status(job_id: str, _: str = Depends(require_session)) -> Dict[str, Any]:
+        try:
+            return price_check_job(price_check_queue().get(job_id))
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Price check not found") from None
+
+    @app.delete("/api/items/price-check/{job_id}")
+    def stop_price_check(
+        job_id: str, _: str = Depends(require_session), __: None = Depends(require_csrf)
+    ) -> Dict[str, Any]:
+        try:
+            return price_check_job(price_check_queue().stop(job_id))
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Price check not found") from None
 
     @app.post("/api/ai/test")
     def test_ai_backend(

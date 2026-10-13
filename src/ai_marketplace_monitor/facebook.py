@@ -457,6 +457,17 @@ class FacebookMarketplace(Marketplace):
             if logged_in != self.logged_in:
                 self.report_login_status(logged_in)
 
+    def search_result_listings(
+        self: "FacebookMarketplace", phrase: str, city: str, radius: int | None
+    ) -> List[Listing]:
+        """One unfiltered results page, without opening listings, for price checks."""
+        if not self.page:
+            self.login()
+            assert self.page is not None
+        options = [f"query={quote(phrase)}", *([f"radius={radius}"] if radius else [])]
+        self.goto_url(f"https://www.facebook.com/marketplace/{city}/search?" + "&".join(options))
+        return FacebookSearchResultPage(self.page, self.translator, self.logger).get_listings()
+
     def _search_listings(
         self: "FacebookMarketplace",
         item_config: FacebookItemConfig,

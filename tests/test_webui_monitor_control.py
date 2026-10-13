@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ai_marketplace_monitor.monitor import MarketplaceMonitor
+from ai_marketplace_monitor.price_check import PriceCheckQueue
 from ai_marketplace_monitor.recheck import RecheckQueue
 from ai_marketplace_monitor.utils import SleepStatus
 from ai_marketplace_monitor.webui.auth import CSRF_HEADER, AuthConfig, hash_password
@@ -112,6 +113,7 @@ def test_request_runs_again_with_unchanged_config(
     monitor.requested_item_searches = set()
     monitor.requested_item_searches_lock = threading.Lock()
     monitor.rechecks = RecheckQueue()
+    monitor.price_checks = PriceCheckQueue()
     pending_image: list[bool] = []
     monitor.image_matcher = SimpleNamespace(
         automatic=False, queue=SimpleNamespace(pending=lambda: bool(pending_image))
@@ -340,6 +342,7 @@ def test_fixed_times_do_not_repeat_initial_search(monkeypatch: pytest.MonkeyPatc
     monitor.requested_item_searches = set()
     monitor.requested_item_searches_lock = threading.Lock()
     monitor.rechecks = RecheckQueue()
+    monitor.price_checks = PriceCheckQueue()
     monitor.image_matcher = SimpleNamespace(
         automatic=False, queue=SimpleNamespace(pending=lambda: False)
     )
@@ -384,6 +387,7 @@ def test_item_search_request_runs_only_that_search(monkeypatch: pytest.MonkeyPat
     monitor.requested_item_searches = set()
     monitor.requested_item_searches_lock = threading.Lock()
     monitor.rechecks = RecheckQueue()
+    monitor.price_checks = PriceCheckQueue()
     monitor.image_matcher = SimpleNamespace(
         automatic=False, queue=SimpleNamespace(pending=lambda: False)
     )
@@ -439,10 +443,60 @@ def test_cancel_drops_requested_item_searches() -> None:
     monitor.requested_item_searches = set()
     monitor.requested_item_searches_lock = threading.Lock()
     monitor.rechecks = RecheckQueue()
+    monitor.price_checks = PriceCheckQueue()
     monitor.request_item_search("bike")
     assert monitor.rechecks.wake.is_set()
     monitor.cancel_search()
     assert not monitor.run_requested_item_search()
+
+
+def test_price_check_endpoints_queue_one_check_and_report_its_summary(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("", encoding="utf-8")
+    state = AuthState()
+    state.exposed = True
+    state.auth = AuthConfig("test", hash_password("synthetic-password"), "synthetic-secret")
+    config = WebUIConfig(config_files=[path])
+    client = TestClient(
+        create_app(config, state, ConfigFileService([path]), LogBroadcastHandler())
+    )
+    url = "/api/items/price-check"
+    body = {"item": "gopro", "search_phrases": [" gopro hero 12 "], "antikeywords": ["case"]}
+    assert client.post(url, json=body).status_code == 401
+    client.post("/api/login", data={"username": "test", "password": "synthetic-password"})
+    headers = {CSRF_HEADER: client.cookies["aimm_csrf"]}
+    assert client.post(url, json=body).status_code == 403
+    assert client.post(url, json=body, headers=headers).status_code == 503
+    config.price_checks = PriceCheckQueue()
+    for invalid in (
+        {},
+        {**body, "extra": 1},
+        {**body, "search_phrases": []},
+        {**body, "search_phrases": [" "]},
+        {**body, "antikeywords": "case"},
+        {**body, "item": 3},
+    ):
+        assert client.post(url, json=invalid, headers=headers).status_code == 400
+    job = client.post(url, json=body, headers=headers).json()
+    assert job["state"] == "queued"
+    assert client.post(url, json=body, headers=headers).status_code == 409
+    job_id, request = config.price_checks.take() or ("", {})
+    assert request == {
+        "item": "gopro",
+        "search_phrases": ["gopro hero 12"],
+        "antikeywords": ["case"],
+    }
+    config.price_checks.finish(
+        job_id, result={"count": 0, "excluded": 2, "unpriced": 0, "searched": {}}
+    )
+    done = client.get(f"{url}/{job_id}").json()
+    assert done["state"] == "done" and done["result"]["context"].startswith(
+        "<facebook_price_check>"
+    )
+    assert client.get(f"{url}/missing").status_code == 404
+    second = client.post(url, json=body, headers=headers).json()["job_id"]
+    assert client.delete(f"{url}/{second}").status_code == 403
+    assert client.delete(f"{url}/{second}", headers=headers).json()["state"] == "stopped"
 
 
 def test_search_chat_streams_reply_then_validated_fields(tmp_path: Path) -> None:

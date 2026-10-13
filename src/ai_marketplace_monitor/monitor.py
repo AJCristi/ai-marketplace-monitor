@@ -49,6 +49,12 @@ from .matches import (
 )
 from .notification import NotificationStatus
 from .photos import archive_next_photo
+from .price_check import (
+    PRICE_CHECK_MAX_CITIES,
+    PRICE_CHECK_MAX_PHRASES,
+    PriceCheckQueue,
+    summarize_prices,
+)
 from .recheck import RecheckQueue, price_filter_reason
 from .user import User
 from .utils import (
@@ -103,6 +109,8 @@ class MarketplaceMonitor:
         self.rechecks = RecheckQueue()
         self.image_matcher = ImageMatcher(cache)
         self.image_matcher.queue.wake = self.rechecks.wake
+        self.price_checks = PriceCheckQueue()
+        self.price_checks.wake = self.rechecks.wake
         self.recheck_after = 0.0
         self.photo_attempts: set[tuple[str, str, str]] = set()
 
@@ -799,7 +807,14 @@ class MarketplaceMonitor:
                         "No search job is defined. Please add search items to your config file."
                     )
                 self.handle_pause()
-                if doze(60, self.config_files, self.keyboard_monitor) == SleepStatus.BY_KEYBOARD:
+                self.rechecks.wake.clear()
+                if self.price_checks.pending():
+                    self.process_price_check()
+                    continue
+                if (
+                    doze(60, self.config_files, self.keyboard_monitor, self.rechecks.wake)
+                    == SleepStatus.BY_KEYBOARD
+                ):
                     self.keyboard_monitor.set_paused(True)
                 continue
             # run all jobs at the first time, then on their own schedule
@@ -845,6 +860,9 @@ class MarketplaceMonitor:
                 if self.run_requested_item_search():
                     self.handle_pause()
                     continue
+                if self.price_checks.pending():
+                    self.process_price_check()
+                    continue
                 if self.rechecks.pending() and time.monotonic() >= self.recheck_after:
                     # A due search always runs first. Execute one listing, then check
                     # the schedule and configuration again before taking another.
@@ -868,7 +886,11 @@ class MarketplaceMonitor:
                 if self.process_photo():
                     continue
                 self.rechecks.wake.clear()
-                if self.image_matcher.queue.pending() or self.requested_item_searches:
+                if (
+                    self.image_matcher.queue.pending()
+                    or self.requested_item_searches
+                    or self.price_checks.pending()
+                ):
                     # A manual request can arrive between the earlier check and clear.
                     idle_seconds = min(idle_seconds, 1)
                 if self.rechecks.pending():
@@ -930,6 +952,59 @@ class MarketplaceMonitor:
         self.photo_attempts = {
             key for key in self.photo_attempts if key[:2] != (marketplace, listing_id)
         }
+
+    def process_price_check(self) -> None:
+        """Summarize asking prices from Facebook results pages, on the monitor thread."""
+        work = self.price_checks.take()
+        if work is None:
+            return
+        job_id, request = work
+        try:
+            assert self.config is not None
+            item_config = self.config.item.get(request["item"])
+            market_name = (item_config.marketplace if item_config else None) or next(
+                iter(self.config.marketplace), ""
+            )
+            marketplace_config = self.config.marketplace.get(market_name)
+            marketplace = self.active_marketplaces.get(market_name)
+            if (
+                marketplace_config is None
+                or marketplace is None
+                or (marketplace_config.market_type or "facebook") != "facebook"
+            ):
+                raise ValueError("Facebook Marketplace is not active")
+            source = item_config if item_config and item_config.search_city else marketplace_config
+            radiuses, names = source.radius or [], source.city_name or []
+            cities = [
+                (
+                    city,
+                    radiuses[index] if index < len(radiuses) else None,
+                    (names[index] if index < len(names) else None) or city,
+                )
+                for index, city in enumerate(source.search_city or [])
+            ][:PRICE_CHECK_MAX_CITIES]
+            if not cities:
+                raise ValueError("No search city is configured")
+            phrases = request["search_phrases"][:PRICE_CHECK_MAX_PHRASES]
+            listings: List[Listing] = []
+            for phrase in phrases:
+                for city, radius, _name in cities:
+                    if self.price_checks.stopped(job_id):
+                        return
+                    if listings:
+                        time.sleep(random.uniform(2, 4))
+                    listings += marketplace.search_result_listings(phrase, city, radius)
+            result = summarize_prices(listings, request["antikeywords"])
+            result["searched"] = {"phrases": phrases, "cities": [name for *_, name in cities]}
+            self.price_checks.finish(job_id, result=result)
+        except Exception as error:
+            if self.logger:
+                self.logger.error(f"""{hilight("[Price check]", "fail")} {error}""")
+            self.price_checks.finish(
+                job_id,
+                error=f"Could not check prices ({type(error).__name__}). "
+                "Check the monitor activity and browser login.",
+            )
 
     def process_recheck(self) -> None:
         """Execute at most one queued listing, on the synchronous monitor thread."""
